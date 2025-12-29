@@ -11,6 +11,7 @@ from core.types import (
     GenerateMessage,
     Granularity,
     OracleOutput,
+    RenderStatus,
     RollbackScope,
     StopReason,
     TraceEvent,
@@ -111,8 +112,21 @@ def run_dtv_loop(
         stop_reason = result.stop_reason
 
         granularity = policy.choose_granularity(stop_reason)
-        artifact = renderer.try_render(state.prefix, granularity)
-        if artifact is None:
+        render_result = renderer.try_render(state.prefix, granularity)
+        if render_result.status == RenderStatus.CONTINUE:
+            trace.append(
+                TraceEvent(
+                    step=state.step,
+                    stop_reason=stop_reason,
+                    action=Action.CONTINUE,
+                    granularity=granularity,
+                    budget_snapshot=budget.snapshot(),
+                    notes=render_result.notes,
+                )
+            )
+            state.step += 1
+            continue
+        if render_result.status == RenderStatus.FAIL:
             retries = rollback_manager.record_retry(f"render_fail:{granularity.value}")
             action = policy.on_render_fail(stop_reason, retries)
             if action == Action.ROLLBACK:
@@ -124,7 +138,22 @@ def run_dtv_loop(
                     action=action,
                     granularity=granularity,
                     budget_snapshot=budget.snapshot(),
-                    notes="render failed",
+                    notes=render_result.notes or "render failed",
+                )
+            )
+            state.step += 1
+            continue
+
+        artifact = render_result.artifact
+        if artifact is None:
+            trace.append(
+                TraceEvent(
+                    step=state.step,
+                    stop_reason=stop_reason,
+                    action=Action.CONTINUE,
+                    granularity=granularity,
+                    budget_snapshot=budget.snapshot(),
+                    notes="render ok without artifact",
                 )
             )
             state.step += 1

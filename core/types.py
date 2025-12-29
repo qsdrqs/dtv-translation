@@ -20,6 +20,19 @@ class Artifact:
     group_events: tuple[GroupEvent, ...] = ()
 
 
+class RenderStatus(str, Enum):
+    OK = "ok"
+    CONTINUE = "continue"
+    FAIL = "fail"
+
+
+@dataclass(frozen=True)
+class RenderResult:
+    status: RenderStatus
+    artifact: Artifact | None = None
+    notes: str = ""
+
+
 @dataclass(frozen=True)
 class StopReason:
     kind: str

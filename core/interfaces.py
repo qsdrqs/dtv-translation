@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from core.types import Artifact, ControllerState, GenerateContext, GenerateResult, Granularity, OracleOutput
+from core.types import (
+    Artifact,
+    ControllerState,
+    GenerateContext,
+    GenerateResult,
+    Granularity,
+    OracleOutput,
+    RenderResult,
+)
 
 
 class Generator(Protocol):
@@ -11,7 +19,7 @@ class Generator(Protocol):
 
 
 class Renderer(Protocol):
-    def try_render(self, prefix: str, granularity: Granularity) -> Artifact | None:
+    def try_render(self, prefix: str, granularity: Granularity) -> RenderResult:
         ...
 
 

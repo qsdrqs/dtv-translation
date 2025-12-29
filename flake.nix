@@ -18,6 +18,7 @@
             python3
             rustup
             uv
+            tree-sitter
           ];
           shellHook = ''
           '';

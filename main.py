@@ -4,14 +4,17 @@ from controller.adapters import GeneratorAdapter
 from controller.loop import run_dtv_loop
 from controller.stop_criteria import DTVStoppingCriteria, RUST_PROFILE
 from core.budget import Budget
-from core.types import Artifact, Granularity
+from core.types import Artifact, Granularity, RenderResult, RenderStatus
 from feedback.feedback import FeedbackState
 from rollback.manager import RollbackManager
 
 
 class DummyRenderer:
     def try_render(self, prefix, granularity):
-        return Artifact(code=prefix, granularity=granularity or Granularity.STMT)
+        return RenderResult(
+            status=RenderStatus.OK,
+            artifact=Artifact(code=prefix, granularity=granularity or Granularity.STMT),
+        )
 
 
 def main() -> None:
