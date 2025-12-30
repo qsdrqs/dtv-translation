@@ -147,3 +147,31 @@ fn foo(a: i32) -> i32 {
     print(result.artifact.code)
     compile = compile_rust(result.artifact.code)
     assert compile.ok, compile.stderr
+    
+
+def test_if_else_head_before_closing_brace_head() -> None:
+    prefix = """\
+fn foo() -> i32 {
+    let a = 1;
+    if a == 0 {
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    print(result.artifact.code)
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+def test_if_else_head_before_closing_brace_head2() -> None:
+    prefix = """\
+fn foo() -> i32 {
+    let a = 1;
+    if a == 0 {
+        return "str here";
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    print(result.artifact.code)
+    compile = compile_rust(result.artifact.code)
+    assert not compile.ok # should not compile due to type error

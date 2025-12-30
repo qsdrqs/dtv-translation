@@ -36,6 +36,8 @@ class FunctionContext:
     in_function: bool = False
     returns_value: bool = False
     body_start: int | None = None
+    tail_needs_todo: bool = False
+    tail_needs_semicolon: bool = False
 
 
 @dataclass(frozen=True)
@@ -387,9 +389,46 @@ class FunctionContextRule(ContextRule):
                 in_function = False
                 body_start = None
             header = prefix_bytes[node.start_byte:header_end]
+            tail_needs_todo = False
+            tail_needs_semicolon = False
+            if body is not None:
+                tail_node = body.named_children[-1] if body.named_children else None
+                if tail_node is None:
+                    tail_needs_todo = True
+                elif tail_node.type == "return_expression":
+                    tail_needs_todo = False
+                elif tail_node.type == "expression_statement":
+                    expr = tail_node.named_children[0] if tail_node.named_children else None
+                    if expr is None:
+                        tail_needs_todo = True
+                        tail_needs_semicolon = True
+                    elif expr.type == "if_expression":
+                        if has_else_clause(expr):
+                            tail_needs_todo = False
+                        else:
+                            tail_needs_todo = True
+                            tail_needs_semicolon = True
+                    elif expr.type in {"while_expression", "for_expression"}:
+                        tail_needs_todo = True
+                        tail_needs_semicolon = True
+                    elif expr.type == "return_expression":
+                        tail_needs_todo = False
+                    else:
+                        tail_needs_todo = False
+                elif tail_node.type in {"let_declaration", "let_statement", "empty_statement"}:
+                    tail_needs_todo = True
+                elif tail_node.type.endswith("_item") or tail_node.type == "ERROR":
+                    tail_needs_todo = True
+                    tail_needs_semicolon = tail_node.type == "ERROR"
             registry.add(
                 self.key,
-                FunctionContext(in_function=in_function, returns_value=b"->" in header, body_start=body_start),
+                FunctionContext(
+                    in_function=in_function,
+                    returns_value=b"->" in header,
+                    body_start=body_start,
+                    tail_needs_todo=tail_needs_todo,
+                    tail_needs_semicolon=tail_needs_semicolon,
+                ),
             )
 
     def apply_patch(self, plan: PatchPlan, analysis: Analysis) -> None:
@@ -403,9 +442,11 @@ class FunctionContextRule(ContextRule):
         # NOTE: We only add a tail expression when the function has an
         # explicit return type. If we later decide to always add a tail
         # `todo!()` even for unit-returning functions, change this rule.
-        if plan.tail_text.rstrip().endswith(";"):
-            plan.insert_before(target.body_start, "todo!()", fallback=plan.brace_count - 1)
-            plan.notes.append("render_patch:fn_tail")
+        if not target.tail_needs_todo:
+            return
+        text = "; todo!()" if target.tail_needs_semicolon else "todo!()"
+        plan.insert_before(target.body_start, text, fallback=plan.brace_count - 1)
+        plan.notes.append("render_patch:fn_tail")
 
 
 CONTEXT_RULES: tuple[ContextRule, ...] = (
