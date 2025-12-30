@@ -3,6 +3,7 @@ from dataclasses import dataclass
 
 from core.budget import Budget
 from core.interfaces import Generator, Oracle, OracleRunner, Renderer
+from core.logger import get_logger
 from core.types import (
     Action,
     Artifact,
@@ -14,11 +15,26 @@ from core.types import (
     RenderStatus,
     RollbackScope,
     StopReason,
+    Verdict,
     TraceEvent,
 )
 from feedback.strategies import AppendToLastAssistant, FeedbackStrategy
 from feedback.feedback import FeedbackState
 from rollback.manager import RollbackManager
+
+logger = get_logger(__name__)
+
+
+_GRANULARITY_ORDER = {
+    Granularity.STMT: 0,
+    Granularity.BLOCK: 1,
+    Granularity.FUNC: 2,
+    Granularity.PROGRAM: 3,
+}
+
+
+def _granularity_at_least(actual: Granularity, required: Granularity) -> bool:
+    return _GRANULARITY_ORDER[actual] >= _GRANULARITY_ORDER[required]
 
 
 @dataclass
@@ -33,7 +49,11 @@ class Policy:
 
     def select_oracles(self, artifact: Artifact, budget: Budget, available: list[Oracle]) -> list[Oracle]:
         # TODO: consider required_granularity and per-oracle budgets.
-        return [o for o in available if o.required_granularity == artifact.granularity]
+        return [
+            o
+            for o in available
+            if _granularity_at_least(artifact.granularity, o.required_granularity)
+        ]
 
     def act(
         self,
@@ -41,10 +61,20 @@ class Policy:
         budget: Budget,
         rollback: RollbackManager,
     ) -> Action:
-        if outputs and all(out.passed for out in outputs):
+        if outputs and all(out.verdict == Verdict.PASS for out in outputs):
             return Action.COMMIT
-        if outputs and any(not out.passed for out in outputs):
+        if outputs and any(out.verdict == Verdict.FAIL for out in outputs):
             return Action.ROLLBACK
+        if outputs and any(out.verdict == Verdict.NOT_APPLICABLE for out in outputs):
+            na_outputs = [out for out in outputs if out.verdict == Verdict.NOT_APPLICABLE]
+            first_diag = next((d for out in na_outputs for d in out.diagnostics), None)
+            logger.warning(
+                "Received NOT_APPLICABLE verdict; continuing. oracles=%s diag_count=%s first=%s",
+                [out.oracle_name for out in na_outputs],
+                sum(len(out.diagnostics) for out in na_outputs),
+                (f"{first_diag.error_code or ''} {first_diag.message}".strip() if first_diag else ""),
+            )
+            return Action.CONTINUE
         return Action.COMMIT # Default to commit if no oracles were run.
 
 

@@ -24,6 +24,7 @@ class Renderer(Protocol):
 
 
 class Oracle(Protocol):
+    """Deterministic verifier; raise on tool/infra failures instead of returning a verdict."""
     name: str
     required_granularity: Granularity
 

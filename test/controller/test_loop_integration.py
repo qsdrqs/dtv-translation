@@ -1,0 +1,155 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from c_rust.oracles import RustcOracle
+from c_rust.render import CRustRenderer
+from controller.loop import run_dtv_loop
+from core.budget import Budget
+from core.types import (
+    Action,
+    Artifact,
+    GenerateContext,
+    GenerateResult,
+    Granularity,
+    RenderResult,
+    RenderStatus,
+    StopReason,
+    Verdict,
+)
+from feedback.feedback import FeedbackState
+from rollback.manager import RollbackManager
+from test.c_rust.utils import _rustc_path
+
+
+@dataclass(frozen=True)
+class _FakeGenerator:
+    code: str
+
+    def generate_step(self, context: GenerateContext) -> GenerateResult:
+        return GenerateResult(
+            delta_text=self.code,
+            delta_tokens=1,
+            stop_reason=StopReason(kind="boundary"),
+        )
+
+
+class _DummyRenderer:
+    def try_render(self, prefix: str, granularity: Granularity) -> RenderResult:
+        artifact = Artifact(code=prefix, granularity=granularity)
+        return RenderResult(status=RenderStatus.OK, artifact=artifact)
+
+
+class _SequenceGenerator:
+    def __init__(self, steps: list[str]) -> None:
+        self.steps = steps
+        self.idx = 0
+
+    def generate_step(self, context: GenerateContext) -> GenerateResult:
+        if self.idx >= len(self.steps):
+            return GenerateResult(
+                delta_text="",
+                delta_tokens=0,
+                stop_reason=StopReason(kind="empty"),
+            )
+        delta = self.steps[self.idx]
+        self.idx += 1
+        return GenerateResult(
+            delta_text=delta,
+            delta_tokens=1,
+            stop_reason=StopReason(kind="boundary"),
+        )
+
+
+def test_loop_commits_with_rustc_oracle() -> None:
+    _rustc_path()
+    code = "fn foo() -> i32 { 1 }\n"
+    generator = _FakeGenerator(code=code)
+    renderer = _DummyRenderer()
+    oracles = [RustcOracle(timeout_s=5.0)]
+    budget = Budget(gen_tokens_budget=4)
+    feedback_state = FeedbackState()
+    rollback_manager = RollbackManager()
+
+    _, trace = run_dtv_loop(
+        generator=generator,
+        renderer=renderer,
+        oracles=oracles,
+        budget=budget,
+        feedback_state=feedback_state,
+        rollback_manager=rollback_manager,
+        max_steps=1,
+    )
+
+    assert trace
+    assert trace[-1].action == Action.COMMIT
+    assert any(
+        output.oracle_name == "rustc" and output.verdict == Verdict.PASS
+        for output in trace[-1].oracle_outputs
+    )
+    assert budget.oracle_calls.get("rustc") == 1
+    assert len(rollback_manager.stmt_checkpoints) == 1
+
+
+def test_loop_rolls_back_when_rustc_fail() -> None:
+    _rustc_path()
+    code = "fn foo() { let x = ; }\n"
+    generator = _FakeGenerator(code=code)
+    renderer = _DummyRenderer()
+    oracles = [RustcOracle(timeout_s=5.0)]
+    budget = Budget(gen_tokens_budget=4)
+    feedback_state = FeedbackState()
+    rollback_manager = RollbackManager()
+
+    final_prefix, trace = run_dtv_loop(
+        generator=generator,
+        renderer=renderer,
+        oracles=oracles,
+        budget=budget,
+        feedback_state=feedback_state,
+        rollback_manager=rollback_manager,
+        max_steps=1,
+    )
+
+    assert trace
+    assert trace[-1].action == Action.ROLLBACK
+    assert any(
+        output.oracle_name == "rustc" and output.verdict == Verdict.FAIL
+        for output in trace[-1].oracle_outputs
+    )
+    assert final_prefix == ""
+
+
+def test_loop_rolls_back_to_previous_checkpoint() -> None:
+    _rustc_path()
+    step1 = """\
+fn foo() -> i32 {
+  let a = 1;
+  if a == 0 {
+    let b = 2;
+"""
+    step2 = """\
+    return "str here";
+"""
+    generator = _SequenceGenerator([step1, step2])
+    renderer = CRustRenderer()
+    oracles = [RustcOracle(timeout_s=5.0)]
+    budget = Budget(gen_tokens_budget=4)
+    feedback_state = FeedbackState()
+    rollback_manager = RollbackManager()
+
+    final_prefix, trace = run_dtv_loop(
+        generator=generator,
+        renderer=renderer,
+        oracles=oracles,
+        budget=budget,
+        feedback_state=feedback_state,
+        rollback_manager=rollback_manager,
+        max_steps=2,
+    )
+
+    assert trace
+    assert trace[0].action == Action.COMMIT
+    assert trace[-1].action == Action.ROLLBACK
+    assert final_prefix == step1
+    assert len(rollback_manager.stmt_checkpoints) == 1

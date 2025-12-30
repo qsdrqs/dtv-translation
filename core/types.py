@@ -39,6 +39,12 @@ class StopReason:
     detail: str = ""
 
 
+class Verdict(str, Enum):
+    PASS = "pass"
+    FAIL = "fail"
+    NOT_APPLICABLE = "not_applicable"
+
+
 class GroupEventAction(str, Enum):
     OPEN = "open"
     CLOSE = "close"
@@ -75,13 +81,16 @@ class GenerateResult:
 class Diagnostic:
     message: str
     severity: str = "error"
+    # TODO: decide canonical span representation (byte offsets vs line/col).
     span: tuple[int, int] | None = None
+    error_code: str | None = None
+    hint_scope: RollbackScope | None = None
 
 
 @dataclass(frozen=True)
 class OracleOutput:
     oracle_name: str
-    passed: bool
+    verdict: Verdict
     diagnostics: tuple[Diagnostic, ...] = ()
     realized_cost: int = 0
 
