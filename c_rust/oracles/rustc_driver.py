@@ -57,9 +57,11 @@ class RustcDriver:
             raise RuntimeError(f"rustc not found: {self.rustc_path}") from exc
         except subprocess.TimeoutExpired as exc:
             elapsed_ms = int((time.monotonic() - start) * 1000)
+            stdout_str: str = exc.stdout.decode("utf-8") if isinstance(exc.stdout, bytes) else (str(exc.stdout) if exc.stdout else "")
+            stderr_str: str = exc.stderr.decode("utf-8") if isinstance(exc.stderr, bytes) else (str(exc.stderr) if exc.stderr else "")
             return RustcResult(
-                stdout=exc.stdout or "",
-                stderr=exc.stderr or "",
+                stdout=stdout_str,
+                stderr=stderr_str,
                 exit_code=124,
                 elapsed_ms=elapsed_ms,
                 command=cmd,

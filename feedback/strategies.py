@@ -42,7 +42,7 @@ class AppendToLastAssistant:
             (
                 idx
                 for idx in range(len(normalized) - 1, -1, -1)
-                if isinstance(normalized[idx], GenerateMessage) and normalized[idx].role == "assistant"
+                if isinstance(normalized[idx], GenerateMessage) and normalized[idx].role == "assistant"  # type: ignore[union-attr]
             ),
             None,
         )

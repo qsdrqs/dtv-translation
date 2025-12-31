@@ -1,4 +1,5 @@
 from __future__ import annotations
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from core.budget import Budget
@@ -47,7 +48,7 @@ class Policy:
             return Action.ROLLBACK
         return Action.CONTINUE
 
-    def select_oracles(self, artifact: Artifact, budget: Budget, available: list[Oracle]) -> list[Oracle]:
+    def select_oracles(self, artifact: Artifact, budget: Budget, available: Sequence[Oracle]) -> list[Oracle]:
         # TODO: consider required_granularity and per-oracle budgets.
         return [
             o
@@ -99,7 +100,7 @@ def update_last_assistant(messages: list[GenerateMessage], content: str) -> None
 def run_dtv_loop(
     generator: Generator,
     renderer: Renderer,
-    oracles: list[Oracle],
+    oracles: Sequence[Oracle],
     budget: Budget,
     feedback_state: FeedbackState,
     rollback_manager: RollbackManager,

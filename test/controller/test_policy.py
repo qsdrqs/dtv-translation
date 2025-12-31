@@ -7,7 +7,7 @@ from core.budget import Budget
 from core.types import Artifact, ControllerState, Granularity, OracleOutput
 
 
-@dataclass(frozen=True)
+@dataclass
 class _FakeOracle:
     name: str
     required_granularity: Granularity

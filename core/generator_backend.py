@@ -83,6 +83,8 @@ class GeneratorBackend:
         return "\n".join(parts)
 
     def _get_eos_token_ids(self) -> set[int]:
+        if self.model.generation_config is None:
+            raise RuntimeError(f"Model {self.model_name} has no generation_config")
         eos_ids = self.model.generation_config.eos_token_id
         if eos_ids is None:
             eos_ids = self.tokenizer.eos_token_id

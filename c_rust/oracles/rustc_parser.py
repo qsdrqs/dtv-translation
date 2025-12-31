@@ -23,7 +23,7 @@ def parse_rustc_diagnostics(result: RustcResult) -> tuple[Diagnostic, ...]:
             diagnostic = _parse_json_line(stripped)
             if diagnostic is _NON_DIAGNOSTIC_JSON:
                 continue
-            if diagnostic is not None:
+            if diagnostic is not None and isinstance(diagnostic, Diagnostic):
                 diagnostics.append(diagnostic)
             else:
                 fallback_lines.append(stripped)
