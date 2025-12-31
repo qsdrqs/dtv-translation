@@ -11,7 +11,8 @@ from core.types import Artifact, Granularity, RenderResult, RenderStatus
 
 @dataclass(frozen=True)
 class RenderConfig:
-    allow_continue_on_error: bool = True
+    """Configuration for the C to Rust renderer."""
+    allow_continue_on_error: bool = True  # Continue instead of failing on errors.
 
 
 class CRustRenderer:

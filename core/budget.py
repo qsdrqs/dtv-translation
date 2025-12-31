@@ -5,10 +5,11 @@ from dataclasses import dataclass, field
 
 @dataclass
 class Budget:
+    """Tracks token and oracle spend during decoding."""
     gen_tokens_budget: int
     gen_tokens_used: int = 0
-    oracle_calls: dict[str, int] = field(default_factory=dict)
-    oracle_budget: dict[str, int] = field(default_factory=dict)
+    oracle_calls: dict[str, int] = field(default_factory=dict)  # Per-oracle call counts.
+    oracle_budget: dict[str, int] = field(default_factory=dict)  # Per-oracle cumulative cost.
 
     def can_spend_tokens(self, amount: int) -> bool:
         return self.gen_tokens_used + amount <= self.gen_tokens_budget

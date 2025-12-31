@@ -135,7 +135,7 @@ fn foo() {
     assert result.artifact is not None
     compile = compile_rust(result.artifact.code)
     assert compile.ok, compile.stderr
-    
+
 def test_if_else_head_before_semicolon_head() -> None:
     prefix = """\
 fn foo(a: i32) -> i32 {
@@ -147,7 +147,7 @@ fn foo(a: i32) -> i32 {
     print(result.artifact.code)
     compile = compile_rust(result.artifact.code)
     assert compile.ok, compile.stderr
-    
+
 
 def test_if_else_head_before_closing_brace_head() -> None:
     prefix = """\

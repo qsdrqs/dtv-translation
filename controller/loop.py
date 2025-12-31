@@ -40,6 +40,7 @@ def _granularity_at_least(actual: Granularity, required: Granularity) -> bool:
 
 @dataclass
 class Policy:
+    """Default policy for granularity selection and actions."""
     def choose_granularity(self, stop_reason: StopReason) -> Granularity:
         return Granularity.STMT
 

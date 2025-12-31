@@ -7,9 +7,10 @@ from transformers import StoppingCriteria
 
 @dataclass(frozen=True)
 class LanguageProfile:
+    """Delimiters used to identify strings and comments for a language."""
     line_comment_starts: tuple[str, ...]
     block_comment_pairs: tuple[tuple[str, str], ...]
-    string_delims: tuple[str, ...]
+    string_delims: tuple[str, ...]  # Quote characters treated as string delimiters.
 
 
 RUST_PROFILE = LanguageProfile(

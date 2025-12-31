@@ -8,21 +8,24 @@ from core.types import Granularity, GroupEvent, GroupEventAction, RollbackScope
 
 @dataclass
 class Checkpoint:
+    """Snapshot of the prefix after a committed statement."""
     prefix: str
 
 
 @dataclass(frozen=True)
 class GroupFrame:
+    """Active block/function group with its starting statement index."""
     kind: Granularity
-    start_stmt: int
+    start_stmt: int  # Index into stmt_checkpoints at group open.
 
 
 @dataclass
 class RollbackManager:
+    """Tracks checkpoints and rollback scopes for decoding."""
     stmt_checkpoints: list[Checkpoint] = field(default_factory=list)
     # TODO: consider implicit root function/block; decide when renderer should open root groups.
-    group_stack: list[GroupFrame] = field(default_factory=list)
-    retry_counters: dict[str, int] = field(default_factory=dict)
+    group_stack: list[GroupFrame] = field(default_factory=list)  # Open group frames in nesting order.
+    retry_counters: dict[str, int] = field(default_factory=dict)  # Per-key retry counts.
     max_stmt_retries: int = 3
     max_block_retries: int = 2
 

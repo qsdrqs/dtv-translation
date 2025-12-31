@@ -13,39 +13,43 @@ class PatchPhase(str, Enum):
 
 @dataclass(frozen=True)
 class IfContext:
+    """Analysis hints for an enclosing if-expression."""
     in_expression: bool = False
-    missing_else: bool = False
+    missing_else: bool = False  # True if an else branch is required.
     in_consequence: bool = False
     in_alternative: bool = False
-    in_value_context: bool = False
-    consequence_start: int | None = None
-    consequence_end: int | None = None
-    alternative_start: int | None = None
+    in_value_context: bool = False  # True if the if-expression must yield a value.
+    consequence_start: int | None = None  # Byte offset of consequence start.
+    consequence_end: int | None = None  # Byte offset of consequence end.
+    alternative_start: int | None = None  # Byte offset of alternative start.
 
 
 @dataclass(frozen=True)
 class LetContext:
+    """Analysis hints for a let binding."""
     in_initializer: bool = False
     has_semicolon: bool = False
-    value_block_start: int | None = None
-    value_end: int | None = None
+    value_block_start: int | None = None  # Byte offset of initializer block start.
+    value_end: int | None = None  # Byte offset of initializer end.
 
 
 @dataclass(frozen=True)
 class FunctionContext:
+    """Analysis hints for an enclosing function."""
     in_function: bool = False
     returns_value: bool = False
-    body_start: int | None = None
-    tail_needs_todo: bool = False
-    tail_needs_semicolon: bool = False
+    body_start: int | None = None  # Byte offset of function body start.
+    tail_needs_todo: bool = False  # Insert todo!() to satisfy return type.
+    tail_needs_semicolon: bool = False  # Ensure trailing semicolon for statements.
 
 
 @dataclass(frozen=True)
 class Analysis:
+    """Parsed context info used by patch rules."""
     ok: bool
     notes: str = ""
-    end_byte: int = 0
-    contexts: dict[str, tuple[object, ...]] = field(default_factory=dict)
+    end_byte: int = 0  # Byte offset of cursor at end of prefix.
+    contexts: dict[str, tuple[object, ...]] = field(default_factory=dict)  # Rule key -> contexts.
 
     def get(self, key: str) -> tuple[object, ...]:
         return self.contexts.get(key, ())
@@ -53,11 +57,12 @@ class Analysis:
 
 @dataclass
 class Scaffold:
+    """Editable scaffold for generating suffix text."""
     closers: tuple[str, ...]
-    head_expr: list[str] = field(default_factory=list)
-    head_stmt: list[str] = field(default_factory=list)
-    before: dict[int, list[str]] = field(default_factory=dict)
-    after: dict[int, list[str]] = field(default_factory=dict)
+    head_expr: list[str] = field(default_factory=list)  # Prefix additions in expression context.
+    head_stmt: list[str] = field(default_factory=list)  # Prefix additions in statement context.
+    before: dict[int, list[str]] = field(default_factory=dict)  # Close-idx -> text before closer.
+    after: dict[int, list[str]] = field(default_factory=dict)  # Close-idx -> text after closer.
 
     def _normalize(self, text: str, *, raw: bool = False) -> str:
         if raw or not text:
@@ -96,13 +101,14 @@ class Scaffold:
 
 @dataclass
 class PatchPlan:
+    """Mutable plan that accumulates patch operations."""
     prefix: str
     scaffold: Scaffold
-    brace_index: dict[int, int]
-    brace_order_to_close_idx: dict[int, int]
-    tail_text: str
-    tail_markers: list[str] = field(default_factory=list)
-    notes: list[str] = field(default_factory=list)
+    brace_index: dict[int, int]  # Map: brace byte index -> nesting order.
+    brace_order_to_close_idx: dict[int, int]  # Map: brace order -> closers index.
+    tail_text: str  # prefix + head + tail markers snapshot for parsing.
+    tail_markers: list[str] = field(default_factory=list)  # Extra tail markers for parsing.
+    notes: list[str] = field(default_factory=list)  # Debug notes from patch rules.
 
     def __post_init__(self) -> None:
         self._refresh_tail()

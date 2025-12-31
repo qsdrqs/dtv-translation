@@ -17,6 +17,17 @@ class RustcResult:
     returncode: int
 
 
+def _gcc_path() -> str:
+    gcc = shutil.which("gcc")
+    if gcc is None:
+        pytest.skip("gcc not available")
+    try:
+        subprocess.run([gcc, "--version"], capture_output=True, check=True)
+    except (OSError, subprocess.CalledProcessError):
+        pytest.skip("gcc not functional")
+    return gcc
+
+
 def _rustc_path() -> str:
     rustc = shutil.which("rustc")
     if rustc is None:

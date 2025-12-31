@@ -7,7 +7,8 @@ from core.types import OracleOutput
 
 @dataclass
 class FeedbackState:
-    max_items: int = 8
+    """Stores recent oracle diagnostics for prompt augmentation."""
+    max_items: int = 8  # Cap on stored messages.
     items: list[str] = field(default_factory=list)
 
     def update(self, outputs: list[OracleOutput]) -> None:

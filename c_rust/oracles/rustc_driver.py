@@ -12,14 +12,15 @@ from c_rust.oracles.types import OracleContext
 
 @dataclass(frozen=True)
 class RustcResult:
+    """Captured result of invoking rustc."""
     stdout: str
     stderr: str
     exit_code: int
-    elapsed_ms: int
-    command: tuple[str, ...]
-    source_path: Path
-    output_path: Path
-    timed_out: bool = False
+    elapsed_ms: int  # Wall-clock compile time in milliseconds.
+    command: tuple[str, ...]  # Exact command line invoked.
+    source_path: Path  # Rust source file written to disk.
+    output_path: Path  # Compiler output path.
+    timed_out: bool = False  # True if the compiler timed out.
 
 
 class RustcDriver:

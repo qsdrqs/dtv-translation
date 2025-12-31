@@ -18,7 +18,8 @@ class FeedbackStrategy(Protocol):
 
 @dataclass(frozen=True)
 class AppendToLastAssistant:
-    header: str = "# Feedback"
+    """Appends feedback to the last assistant message."""
+    header: str = "# Feedback"  # Optional heading before feedback lines.
 
     def apply(
         self,

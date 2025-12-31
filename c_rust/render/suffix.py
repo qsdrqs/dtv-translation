@@ -8,9 +8,10 @@ from c_rust.render.scan import ClosePlan
 
 @dataclass(frozen=True)
 class SuffixResult:
+    """Rendered suffix for closing a prefix."""
     ok: bool
-    suffix: str = ""
-    notes: str = ""
+    suffix: str = ""  # Text to append to the prefix.
+    notes: str = ""  # Reason for failure if ok is False.
 
 
 def safe_boundary(text: str) -> bool:

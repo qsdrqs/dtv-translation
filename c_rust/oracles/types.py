@@ -9,7 +9,8 @@ from core.types import Artifact
 
 @dataclass(frozen=True)
 class OracleContext:
-    sample: Any | None
+    """Inputs and environment for a single oracle run."""
+    sample: Any | None  # Task-specific sample metadata (if available).
     artifact: Artifact
-    workdir: Path
-    timeout_s: float | None = None
+    workdir: Path  # Scratch directory for compiler artifacts.
+    timeout_s: float | None = None  # Optional timeout for tooling.

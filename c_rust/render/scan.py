@@ -31,28 +31,31 @@ def _looks_like_char_literal(text: str, idx: int) -> bool:
 
 @dataclass(frozen=True)
 class ScanOutcome:
+    """Result of scanning for unclosed delimiters."""
     ok: bool
-    stack: tuple[str, ...] = ()
-    notes: str = ""
+    stack: tuple[str, ...] = ()  # Unclosed opener stack (outer -> inner).
+    notes: str = ""  # Reason for failure if ok is False.
 
 
 @dataclass(frozen=True)
 class ClosingResult:
+    """Suggested closing suffix for a prefix."""
     ok: bool
-    suffix: str = ""
-    notes: str = ""
+    suffix: str = ""  # Closing delimiters to append.
+    notes: str = ""  # Reason for failure if ok is False.
 
 
 @dataclass(frozen=True)
 class ClosePlan:
+    """Detailed plan for closing delimiters and brace tracking."""
     ok: bool
-    stack: tuple[str, ...]
-    suffix: str
-    closers: tuple[str, ...]
-    brace_count: int
-    brace_index: dict[int, int]
-    brace_order_to_close_idx: dict[int, int]
-    notes: str = ""
+    stack: tuple[str, ...]  # Unclosed opener stack (outer -> inner).
+    suffix: str  # Closing suffix to append.
+    closers: tuple[str, ...]  # Close tokens in append order.
+    brace_count: int  # Number of unmatched "{" entries.
+    brace_index: dict[int, int]  # Map: brace byte index -> nesting order.
+    brace_order_to_close_idx: dict[int, int]  # Map: brace order -> closers index.
+    notes: str = ""  # Reason for failure if ok is False.
 
 
 def _scan_stack(text: str) -> tuple[bool, list[tuple[str, int]], str]:
