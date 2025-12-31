@@ -4,7 +4,7 @@ import json
 from typing import Any
 
 from core.types import Diagnostic
-from c_rust.oracles.rustc_driver import RustcResult
+from c_rust.oracles.compiler_oracle.rustc_driver import RustcResult
 
 
 _ERROR_LEVELS = {"error", "fatal"}

@@ -2,6 +2,8 @@
 
 ## Project: Decoding Time Verification (DTV) for Code Translation
 
+1. no trailing spaces, no lines with only spaces
+
 ### Goal
 Implement Decoding Time Verification (DTV): integrate deterministic program verifiers into the decoding loop
 (no training; a fixed pretrained code model used as a black-box generator).

@@ -6,9 +6,9 @@ from typing import Any
 
 from core.interfaces import Oracle
 from core.types import Artifact, ControllerState, Diagnostic, Granularity, OracleOutput, Verdict
-from c_rust.oracles.rustc_driver import RustcDriver
-from c_rust.oracles.rustc_parser import has_errors, parse_rustc_diagnostics
-from c_rust.oracles.types import OracleContext
+from c_rust.oracles.compiler_oracle.rustc_driver import RustcDriver
+from c_rust.oracles.compiler_oracle.rustc_parser import has_errors, parse_rustc_diagnostics
+from c_rust.oracles.compiler_oracle.types import OracleContext
 
 
 class RustcOracle(Oracle):

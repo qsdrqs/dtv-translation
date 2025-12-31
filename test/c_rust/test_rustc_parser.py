@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from c_rust.oracles.rustc_driver import RustcResult
-from c_rust.oracles.rustc_parser import has_errors, parse_rustc_diagnostics
+from c_rust.oracles.compiler_oracle.rustc_driver import RustcResult
+from c_rust.oracles.compiler_oracle.rustc_parser import has_errors, parse_rustc_diagnostics
 from test.c_rust.utils import compile_rust
 
 

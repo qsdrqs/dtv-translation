@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import time
 
-from c_rust.oracles.types import OracleContext
+from c_rust.oracles.compiler_oracle.types import OracleContext
 
 
 @dataclass(frozen=True)

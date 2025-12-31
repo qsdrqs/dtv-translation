@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 
 from core.types import Artifact, ControllerState, Granularity, Verdict
-from c_rust.oracles.difftesting_types import DiffTestSample, TestCase
-from c_rust.oracles.program_oracle import ProgramOracle
+from c_rust.oracles.program_diff_test_oracle.difftesting_types import DiffTestSample, TestCase
+from c_rust.oracles.program_diff_test_oracle.program_oracle import ProgramOracle
 from test.c_rust.utils import _gcc_path, _rustc_path
 
 
