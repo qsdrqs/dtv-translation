@@ -7,7 +7,7 @@ from pathlib import Path
 
 from core.interfaces import Oracle
 from core.types import Artifact, ControllerState, Diagnostic, Granularity, OracleOutput, RollbackScope, Verdict
-from c_rust.oracles.program_diff_test_oracle.difftesting_types import DiffTestSample, TestCase, Mismatch
+from c_rust.oracles.types import DiffTestSample, TestCase, Mismatch
 from c_rust.oracles.program_diff_test_oracle.execution_driver import compile_and_run
 
 
