@@ -3,6 +3,7 @@
 ## Project: Decoding Time Verification (DTV) for Code Translation
 
 1. no trailing spaces, no lines with only spaces
+2. keep this file up to date (last updated: 2026-01-04)
 
 ### Goal
 Implement Decoding Time Verification (DTV): integrate deterministic program verifiers into the decoding loop
@@ -28,14 +29,20 @@ This repo intentionally uses a flat top-level layout (no `src/`):
   - `core/logger.py`: logging helpers.
 - `controller/`: decoding-time controller logic
   - `controller/stop_criteria.py`: boundary-based `StoppingCriteria` (string/comment aware; TODO: brace/paren depth).
-  - `controller/loop.py`: DTV loop skeleton (meta-steps, render, oracle calls, feedback, rollback).
+  - `controller/loop.py`: DTV loop (currently step-wise generate->render->oracle->act; TODO: explicit action/state machine).
   - `controller/adapters.py`: adapter from `GeneratorBackend` to `Generator` protocol.
 - `feedback/`: deterministic feedback state + prompt augmentation strategies
   - `feedback/feedback.py`: `FeedbackState` (bounded, deduped diagnostics summary).
   - `feedback/strategies.py`: how feedback is inserted into chat/prompt (e.g., append to last assistant).
 - `rollback/`: rollback/checkpoint management (pre-CDHR)
   - `rollback/manager.py`: stmt checkpoints + block/func group stack (driven by `Artifact.group_events`).
-- `c_rust/`, `js_ts/`: task-specific renderers/oracles (mostly TODO; will emit `group_events`).
+- `c_rust/`: C->Rust task implementation
+  - `c_rust/render/`: stmt-level Rust renderer (syntax+semantic patching; TODO: emit `group_events` for block/func).
+  - `c_rust/oracles/compiler_oracle/`: `rustc` compile oracle (JSON diagnostics).
+  - `c_rust/oracles/program_diff_test_oracle/`: program-level differential testing oracle (C vs Rust).
+  - `c_rust/oracles/function_diff_test_oracle/`: components for function-level diff testing (instrumentation + FFI bridge + trace compare; TODO: `FunctionOracle` wrapper).
+  - `c_rust/oracles/block_diff_test_oracle/`: placeholder (TODO).
+- `js_ts/`: JS->TS task implementation (currently placeholders; TODO: renderer + `tsc` oracle + diff testing).
 - `test/`: unit tests (use the venv Python)
   - `test/controller/test_stop_criteria.py`
   - `test/core/test_generator_backend.py`
@@ -57,20 +64,34 @@ This repo intentionally uses a flat top-level layout (no `src/`):
 - Smoke demo: `./.venv/bin/python main.py`
 
 ## Roadmap (TODO)
-- [ ] Define an ordering/applicability check for `Granularity` (oracle applicable if artifact granularity >= required).
-- [ ] Implement task renderers that are total enough for meta-steps:
-  - [ ] `c_rust`: stmt/block/func harness rendering + `Artifact.group_events` extraction.
-  - [ ] `js_ts`: stmt/block/func harness rendering + `Artifact.group_events` extraction (handle TS template literals, ASI risks).
-- [ ] Implement verifiers (deterministic oracles):
-  - [ ] `c_rust`: `rustc` compile oracle (parse JSON diagnostics), then differential test oracle.
-  - [ ] `js_ts`: `tsc` oracle (diagnostics), then differential test oracle.
-- [ ] Add rollback scope selection to the controller loop:
-  - [ ] Replace `Action.ROLLBACK` with `(rollback_scope, reason)` (pre-CDHR heuristic).
-  - [ ] Add CDHR mapping: diagnostics -> minimal plausible rollback scope.
-- [ ] Add experiment runner:
-  - [ ] Dataset adapters: CodeNet (C->Rust), TypeWeaver (JS->TS).
-  - [ ] Curves: success rate vs verifier cost (token-budget first), plus ablations (no rollback, no CDHR, fixed scope).
-  - [ ] Persist per-sample traces for failure analysis and paper qualitative examples.
+### Core (paper-critical)
+- [ ] Refactor controller into explicit actions/state machine: `GENERATE`, `VERIFY(scope)`, `ROLLBACK(scope)`, `COMMIT`, `TERMINATE`.
+- [ ] Structural boundary protocol for variable-sized verification:
+  - [ ] Standardize `Artifact` fields for boundaries/anchors (stmt boundary + block/func OPEN/CLOSE events at minimum).
+  - [ ] Make rollback semantics depend on these boundaries (not just stmt retries).
+- [ ] Process rewards without training:
+  - [ ] Define a deterministic `ProcessSignal`/reward summary from `OracleOutput` (pass/fail/diag deltas) + scope + cost.
+  - [ ] Define aggregation rules across multiple oracles and multiple scopes.
+- [ ] Feedback as interaction protocol (not just a string append):
+  - [ ] Add a `FeedbackPlan` abstraction (what to ask the model to do next) + an output parser (how to consume structured model outputs).
+  - [ ] Support multi-round repair attempts per step under a fixed token budget (inference-time scaling via extra repair turns).
+- [ ] CDHR core component: `ScopeSelector` (diagnostics -> minimal plausible rollback scope) using oracle diagnostics + structure + rollback state.
+- [ ] Budget + trace infrastructure for research plots:
+  - [ ] Track token cost vs oracle cost separately (wall-clock later).
+  - [ ] Export JSONL traces for analysis (action sequence + costs + diagnostics summary).
+- [ ] Ablations/baselines as config knobs (same loop, different policy):
+  - [ ] outcome-only (verify only at end), naive-process (fixed verify cadence), no-rollback, no-CDHR, fixed-scope-only.
+
+### Task-specific
+- [ ] `c_rust`:
+  - [ ] Emit `Artifact.group_events` from the renderer (block/func boundaries).
+  - [ ] Wrap existing components into `FunctionOracle` and `BlockOracle` (function/block-level diff testing).
+- [ ] `js_ts`:
+  - [ ] Implement a minimal renderer + `tsc` oracle + diff testing baseline.
+
+### Experiments
+- [ ] Dataset adapters: CodeNet (C->Rust), TypeWeaver (JS->TS).
+- [ ] Curves: success rate vs verifier cost (generated tokens first), plus ablations.
 - [ ] Add wall-clock cost and caching:
   - [ ] Record oracle runtime in `TraceEvent`.
   - [ ] Cache compile/test results by artifact hash where safe.

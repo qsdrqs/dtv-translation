@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from controller.adapters import GeneratorAdapter
-from controller.loop import run_dtv_loop
+from controller.loop import ControllerOp, run_dtv_loop, select_oracles_by_granularity
 from controller.stop_criteria import DTVStoppingCriteria, RUST_PROFILE
 from core.budget import Budget
-from core.types import Artifact, Granularity, RenderResult, RenderStatus
+from core.types import Action, Artifact, Granularity, RenderResult, RenderStatus, RollbackScope, Verdict
 from feedback.feedback import FeedbackState
 from rollback.manager import RollbackManager
 
@@ -15,6 +15,26 @@ class DummyRenderer:
             status=RenderStatus.OK,
             artifact=Artifact(code=prefix, granularity=granularity or Granularity.STMT),
         )
+
+
+class DemoPolicy:
+    def next_action(self, ctx) -> ControllerOp:
+        if ctx.last_action is None:
+            return ControllerOp(Action.GENERATE)
+        if ctx.last_action == Action.GENERATE:
+            return ControllerOp(Action.VERIFY, granularity=Granularity.STMT)
+        if ctx.last_action == Action.VERIFY:
+            if any(out.verdict == Verdict.FAIL for out in ctx.last_outputs):
+                return ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.STMT)
+            if ctx.last_outputs and all(out.verdict == Verdict.PASS for out in ctx.last_outputs):
+                return ControllerOp(Action.COMMIT)
+            return ControllerOp(Action.CONTINUE)
+        if ctx.last_action == Action.CONTINUE:
+            return ControllerOp(Action.GENERATE)
+        return ControllerOp(Action.TERMINATE)
+
+    def select_oracles(self, artifact, budget, available):
+        return select_oracles_by_granularity(artifact, budget, available)
 
 
 def main() -> None:
@@ -28,6 +48,7 @@ def main() -> None:
     budget = Budget(gen_tokens_budget=512)
     feedback_state = FeedbackState()
     rollback_manager = RollbackManager()
+    policy = DemoPolicy()
 
     run_dtv_loop(
         generator=generator,
@@ -36,6 +57,7 @@ def main() -> None:
         budget=budget,
         feedback_state=feedback_state,
         rollback_manager=rollback_manager,
+        policy=policy,
         max_steps=5,
         prompt_prefix="",
     )
@@ -43,3 +65,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from c_rust.oracles import RustcOracle
 from c_rust.render import CRustRenderer
-from controller.loop import run_dtv_loop
+from controller.loop import ControllerOp, run_dtv_loop, select_oracles_by_granularity
 from core.budget import Budget
 from core.types import (
     Action,
@@ -14,6 +14,7 @@ from core.types import (
     Granularity,
     RenderResult,
     RenderStatus,
+    RollbackScope,
     StopReason,
     Verdict,
 )
@@ -61,6 +62,50 @@ class _SequenceGenerator:
         )
 
 
+class _SingleStepPolicy:
+    def next_action(self, ctx) -> ControllerOp:
+        if ctx.last_action is None:
+            return ControllerOp(Action.GENERATE)
+        if ctx.last_action == Action.GENERATE:
+            return ControllerOp(Action.VERIFY, granularity=Granularity.STMT)
+        if ctx.last_action == Action.VERIFY:
+            if any(out.verdict == Verdict.FAIL for out in ctx.last_outputs):
+                return ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.STMT)
+            if ctx.last_outputs and all(out.verdict == Verdict.PASS for out in ctx.last_outputs):
+                return ControllerOp(Action.COMMIT)
+            return ControllerOp(Action.CONTINUE)
+        if ctx.last_action in {Action.COMMIT, Action.ROLLBACK}:
+            return ControllerOp(Action.TERMINATE)
+        return ControllerOp(Action.GENERATE)
+
+    def select_oracles(self, artifact, budget, available):
+        return select_oracles_by_granularity(artifact, budget, available)
+
+
+class _TwoStepPolicy:
+    def __init__(self) -> None:
+        self.phase = 0
+
+    def next_action(self, ctx) -> ControllerOp:
+        if ctx.last_action is None:
+            return ControllerOp(Action.GENERATE)
+        if ctx.last_action == Action.GENERATE:
+            return ControllerOp(Action.VERIFY, granularity=Granularity.STMT)
+        if ctx.last_action == Action.VERIFY:
+            if self.phase == 0:
+                self.phase += 1
+                return ControllerOp(Action.COMMIT)
+            return ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.STMT)
+        if ctx.last_action == Action.COMMIT:
+            return ControllerOp(Action.GENERATE)
+        if ctx.last_action == Action.ROLLBACK:
+            return ControllerOp(Action.TERMINATE)
+        return ControllerOp(Action.TERMINATE)
+
+    def select_oracles(self, artifact, budget, available):
+        return select_oracles_by_granularity(artifact, budget, available)
+
+
 def test_loop_commits_with_rustc_oracle() -> None:
     _rustc_path()
     code = "fn foo() -> i32 { 1 }\n"
@@ -70,6 +115,7 @@ def test_loop_commits_with_rustc_oracle() -> None:
     budget = Budget(gen_tokens_budget=4)
     feedback_state = FeedbackState()
     rollback_manager = RollbackManager()
+    policy = _SingleStepPolicy()
 
     _, trace = run_dtv_loop(
         generator=generator,
@@ -78,14 +124,15 @@ def test_loop_commits_with_rustc_oracle() -> None:
         budget=budget,
         feedback_state=feedback_state,
         rollback_manager=rollback_manager,
-        max_steps=1,
+        policy=policy,
+        max_steps=4,
     )
 
     assert trace
-    assert trace[-1].action == Action.COMMIT
+    assert trace[-2].action == Action.COMMIT
     assert any(
         output.oracle_name == "rustc" and output.verdict == Verdict.PASS
-        for output in trace[-1].oracle_outputs
+        for output in trace[-2].oracle_outputs
     )
     assert budget.oracle_calls.get("rustc") == 1
     assert len(rollback_manager.stmt_checkpoints) == 1
@@ -100,6 +147,7 @@ def test_loop_rolls_back_when_rustc_fail() -> None:
     budget = Budget(gen_tokens_budget=4)
     feedback_state = FeedbackState()
     rollback_manager = RollbackManager()
+    policy = _SingleStepPolicy()
 
     final_prefix, trace = run_dtv_loop(
         generator=generator,
@@ -108,14 +156,15 @@ def test_loop_rolls_back_when_rustc_fail() -> None:
         budget=budget,
         feedback_state=feedback_state,
         rollback_manager=rollback_manager,
-        max_steps=1,
+        policy=policy,
+        max_steps=4,
     )
 
     assert trace
-    assert trace[-1].action == Action.ROLLBACK
+    assert trace[-2].action == Action.ROLLBACK
     assert any(
         output.oracle_name == "rustc" and output.verdict == Verdict.FAIL
-        for output in trace[-1].oracle_outputs
+        for output in trace[-3].oracle_outputs
     )
     assert final_prefix == ""
 
@@ -137,6 +186,7 @@ fn foo() -> i32 {
     budget = Budget(gen_tokens_budget=4)
     feedback_state = FeedbackState()
     rollback_manager = RollbackManager()
+    policy = _TwoStepPolicy()
 
     final_prefix, trace = run_dtv_loop(
         generator=generator,
@@ -145,11 +195,12 @@ fn foo() -> i32 {
         budget=budget,
         feedback_state=feedback_state,
         rollback_manager=rollback_manager,
-        max_steps=2,
+        policy=policy,
+        max_steps=6,
     )
 
     assert trace
-    assert trace[0].action == Action.COMMIT
-    assert trace[-1].action == Action.ROLLBACK
+    assert any(event.action == Action.COMMIT for event in trace)
+    assert any(event.action == Action.ROLLBACK for event in trace)
     assert final_prefix == step1
     assert len(rollback_manager.stmt_checkpoints) == 1

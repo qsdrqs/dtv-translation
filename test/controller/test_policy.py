@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from controller.loop import Policy
+from controller.loop import select_oracles_by_granularity
 from core.budget import Budget
 from core.types import Artifact, ControllerState, Granularity, OracleOutput
 
@@ -16,14 +16,14 @@ class _FakeOracle:
         raise NotImplementedError
 
 
-def test_policy_select_oracles_respects_granularity_order() -> None:
+def test_select_oracles_respects_granularity_order() -> None:
     artifact = Artifact(code="", granularity=Granularity.BLOCK)
     budget = Budget(gen_tokens_budget=1)
     stmt_oracle = _FakeOracle(name="stmt", required_granularity=Granularity.STMT)
     block_oracle = _FakeOracle(name="block", required_granularity=Granularity.BLOCK)
     func_oracle = _FakeOracle(name="func", required_granularity=Granularity.FUNC)
 
-    selected = Policy().select_oracles(
+    selected = select_oracles_by_granularity(
         artifact=artifact,
         budget=budget,
         available=[stmt_oracle, block_oracle, func_oracle],

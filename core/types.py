@@ -105,6 +105,10 @@ class OracleOutput:
 
 
 class Action(str, Enum):
+    GENERATE = "generate"
+    VERIFY = "verify"
+    FEEDBACK = "feedback"
+    APPLY_PATCH = "apply_patch"
     CONTINUE = "continue"
     COMMIT = "commit"
     ROLLBACK = "rollback"
@@ -129,9 +133,12 @@ class ControllerState:
 class TraceEvent:
     """Per-step trace for debugging and analysis."""
     step: int
-    stop_reason: StopReason
+    stop_reason: StopReason | None
     action: Action
     granularity: Granularity | None = None
+    render_status: RenderStatus | None = None
+    rollback_scope: RollbackScope | None = None
+    patch_applied: bool = False
     budget_snapshot: dict[str, Any] = field(default_factory=dict)  # Copy of Budget.snapshot().
     oracle_outputs: tuple[OracleOutput, ...] = ()  # Outputs from oracles run at this step.
     notes: str = ""  # Debug notes for analysis.
