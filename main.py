@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from controller.adapters import GeneratorAdapter
 from controller.loop import ControllerOp, run_dtv_loop, select_oracles_by_granularity
+from controller.policy import DefaultPolicy
 from controller.stop_criteria import DTVStoppingCriteria, RUST_PROFILE
 from core.budget import Budget
 from core.types import Action, Artifact, Granularity, RenderResult, RenderStatus, RollbackScope, Verdict
@@ -48,7 +49,7 @@ def main() -> None:
     budget = Budget(gen_tokens_budget=512)
     feedback_state = FeedbackState()
     rollback_manager = RollbackManager()
-    policy = DemoPolicy()
+    policy = DefaultPolicy()
 
     run_dtv_loop(
         generator=generator,
