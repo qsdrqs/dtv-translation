@@ -3,7 +3,7 @@
 ## Project: Decoding Time Verification (DTV) for Code Translation
 
 1. no trailing spaces, no lines with only spaces
-2. keep this file up to date (last updated: 2026-01-05)
+2. keep this file up to date (last updated: 2026-01-11)
 
 ### Goal
 Implement Decoding Time Verification (DTV): integrate deterministic program verifiers into the decoding loop
@@ -35,9 +35,9 @@ This repo intentionally uses a flat top-level layout (no `src/`):
   - `feedback/feedback.py`: `FeedbackState` (bounded, deduped diagnostics summary).
   - `feedback/strategies.py`: how feedback is inserted into chat/prompt (e.g., append to last assistant).
 - `rollback/`: rollback/checkpoint management (pre-CDHR)
-  - `rollback/manager.py`: stmt checkpoints + block/func group stack (driven by `Artifact.group_events`).
+  - `rollback/manager.py`: stmt checkpoints + block/func group stack (synced at COMMIT using `Artifact.group_stack`).
 - `c_rust/`: C->Rust task implementation
-  - `c_rust/render/`: stmt-level Rust renderer (syntax+semantic patching; TODO: emit `group_events` for block/func).
+  - `c_rust/render/`: stmt-level Rust renderer (syntax+semantic patching; emits `Artifact.group_stack` + AST for rollback grouping).
   - `c_rust/oracles/compiler_oracle/`: `rustc` compile oracle (JSON diagnostics).
   - `c_rust/oracles/program_diff_test_oracle/`: program-level differential testing oracle (C vs Rust).
   - `c_rust/oracles/function_diff_test_oracle/`: components for function-level diff testing (instrumentation + FFI bridge + trace compare; TODO: `FunctionOracle` wrapper).
@@ -55,9 +55,10 @@ This repo intentionally uses a flat top-level layout (no `src/`):
   - `rollback(STMT)` means retry: return the last committed stmt checkpoint without deleting it.
   - `rollback(BLOCK/FUNC)` means retry: truncate to the group start and drop the corresponding group frame(s).
   - `rollback(PROGRAM)` clears all checkpoints and group state.
-- Group events:
-  - Renderers should emit `Artifact.group_events` as a sequence of `{OPEN,CLOSE} x {BLOCK,FUNC}` events.
-  - The controller applies `group_events` before committing the stmt checkpoint to avoid off-by-one group starts.
+- Group boundaries:
+  - Renderers should emit `Artifact.group_stack`: enclosing `{FUNC,BLOCK,...}` kinds at the prefix end (outer -> inner).
+  - The controller syncs `rollback_manager` via `sync_groups(artifact.group_stack)` before committing the stmt checkpoint.
+  - `Artifact.group_events` remains as a legacy fallback (do not rely on boundary-to-boundary deltas for correctness).
 
 ### How to Run
 - Unit tests: `./.venv/bin/python -m pytest -q`
@@ -67,7 +68,7 @@ This repo intentionally uses a flat top-level layout (no `src/`):
 ### Core (paper-critical)
 - [ ] Refactor controller into explicit actions/state machine: `GENERATE`, `VERIFY(scope)`, `ROLLBACK(scope)`, `COMMIT`, `TERMINATE`.
 - [ ] Structural boundary protocol for variable-sized verification:
-  - [ ] Standardize `Artifact` fields for boundaries/anchors (stmt boundary + block/func OPEN/CLOSE events at minimum).
+  - [ ] Standardize `Artifact` fields for boundaries/anchors (stmt boundary + block/func grouping at minimum).
   - [ ] Make rollback semantics depend on these boundaries (not just stmt retries).
 - [ ] Process rewards without training:
   - [ ] Define a deterministic `ProcessSignal`/reward summary from `OracleOutput` (pass/fail/diag deltas) + scope + cost.
@@ -84,7 +85,7 @@ This repo intentionally uses a flat top-level layout (no `src/`):
 
 ### Task-specific
 - [ ] `c_rust`:
-  - [ ] Emit `Artifact.group_events` from the renderer (block/func boundaries).
+  - [x] Emit `Artifact.group_stack` from the renderer (block/func boundaries).
   - [ ] Wrap existing components into `FunctionOracle` and `BlockOracle` (function/block-level diff testing).
 - [ ] `js_ts`:
   - [ ] Implement a minimal renderer + `tsc` oracle + diff testing baseline.
@@ -95,3 +96,4 @@ This repo intentionally uses a flat top-level layout (no `src/`):
 - [ ] Add wall-clock cost and caching:
   - [ ] Record oracle runtime in `TraceEvent`.
   - [ ] Cache compile/test results by artifact hash where safe.
+

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from c_rust.render.analyze import analyze_prefix
 from c_rust.render.context_rules import PatchPhase, apply_patch_rules
+from c_rust.render.groups import parse_rust, rust_group_stack
 from c_rust.render.scan import brace_close_plan, scan_unclosed
 from c_rust.render.suffix import create_plan, plan_to_suffix
 from core.types import Artifact, Granularity, RenderResult, RenderStatus
@@ -57,6 +58,15 @@ class CRustRenderer:
             return RenderResult(status=RenderStatus.CONTINUE, notes=suffix.notes)
 
         code = prefix + suffix.suffix
-        # TODO: emit group_events once block/function extraction is implemented.
-        artifact = Artifact(code=code, granularity=granularity, group_events=())
+        end_byte = len(prefix.rstrip().encode("utf-8"))
+        tree = parse_rust(code)
+        group_stack = rust_group_stack(tree, prefix_end_byte=end_byte, skip_function_body_block=True)
+        artifact = Artifact(
+            code=code,
+            granularity=granularity,
+            ast_tree=tree,
+            metadata={},
+            group_events=(),
+            group_stack=group_stack,
+        )
         return RenderResult(status=RenderStatus.OK, artifact=artifact, notes=suffix.notes)

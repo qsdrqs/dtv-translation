@@ -12,6 +12,9 @@ from core.types import (
     GenerateContext,
     GenerateResult,
     Granularity,
+    GroupEvent,
+    GroupEventAction,
+    OracleOutput,
     RenderResult,
     RenderStatus,
     RollbackScope,
@@ -38,6 +41,17 @@ class _FakeGenerator:
 class _DummyRenderer:
     def try_render(self, prefix: str, granularity: Granularity) -> RenderResult:
         artifact = Artifact(code=prefix, granularity=granularity)
+        return RenderResult(status=RenderStatus.OK, artifact=artifact)
+
+
+class _GroupStackRenderer:
+    def try_render(self, prefix: str, granularity: Granularity) -> RenderResult:
+        artifact = Artifact(
+            code=prefix,
+            granularity=granularity,
+            group_stack=(Granularity.FUNC,),
+            group_events=(GroupEvent(action=GroupEventAction.OPEN, kind=Granularity.BLOCK),),
+        )
         return RenderResult(status=RenderStatus.OK, artifact=artifact)
 
 
@@ -106,6 +120,16 @@ class _TwoStepPolicy:
         return select_oracles_by_granularity(artifact, budget, available)
 
 
+class _PassOracle:
+    name = "pass"
+    required_granularity = Granularity.STMT
+
+    def run(self, state, artifact) -> OracleOutput:
+        _ = state
+        _ = artifact
+        return OracleOutput(oracle_name=self.name, verdict=Verdict.PASS)
+
+
 def test_loop_commits_with_rustc_oracle() -> None:
     _rustc_path()
     code = "fn foo() -> i32 { 1 }\n"
@@ -169,6 +193,33 @@ def test_loop_rolls_back_when_rustc_fail() -> None:
     assert final_prefix == ""
 
 
+
+def test_commit_prefers_group_stack_over_events() -> None:
+    generator = _FakeGenerator(code="let x = 1;\n")
+    renderer = _GroupStackRenderer()
+    oracles = [_PassOracle()]
+    budget = Budget(gen_tokens_budget=4)
+    feedback_state = FeedbackState()
+    rollback_manager = RollbackManager()
+    policy = _SingleStepPolicy()
+
+    _, trace = run_dtv_loop(
+        generator=generator,
+        renderer=renderer,
+        oracles=oracles,
+        budget=budget,
+        feedback_state=feedback_state,
+        rollback_manager=rollback_manager,
+        policy=policy,
+        max_steps=4,
+    )
+
+    assert trace
+    assert trace[-2].action == Action.COMMIT
+    assert [(f.kind, f.start_stmt) for f in rollback_manager.group_stack] == [(Granularity.FUNC, 0)]
+
+
+
 def test_loop_rolls_back_to_previous_checkpoint() -> None:
     _rustc_path()
     step1 = """\
@@ -204,3 +255,4 @@ fn foo() -> i32 {
     assert any(event.action == Action.ROLLBACK for event in trace)
     assert final_prefix == step1
     assert len(rollback_manager.stmt_checkpoints) == 1
+

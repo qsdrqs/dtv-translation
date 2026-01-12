@@ -52,6 +52,24 @@ class RollbackManager:
             elif event.action == GroupEventAction.CLOSE:
                 self.close_group(event.kind)
 
+    def sync_groups(self, desired: Sequence[Granularity]) -> None:
+        """Synchronize group_stack to match the desired enclosing group kinds.
+
+        This is intended to be called at COMMIT time, before adding the stmt checkpoint,
+        so that open_group() records the correct start_stmt index.
+        """
+        desired_kinds = [kind for kind in desired if kind in {Granularity.BLOCK, Granularity.FUNC}]
+        current_kinds = [frame.kind for frame in self.group_stack]
+
+        k = 0
+        while k < len(desired_kinds) and k < len(current_kinds) and desired_kinds[k] == current_kinds[k]:
+            k += 1
+
+        for kind in reversed(current_kinds[k:]):
+            self.close_group(kind)
+        for kind in desired_kinds[k:]:
+            self.open_group(kind)
+
     def _truncate_to(self, keep_count: int) -> str:
         keep_count = max(0, keep_count)
         if keep_count < len(self.stmt_checkpoints):
@@ -94,3 +112,4 @@ class RollbackManager:
     def record_retry(self, key: str) -> int:
         self.retry_counters[key] = self.retry_counters.get(key, 0) + 1
         return self.retry_counters[key]
+

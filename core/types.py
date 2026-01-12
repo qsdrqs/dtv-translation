@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Sequence
 
+from tree_sitter import Tree
+
 
 class Granularity(str, Enum):
     STMT = "stmt"
@@ -17,8 +19,10 @@ class Artifact:
     """Renderable code artifact and its decoding metadata."""
     code: str
     granularity: Granularity
-    metadata: dict[str, Any] = field(default_factory=dict)  # Task-specific payload (e.g., sample data).
+    ast_tree: Tree | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)  # TODO: remove - migrate all fields to explicit typed attributes.
     group_events: tuple[GroupEvent, ...] = ()  # OPEN/CLOSE events for rollback grouping.
+    group_stack: tuple[Granularity, ...] | None = None  # Enclosing groups at prefix end (outer -> inner).
 
 
 class RenderStatus(str, Enum):
@@ -142,3 +146,4 @@ class TraceEvent:
     budget_snapshot: dict[str, Any] = field(default_factory=dict)  # Copy of Budget.snapshot().
     oracle_outputs: tuple[OracleOutput, ...] = ()  # Outputs from oracles run at this step.
     notes: str = ""  # Debug notes for analysis.
+

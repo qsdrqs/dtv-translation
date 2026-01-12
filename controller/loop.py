@@ -276,7 +276,10 @@ def _handle_commit(
 ) -> None:
     if runtime.last_artifact is None:
         raise RuntimeError("COMMIT requires a verified artifact.")
-    rollback_manager.apply_group_events(runtime.last_artifact.group_events)
+    if runtime.last_artifact.group_stack is not None:
+        rollback_manager.sync_groups(runtime.last_artifact.group_stack)
+    else:
+        rollback_manager.apply_group_events(runtime.last_artifact.group_events)
     rollback_manager.add_stmt_checkpoint(runtime.state.prefix)
     _clear_repair_context(runtime)
     runtime.last_action = Action.COMMIT
@@ -534,3 +537,4 @@ def run_dtv_loop(
         raise ValueError(f"Unsupported action: {op.action}")
 
     return runtime.state.prefix, trace
+
