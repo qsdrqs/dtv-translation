@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from c_rust.oracles import RustcOracle
+from core.types import TestCase, TranslationSample
 from c_rust.render import CRustRenderer
 from controller.loop import ControllerOp, run_dtv_loop, select_oracles_by_granularity
 from core.budget import Budget
@@ -14,6 +15,7 @@ from core.types import (
     Granularity,
     GroupEvent,
     GroupEventAction,
+    GroupStackFrame,
     OracleOutput,
     RenderResult,
     RenderStatus,
@@ -49,8 +51,32 @@ class _GroupStackRenderer:
         artifact = Artifact(
             code=prefix,
             granularity=granularity,
-            group_stack=(Granularity.FUNC,),
+            group_stack=(GroupStackFrame(kind=Granularity.FUNC),),
             group_events=(GroupEvent(action=GroupEventAction.OPEN, kind=Granularity.BLOCK),),
+        )
+        return RenderResult(status=RenderStatus.OK, artifact=artifact)
+
+
+class _FunctionCloseRenderer:
+    def __init__(self, sample: TranslationSample, function_name: str) -> None:
+        self.sample = sample
+        self.function_name = function_name
+        self.calls = 0
+
+    def try_render(self, prefix: str, granularity: Granularity) -> RenderResult:
+        self.calls += 1
+        if self.calls == 1:
+            group_stack = (GroupStackFrame(kind=Granularity.FUNC, name_id=self.function_name),)
+            group_events: tuple[GroupEvent, ...] = ()
+        else:
+            group_stack = ()
+            group_events = (GroupEvent(action=GroupEventAction.CLOSE, kind=Granularity.FUNC),)
+        artifact = Artifact(
+            code=prefix,
+            granularity=granularity,
+            sample=self.sample,
+            group_stack=group_stack,
+            group_events=group_events,
         )
         return RenderResult(status=RenderStatus.OK, artifact=artifact)
 
@@ -124,10 +150,85 @@ class _PassOracle:
     name = "pass"
     required_granularity = Granularity.STMT
 
-    def run(self, state, artifact) -> OracleOutput:
+    def run(self, state, artifact, context) -> OracleOutput:
         _ = state
         _ = artifact
+        _ = context
         return OracleOutput(oracle_name=self.name, verdict=Verdict.PASS)
+
+
+class _FunctionNameOracle:
+    name = "function_diff"
+    required_granularity = Granularity.FUNC
+
+    def __init__(self, expected: str) -> None:
+        self.expected = expected
+
+    def run(self, state, artifact, context) -> OracleOutput:
+        _ = state
+        _ = artifact
+        function_name = context.closed_function_name
+        verdict = Verdict.PASS if function_name == self.expected else Verdict.FAIL
+        return OracleOutput(oracle_name=self.name, verdict=verdict)
+
+
+class _FunctionClosePolicy:
+    def __init__(self) -> None:
+        self.phase = 0
+
+    def next_action(self, ctx) -> ControllerOp:
+        if ctx.last_action is None:
+            return ControllerOp(Action.GENERATE)
+        if ctx.last_action == Action.GENERATE:
+            return ControllerOp(Action.VERIFY, granularity=Granularity.FUNC)
+        if ctx.last_action == Action.VERIFY:
+            if self.phase == 0:
+                self.phase = 1
+                return ControllerOp(Action.GENERATE)
+            return ControllerOp(Action.COMMIT)
+        if ctx.last_action == Action.COMMIT:
+            return ControllerOp(Action.TERMINATE)
+        return ControllerOp(Action.TERMINATE)
+
+    def select_oracles(self, artifact, budget, available):
+        if self.phase == 0:
+            return []
+        return available
+
+
+def test_function_oracle_receives_closed_function_name() -> None:
+    sample = TranslationSample(
+        source_code="int foo(){return 1;}",
+        source_lang="c",
+        test_cases=[TestCase(stdin="")],
+    )
+    generator = _SequenceGenerator(["fn foo() {\n", "}\n"])
+    renderer = _FunctionCloseRenderer(sample, "foo")
+    oracles = [_FunctionNameOracle("foo")]
+    budget = Budget(gen_tokens_budget=4)
+    feedback_state = FeedbackState()
+    rollback_manager = RollbackManager()
+    policy = _FunctionClosePolicy()
+
+    _, trace = run_dtv_loop(
+        generator=generator,
+        renderer=renderer,
+        oracles=oracles,
+        budget=budget,
+        feedback_state=feedback_state,
+        rollback_manager=rollback_manager,
+        policy=policy,
+        max_steps=6,
+    )
+
+    assert any(
+        event.action == Action.VERIFY
+        and any(
+            output.oracle_name == "function_diff" and output.verdict == Verdict.PASS
+            for output in event.oracle_outputs
+        )
+        for event in trace
+    )
 
 
 def test_loop_commits_with_rustc_oracle() -> None:

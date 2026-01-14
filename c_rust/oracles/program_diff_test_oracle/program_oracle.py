@@ -6,8 +6,17 @@ import tempfile
 from pathlib import Path
 
 from core.interfaces import Oracle
-from core.types import Artifact, ControllerState, Diagnostic, Granularity, OracleOutput, RollbackScope, Verdict
-from c_rust.oracles.types import DiffTestSample, TestCase, Mismatch
+from core.types import (
+    Artifact,
+    ControllerState,
+    Diagnostic,
+    Granularity,
+    OracleContext,
+    OracleOutput,
+    RollbackScope,
+    Verdict,
+)
+from core.types import Mismatch, TestCase, TranslationSample
 from c_rust.oracles.program_diff_test_oracle.execution_driver import compile_and_run
 
 
@@ -31,14 +40,15 @@ class ProgramOracle(Oracle):
         self.gcc_path = gcc_path
         self.rustc_path = rustc_path
 
-    def run(self, state: ControllerState, artifact: Artifact) -> OracleOutput:
+    def run(self, state: ControllerState, artifact: Artifact, context: OracleContext) -> OracleOutput:
         """Run differential tests against the C reference."""
+        _ = context
         sample = _extract_sample(artifact)
         if sample is None:
             return OracleOutput(
                 oracle_name=self.name,
                 verdict=Verdict.NOT_APPLICABLE,
-                diagnostics=(Diagnostic(message="No sample data in artifact metadata"),),
+                diagnostics=(Diagnostic(message="No sample data in artifact"),),
                 realized_cost=0,
             )
 
@@ -57,7 +67,7 @@ class ProgramOracle(Oracle):
             rust_dir = Path(rust_workdir)
 
             c_compile_result, c_exec_results = compile_and_run(
-                source_code=sample.c_source,
+                source_code=sample.source_code,
                 test_cases=sample.test_cases,
                 language="c",
                 workdir=c_dir,
@@ -155,19 +165,16 @@ class ProgramOracle(Oracle):
             )
 
 
-def _extract_sample(artifact: Artifact) -> DiffTestSample | None:
-    if not artifact.metadata:
-        return None
-
-    sample_data = artifact.metadata.get("sample")
+def _extract_sample(artifact: Artifact) -> TranslationSample | None:
+    sample_data = artifact.sample
     if sample_data is None:
         return None
 
-    if isinstance(sample_data, DiffTestSample):
+    if isinstance(sample_data, TranslationSample):
         return sample_data
 
     if isinstance(sample_data, dict):
-        return DiffTestSample(**sample_data)
+        return TranslationSample(**sample_data)
 
     return None
 

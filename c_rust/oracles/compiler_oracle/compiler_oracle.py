@@ -5,10 +5,17 @@ import tempfile
 from typing import Any
 
 from core.interfaces import Oracle
-from core.types import Artifact, ControllerState, Diagnostic, Granularity, OracleOutput, Verdict
+from core.types import (
+    Artifact,
+    ControllerState,
+    Diagnostic,
+    Granularity,
+    OracleContext,
+    OracleOutput,
+    Verdict,
+)
 from c_rust.oracles.compiler_oracle.rustc_driver import RustcDriver
 from c_rust.oracles.compiler_oracle.rustc_parser import has_errors, parse_rustc_diagnostics
-from c_rust.oracles.compiler_oracle.types import OracleContext
 
 
 class RustcOracle(Oracle):
@@ -19,10 +26,12 @@ class RustcOracle(Oracle):
         self.timeout_s = timeout_s
         self.driver = RustcDriver(rustc_path=rustc_path)
 
-    def run(self, state: ControllerState, artifact: Artifact) -> OracleOutput:
+    def run(self, state: ControllerState, artifact: Artifact, context: OracleContext) -> OracleOutput:
         sample = _extract_sample(artifact)
         with tempfile.TemporaryDirectory(prefix="dtv-rustc-") as workdir:
             ctx = OracleContext(
+                closed_stack=context.closed_stack,
+                closed_function_name=context.closed_function_name,
                 sample=sample,
                 artifact=artifact,
                 workdir=Path(workdir),
@@ -51,6 +60,4 @@ def _decide_verdict(exit_code: int, diagnostics: tuple, timed_out: bool) -> Verd
 
 
 def _extract_sample(artifact: Artifact) -> Any | None:
-    if not artifact.metadata:
-        return None
-    return artifact.metadata.get("sample")
+    return artifact.sample

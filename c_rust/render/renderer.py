@@ -60,12 +60,17 @@ class CRustRenderer:
         code = prefix + suffix.suffix
         end_byte = len(prefix.rstrip().encode("utf-8"))
         tree = parse_rust(code)
-        group_stack = rust_group_stack(tree, prefix_end_byte=end_byte, skip_function_body_block=True)
+        group_stack = rust_group_stack(
+            tree,
+            prefix_end_byte=end_byte,
+            source_bytes=code.encode("utf-8"),
+            skip_function_body_block=True,
+        )
         artifact = Artifact(
             code=code,
             granularity=granularity,
             ast_tree=tree,
-            metadata={},
+            sample=None,
             group_events=(),
             group_stack=group_stack,
         )

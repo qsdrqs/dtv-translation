@@ -9,7 +9,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from core.interfaces import Oracle
-from core.types import Artifact, ControllerState, Diagnostic, Granularity, OracleOutput, RollbackScope, Verdict
+from core.types import (
+    Artifact,
+    ControllerState,
+    Diagnostic,
+    Granularity,
+    OracleContext,
+    OracleOutput,
+    RollbackScope,
+    Verdict,
+)
 from c_rust.oracles.function_diff_test_oracle.c_instrumenter import instrument_c_functions
 from c_rust.oracles.function_diff_test_oracle.ffi_bridge import find_missing_functions, generate_ffi_bridge
 from c_rust.oracles.function_diff_test_oracle.rust_instrumenter import instrument_rust_functions
@@ -18,7 +27,7 @@ from c_rust.oracles.function_diff_test_oracle.trace_comparator import (
     find_first_mismatch,
     parse_trace_events,
 )
-from c_rust.oracles.types import DiffTestSample, ExecutionResult, TraceEvent, TraceEventKind
+from core.types import ExecutionResult, ExecutionTraceEvent, TraceEventKind, TranslationSample
 from c_rust.oracles.program_diff_test_oracle.execution_driver import run_binary
 
 
@@ -42,16 +51,17 @@ class FunctionOracle(Oracle):
         self.gcc_path = gcc_path
         self.rustc_path = rustc_path
 
-    def run(self, _state: ControllerState, artifact: Artifact) -> OracleOutput:
+    def run(self, state: ControllerState, artifact: Artifact, context: OracleContext) -> OracleOutput:
         """Run differential tests against the C reference with trace comparison."""
         sample = _extract_sample(artifact)
-        validation = _validate_sample(sample, self.name)
+        function_name = context.closed_function_name
+        validation = _validate_sample(sample, function_name, self.name)
         if validation is not None:
             return validation
         assert sample is not None
-        assert sample.function_name is not None
+        assert function_name is not None
 
-        prepared = _prepare_sources(artifact, sample, self.name)
+        prepared = _prepare_sources(artifact, sample, function_name, self.name)
         if isinstance(prepared, OracleOutput):
             return prepared
 
@@ -77,6 +87,7 @@ class FunctionOracle(Oracle):
             return _run_tests_and_compare(
                 oracle_name=self.name,
                 sample=sample,
+                function_name=function_name,
                 c_binary=c_binary,
                 rust_binary=rust_binary,
                 run_timeout_s=self.run_timeout_s,
@@ -90,25 +101,27 @@ class PreparedSources:
     needs_ffi: bool
 
 
-def _extract_sample(artifact: Artifact) -> DiffTestSample | None:
-    if not artifact.metadata:
-        return None
-    sample_data = artifact.metadata.get("sample")
+def _extract_sample(artifact: Artifact) -> TranslationSample | None:
+    sample_data = artifact.sample
     if sample_data is None:
         return None
-    if isinstance(sample_data, DiffTestSample):
+    if isinstance(sample_data, TranslationSample):
         return sample_data
     if isinstance(sample_data, dict):
-        return DiffTestSample(**sample_data)
+        return TranslationSample(**sample_data)
     return None
 
 
-def _validate_sample(sample: DiffTestSample | None, oracle_name: str) -> OracleOutput | None:
+def _validate_sample(
+    sample: TranslationSample | None,
+    function_name: str | None,
+    oracle_name: str,
+) -> OracleOutput | None:
     if sample is None:
         return OracleOutput(
             oracle_name=oracle_name,
             verdict=Verdict.NOT_APPLICABLE,
-            diagnostics=(Diagnostic(message="No sample data in artifact metadata"),),
+            diagnostics=(Diagnostic(message="No sample data in artifact"),),
             realized_cost=0,
         )
 
@@ -120,11 +133,11 @@ def _validate_sample(sample: DiffTestSample | None, oracle_name: str) -> OracleO
             realized_cost=0,
         )
 
-    if not sample.function_name:
+    if not function_name:
         return OracleOutput(
             oracle_name=oracle_name,
             verdict=Verdict.NOT_APPLICABLE,
-            diagnostics=(Diagnostic(message="No function_name in sample"),),
+            diagnostics=(Diagnostic(message="No closed function in context"),),
             realized_cost=0,
         )
 
@@ -133,14 +146,15 @@ def _validate_sample(sample: DiffTestSample | None, oracle_name: str) -> OracleO
 
 def _prepare_sources(
     artifact: Artifact,
-    sample: DiffTestSample,
+    sample: TranslationSample,
+    function_name: str,
     oracle_name: str,
 ) -> PreparedSources | OracleOutput:
-    instrumented_c = instrument_c_functions(sample.c_source, target_function=sample.function_name)
-    instrumented_rust = instrument_rust_functions(artifact.code, target_function=sample.function_name)
+    instrumented_c = instrument_c_functions(sample.source_code, target_function=function_name)
+    instrumented_rust = instrument_rust_functions(artifact.code, target_function=function_name)
 
     # FFI discovery uses the original sources to avoid trace wrappers skewing call/def detection.
-    missing = find_missing_functions(artifact.code, sample.c_source)
+    missing = find_missing_functions(artifact.code, sample.source_code)
     if missing.missing is None:
         return OracleOutput(
             oracle_name=oracle_name,
@@ -151,7 +165,7 @@ def _prepare_sources(
 
     bridge_code = ""
     if missing.missing:
-        bridge = generate_ffi_bridge(artifact.code, sample.c_source)
+        bridge = generate_ffi_bridge(artifact.code, sample.source_code)
         if bridge.code is None:
             return OracleOutput(
                 oracle_name=oracle_name,
@@ -261,14 +275,13 @@ def _compile_binaries(
 
 def _run_tests_and_compare(
     oracle_name: str,
-    sample: DiffTestSample,
+    sample: TranslationSample,
+    function_name: str,
     c_binary: Path,
     rust_binary: Path,
     run_timeout_s: float | None,
 ) -> OracleOutput:
     cost = 1
-    function_name = sample.function_name
-    assert function_name is not None
     coverage = TraceComparisonStats()
     for i, test_case in enumerate(sample.test_cases):
         test_id = test_case.test_id or f"test_{i}"
@@ -457,9 +470,9 @@ def _run_compile(
 
 
 def _filter_trace_for_function(
-    events: list[TraceEvent],
+    events: list[ExecutionTraceEvent],
     function_name: str,
-) -> list[TraceEvent]:
+) -> list[ExecutionTraceEvent]:
     return [
         event
         for event in events

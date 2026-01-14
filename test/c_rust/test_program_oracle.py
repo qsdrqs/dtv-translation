@@ -5,8 +5,7 @@ Tests for program-level differential oracle.
 from pathlib import Path
 import pytest
 
-from core.types import Artifact, ControllerState, Granularity, Verdict
-from c_rust.oracles.types import DiffTestSample, TestCase
+from core.types import Artifact, ControllerState, Granularity, OracleContext, TestCase, TranslationSample, Verdict
 from c_rust.oracles.program_diff_test_oracle.program_oracle import ProgramOracle
 from test.c_rust.utils import _gcc_path, _rustc_path
 
@@ -92,19 +91,20 @@ def test_program_oracle_pass_simple():
     rustc = _rustc_path()
     oracle = ProgramOracle(gcc_path=gcc, rustc_path=rustc)
 
-    sample = DiffTestSample(
-        c_source=C_HELLO_WORLD,
+    sample = TranslationSample(
+        source_code=C_HELLO_WORLD,
+        source_lang="c",
         test_cases=[TestCase(stdin="", test_id="hello")],
     )
 
     artifact = Artifact(
         code=RUST_HELLO_WORLD,
         granularity=Granularity.PROGRAM,
-        metadata={"sample": sample},
+        sample=sample,
     )
 
     state = ControllerState(prefix="")
-    result = oracle.run(state, artifact)
+    result = oracle.run(state, artifact, OracleContext())
 
     assert result.verdict == Verdict.PASS
     assert result.oracle_name == "program_diff"
@@ -117,8 +117,9 @@ def test_program_oracle_pass_with_input():
     rustc = _rustc_path()
     oracle = ProgramOracle(gcc_path=gcc, rustc_path=rustc)
 
-    sample = DiffTestSample(
-        c_source=C_ECHO_INPUT,
+    sample = TranslationSample(
+        source_code=C_ECHO_INPUT,
+        source_lang="c",
         test_cases=[
             TestCase(stdin="42\n", test_id="echo_42"),
             TestCase(stdin="100\n", test_id="echo_100"),
@@ -128,11 +129,11 @@ def test_program_oracle_pass_with_input():
     artifact = Artifact(
         code=RUST_ECHO_INPUT,
         granularity=Granularity.PROGRAM,
-        metadata={"sample": sample},
+        sample=sample,
     )
 
     state = ControllerState(prefix="")
-    result = oracle.run(state, artifact)
+    result = oracle.run(state, artifact, OracleContext())
 
     assert result.verdict == Verdict.PASS
     assert len(result.diagnostics) == 0
@@ -143,19 +144,20 @@ def test_program_oracle_pass_exit_code():
     rustc = _rustc_path()
     oracle = ProgramOracle(gcc_path=gcc, rustc_path=rustc)
 
-    sample = DiffTestSample(
-        c_source=C_EXIT_CODE,
+    sample = TranslationSample(
+        source_code=C_EXIT_CODE,
+        source_lang="c",
         test_cases=[TestCase(stdin="", test_id="exit_42")],
     )
 
     artifact = Artifact(
         code=RUST_EXIT_CODE_CORRECT,
         granularity=Granularity.PROGRAM,
-        metadata={"sample": sample},
+        sample=sample,
     )
 
     state = ControllerState(prefix="")
-    result = oracle.run(state, artifact)
+    result = oracle.run(state, artifact, OracleContext())
 
     assert result.verdict == Verdict.PASS
 
@@ -165,19 +167,20 @@ def test_program_oracle_fail_exit_code_mismatch():
     rustc = _rustc_path()
     oracle = ProgramOracle(gcc_path=gcc, rustc_path=rustc)
 
-    sample = DiffTestSample(
-        c_source=C_EXIT_CODE,
+    sample = TranslationSample(
+        source_code=C_EXIT_CODE,
+        source_lang="c",
         test_cases=[TestCase(stdin="", test_id="exit_mismatch")],
     )
 
     artifact = Artifact(
         code=RUST_EXIT_CODE_WRONG,
         granularity=Granularity.PROGRAM,
-        metadata={"sample": sample},
+        sample=sample,
     )
 
     state = ControllerState(prefix="")
-    result = oracle.run(state, artifact)
+    result = oracle.run(state, artifact, OracleContext())
 
     assert result.verdict == Verdict.FAIL
     assert len(result.diagnostics) > 0
@@ -189,19 +192,20 @@ def test_program_oracle_fail_output_mismatch():
     rustc = _rustc_path()
     oracle = ProgramOracle(gcc_path=gcc, rustc_path=rustc)
 
-    sample = DiffTestSample(
-        c_source=C_WRONG_OUTPUT,
+    sample = TranslationSample(
+        source_code=C_WRONG_OUTPUT,
+        source_lang="c",
         test_cases=[TestCase(stdin="", test_id="output_mismatch")],
     )
 
     artifact = Artifact(
         code=RUST_WRONG_OUTPUT,
         granularity=Granularity.PROGRAM,
-        metadata={"sample": sample},
+        sample=sample,
     )
 
     state = ControllerState(prefix="")
-    result = oracle.run(state, artifact)
+    result = oracle.run(state, artifact, OracleContext())
 
     assert result.verdict == Verdict.FAIL
     assert len(result.diagnostics) > 0
@@ -216,11 +220,11 @@ def test_program_oracle_not_applicable_no_sample():
     artifact = Artifact(
         code=RUST_HELLO_WORLD,
         granularity=Granularity.PROGRAM,
-        metadata={},
+        sample=None,
     )
 
     state = ControllerState(prefix="")
-    result = oracle.run(state, artifact)
+    result = oracle.run(state, artifact, OracleContext())
 
     assert result.verdict == Verdict.NOT_APPLICABLE
     assert any("No sample data" in d.message for d in result.diagnostics)
@@ -231,19 +235,20 @@ def test_program_oracle_not_applicable_no_test_cases():
     rustc = _rustc_path()
     oracle = ProgramOracle(gcc_path=gcc, rustc_path=rustc)
 
-    sample = DiffTestSample(
-        c_source=C_HELLO_WORLD,
+    sample = TranslationSample(
+        source_code=C_HELLO_WORLD,
+        source_lang="c",
         test_cases=[],
     )
 
     artifact = Artifact(
         code=RUST_HELLO_WORLD,
         granularity=Granularity.PROGRAM,
-        metadata={"sample": sample},
+        sample=sample,
     )
 
     state = ControllerState(prefix="")
-    result = oracle.run(state, artifact)
+    result = oracle.run(state, artifact, OracleContext())
 
     assert result.verdict == Verdict.NOT_APPLICABLE
     assert any("No test cases" in d.message for d in result.diagnostics)
@@ -254,8 +259,9 @@ def test_program_oracle_fail_rust_compile_error():
     rustc = _rustc_path()
     oracle = ProgramOracle(gcc_path=gcc, rustc_path=rustc)
 
-    sample = DiffTestSample(
-        c_source=C_HELLO_WORLD,
+    sample = TranslationSample(
+        source_code=C_HELLO_WORLD,
+        source_lang="c",
         test_cases=[TestCase(stdin="", test_id="compile_fail")],
     )
 
@@ -268,11 +274,11 @@ fn main() {
     artifact = Artifact(
         code=invalid_rust,
         granularity=Granularity.PROGRAM,
-        metadata={"sample": sample},
+        sample=sample,
     )
 
     state = ControllerState(prefix="")
-    result = oracle.run(state, artifact)
+    result = oracle.run(state, artifact, OracleContext())
 
     assert result.verdict == Verdict.FAIL
     assert any("compilation failed" in d.message.lower() for d in result.diagnostics)
@@ -283,8 +289,9 @@ def test_program_oracle_cost_accounting():
     rustc = _rustc_path()
     oracle = ProgramOracle(gcc_path=gcc, rustc_path=rustc)
 
-    sample = DiffTestSample(
-        c_source=C_HELLO_WORLD,
+    sample = TranslationSample(
+        source_code=C_HELLO_WORLD,
+        source_lang="c",
         test_cases=[
             TestCase(stdin="", test_id="test_1"),
             TestCase(stdin="", test_id="test_2"),
@@ -295,11 +302,11 @@ def test_program_oracle_cost_accounting():
     artifact = Artifact(
         code=RUST_HELLO_WORLD,
         granularity=Granularity.PROGRAM,
-        metadata={"sample": sample},
+        sample=sample,
     )
 
     state = ControllerState(prefix="")
-    result = oracle.run(state, artifact)
+    result = oracle.run(state, artifact, OracleContext())
 
     assert result.realized_cost == 1 + 3 * 2
 
