@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from controller.loop import select_oracles_by_granularity
 from core.budget import Budget
-from core.types import Artifact, ControllerState, Granularity, OracleOutput
+from core.types import Artifact, ControllerState, Granularity, OracleContext, OracleOutput
 
 
 @dataclass
@@ -12,7 +12,15 @@ class _FakeOracle:
     name: str
     required_granularity: Granularity
 
-    def run(self, state: ControllerState, artifact: Artifact) -> OracleOutput:  # pragma: no cover
+    def run(
+        self,
+        state: ControllerState,
+        artifact: Artifact,
+        context: OracleContext,
+    ) -> OracleOutput:  # pragma: no cover
+        _ = state
+        _ = artifact
+        _ = context
         raise NotImplementedError
 
 

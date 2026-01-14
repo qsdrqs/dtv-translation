@@ -1,11 +1,15 @@
 from __future__ import annotations
 
-from core.types import Granularity, RollbackScope
+from core.types import Granularity, GroupStackFrame, RollbackScope
 from rollback.manager import RollbackManager
 
 
+def _frames(kinds: tuple[Granularity, ...]) -> tuple[GroupStackFrame, ...]:
+    return tuple(GroupStackFrame(kind=kind) for kind in kinds)
+
+
 def _commit(m: RollbackManager, prefix: str, group_stack: tuple[Granularity, ...]) -> None:
-    m.sync_groups(group_stack)
+    m.sync_groups(_frames(group_stack))
     m.add_stmt_checkpoint(prefix)
 
 
@@ -59,3 +63,17 @@ def test_rollback_func_truncates_to_func_start() -> None:
     assert out == "before_func"
     assert [c.prefix for c in m.stmt_checkpoints] == ["before_func"]
     assert m.group_stack == []
+
+
+def test_rollback_func_truncates_to_block_start() -> None:
+    m = RollbackManager()
+
+    _commit(m, "before_func", ())
+    _commit(m, "in_func_s1", (Granularity.FUNC,))
+    _commit(m, "in_func_s2", (Granularity.FUNC, Granularity.BLOCK))
+
+    out = m.rollback(RollbackScope.BLOCK)
+    assert out == "in_func_s1"
+    assert [c.prefix for c in m.stmt_checkpoints] == ["before_func", "in_func_s1"]
+    assert [(f.kind, f.start_stmt) for f in m.group_stack] == [(Granularity.FUNC, 1)]
+

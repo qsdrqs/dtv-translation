@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import time
 
-from c_rust.oracles.compiler_oracle.types import OracleContext
+from core.types import OracleContext
 
 
 @dataclass(frozen=True)
@@ -29,9 +29,13 @@ class RustcDriver:
         _check_rustc_version(self.rustc_path)
 
     def compile(self, ctx: OracleContext) -> RustcResult:
-        source_path = ctx.workdir / "main.rs"
-        output_path = ctx.workdir / "dtv_out"
-        source_path.write_text(ctx.artifact.code, encoding="utf-8")
+        if ctx.workdir is None or ctx.artifact is None:
+            raise ValueError("OracleContext missing workdir or artifact")
+        workdir = ctx.workdir
+        artifact = ctx.artifact
+        source_path = workdir / "main.rs"
+        output_path = workdir / "dtv_out"
+        source_path.write_text(artifact.code, encoding="utf-8")
 
         cmd = (
             self.rustc_path,

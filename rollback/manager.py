@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Sequence
 
-from core.types import Granularity, GroupEvent, GroupEventAction, RollbackScope
+from core.types import Granularity, GroupEvent, GroupEventAction, GroupStackFrame, RollbackScope
 
 
 @dataclass
@@ -52,13 +52,13 @@ class RollbackManager:
             elif event.action == GroupEventAction.CLOSE:
                 self.close_group(event.kind)
 
-    def sync_groups(self, desired: Sequence[Granularity]) -> None:
+    def sync_groups(self, desired: Sequence[GroupStackFrame]) -> None:
         """Synchronize group_stack to match the desired enclosing group kinds.
 
         This is intended to be called at COMMIT time, before adding the stmt checkpoint,
         so that open_group() records the correct start_stmt index.
         """
-        desired_kinds = [kind for kind in desired if kind in {Granularity.BLOCK, Granularity.FUNC}]
+        desired_kinds = [frame.kind for frame in desired if frame.kind in {Granularity.BLOCK, Granularity.FUNC}]
         current_kinds = [frame.kind for frame in self.group_stack]
 
         k = 0

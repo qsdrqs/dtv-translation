@@ -4,7 +4,7 @@ from c_rust.oracles.function_diff_test_oracle.trace_comparator import (
     find_first_mismatch,
     parse_trace_events,
 )
-from c_rust.oracles.types import TraceEvent, TraceEventKind
+from core.types import ExecutionTraceEvent, TraceEventKind
 
 
 def test_parse_trace_events_includes_args_ret_ptr_args() -> None:
@@ -25,7 +25,7 @@ def test_parse_trace_events_includes_args_ret_ptr_args() -> None:
 
 def test_find_first_mismatch_skips_placeholder_and_counts() -> None:
     c_trace = [
-        TraceEvent(
+        ExecutionTraceEvent(
             kind=TraceEventKind.FUNC_ENTER,
             id="f",
             args=[
@@ -35,7 +35,7 @@ def test_find_first_mismatch_skips_placeholder_and_counts() -> None:
         )
     ]
     rust_trace = [
-        TraceEvent(
+        ExecutionTraceEvent(
             kind=TraceEventKind.FUNC_ENTER,
             id="f",
             args=[
@@ -55,7 +55,7 @@ def test_find_first_mismatch_skips_placeholder_and_counts() -> None:
 
 def test_find_first_mismatch_detects_value_mismatch() -> None:
     c_trace = [
-        TraceEvent(
+        ExecutionTraceEvent(
             kind=TraceEventKind.FUNC_EXIT,
             id="f",
             ret={"ty": "i32", "val": 1},
@@ -63,7 +63,7 @@ def test_find_first_mismatch_detects_value_mismatch() -> None:
         )
     ]
     rust_trace = [
-        TraceEvent(
+        ExecutionTraceEvent(
             kind=TraceEventKind.FUNC_EXIT,
             id="f",
             ret={"ty": "i32", "val": 2},

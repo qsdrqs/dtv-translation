@@ -9,7 +9,13 @@ def _stack(prefix: str, suffix: str = "") -> tuple[Granularity, ...]:
     code = f"{prefix}{suffix}"
     end_byte = len(prefix.rstrip().encode("utf-8"))
     tree = parse_rust(code)
-    return rust_group_stack(tree, prefix_end_byte=end_byte, skip_function_body_block=True)
+    stack = rust_group_stack(
+        tree,
+        prefix_end_byte=end_byte,
+        source_bytes=code.encode("utf-8"),
+        skip_function_body_block=True,
+    )
+    return tuple(frame.kind for frame in stack)
 
 
 def _render_stack(prefix: str) -> tuple[Granularity, ...] | None:
@@ -17,7 +23,10 @@ def _render_stack(prefix: str) -> tuple[Granularity, ...] | None:
     result = renderer.try_render(prefix, Granularity.STMT)
     if result.status != RenderStatus.OK or result.artifact is None:
         return None
-    return result.artifact.group_stack
+    stack = result.artifact.group_stack
+    if stack is None:
+        return None
+    return tuple(frame.kind for frame in stack)
 
 
 def test_stack_inside_block() -> None:
@@ -45,6 +54,27 @@ fn foo() {
 }
 """
     assert _stack(prefix, suffix) == (Granularity.FUNC,)
+
+
+def test_stack_includes_function_name() -> None:
+    prefix = """\
+fn foo() {
+  s1;
+"""
+    suffix = """\
+}
+"""
+    code = f"{prefix}{suffix}"
+    end_byte = len(prefix.rstrip().encode("utf-8"))
+    tree = parse_rust(code)
+    stack = rust_group_stack(
+        tree,
+        prefix_end_byte=end_byte,
+        source_bytes=code.encode("utf-8"),
+        skip_function_body_block=True,
+    )
+    assert stack
+    assert any(frame.kind == Granularity.FUNC and frame.name_id == "foo" for frame in stack)
 
 
 def test_stack_after_function_end() -> None:

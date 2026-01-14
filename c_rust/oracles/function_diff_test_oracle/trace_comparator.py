@@ -6,11 +6,10 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from core.types import RollbackScope
-from c_rust.oracles.types import TraceEvent, TraceEventKind, Mismatch
+from core.types import ExecutionTraceEvent, Mismatch, RollbackScope, TraceEventKind
 
 
-def parse_trace_events(stderr: str) -> list[TraceEvent]:
+def parse_trace_events(stderr: str) -> list[ExecutionTraceEvent]:
     """Parse JSON trace events from stderr, ignoring non-JSON lines."""
     events = []
     for line in stderr.strip().split('\n'):
@@ -22,7 +21,7 @@ def parse_trace_events(stderr: str) -> list[TraceEvent]:
             if kind_str not in ('func_enter', 'func_exit', 'block_enter', 'block_exit'):
                 continue  # Skip non-trace JSON (e.g., other log messages)
 
-            event = TraceEvent(
+            event = ExecutionTraceEvent(
                 kind=TraceEventKind(kind_str),
                 id=data['id'],
                 timestamp_us=data.get('timestamp'),
@@ -51,8 +50,8 @@ class TraceComparisonStats:
 
 
 def find_first_mismatch(
-    c_trace: list[TraceEvent],
-    rust_trace: list[TraceEvent],
+    c_trace: list[ExecutionTraceEvent],
+    rust_trace: list[ExecutionTraceEvent],
     scope: RollbackScope = RollbackScope.FUNC,
 ) -> tuple[Mismatch | None, TraceComparisonStats]:
     """Find first mismatch using longest common prefix."""
@@ -83,17 +82,17 @@ def find_first_mismatch(
     return None, stats
 
 
-def _events_match(c_event: TraceEvent, rust_event: TraceEvent) -> bool:
+def _events_match(c_event: ExecutionTraceEvent, rust_event: ExecutionTraceEvent) -> bool:
     return c_event.kind == rust_event.kind and c_event.id == rust_event.id
 
 
-def _event_repr(event: TraceEvent) -> str:
+def _event_repr(event: ExecutionTraceEvent) -> str:
     return f"{event.kind.value}({event.id})"
 
 
 def _compare_event_payload(
-    c_event: TraceEvent,
-    rust_event: TraceEvent,
+    c_event: ExecutionTraceEvent,
+    rust_event: ExecutionTraceEvent,
     stats: TraceComparisonStats,
     position: int,
     scope: RollbackScope,

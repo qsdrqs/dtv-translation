@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Sequence
 
-from c_rust.oracles.types import ExecutionResult, TestCase
+from core.types import ExecutionResult, TestCase
 
 
 class CompilationDriver:

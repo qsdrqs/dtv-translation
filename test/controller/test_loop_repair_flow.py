@@ -25,9 +25,10 @@ class _OracleFail:
     name: str = "oracle"
     required_granularity: Granularity = Granularity.STMT
 
-    def run(self, state, artifact):
+    def run(self, state, artifact, context):
         _ = state
         _ = artifact
+        _ = context
         from core.types import OracleOutput
 
         return OracleOutput(
