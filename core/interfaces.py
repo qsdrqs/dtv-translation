@@ -8,6 +8,7 @@ from core.types import (
     GenerateContext,
     GenerateResult,
     Granularity,
+    OracleContext,
     OracleOutput,
     RenderResult,
 )
@@ -28,10 +29,16 @@ class Oracle(Protocol):
     name: str
     required_granularity: Granularity
 
-    def run(self, state: ControllerState, artifact: Artifact) -> OracleOutput:
+    def run(self, state: ControllerState, artifact: Artifact, context: OracleContext) -> OracleOutput:
         ...
 
 
 class OracleRunner(Protocol):
-    def run(self, oracles: list[Oracle], state: ControllerState, artifact: Artifact) -> list[OracleOutput]:
+    def run(
+        self,
+        oracles: list[Oracle],
+        state: ControllerState,
+        artifact: Artifact,
+        context: OracleContext,
+    ) -> list[OracleOutput]:
         ...

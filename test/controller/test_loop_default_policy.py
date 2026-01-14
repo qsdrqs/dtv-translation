@@ -83,9 +83,10 @@ class _SequenceOracle:
         self.required_granularity = required_granularity
         self.idx = 0
 
-    def run(self, state, artifact) -> OracleOutput:
+    def run(self, state, artifact, context) -> OracleOutput:
         _ = state
         _ = artifact
+        _ = context
         if not self.verdicts:
             verdict = Verdict.NOT_APPLICABLE
         else:

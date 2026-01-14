@@ -14,6 +14,8 @@ from core.types import (
     GenerateContext,
     GenerateMessage,
     Granularity,
+    GroupStackFrame,
+    OracleContext,
     OracleOutput,
     RenderStatus,
     RollbackScope,
@@ -70,6 +72,8 @@ class ControllerRuntime:
     last_render_status: RenderStatus | None = None
     last_artifact: Artifact | None = None
     last_outputs: tuple[OracleOutput, ...] = ()
+    last_group_stack: tuple[GroupStackFrame, ...] | None = None
+    last_closed_stack: tuple[GroupStackFrame, ...] = ()
     failed_prefix: str | None = None
     pending_patch: str | None = None
     repair_base_prefix: str | None = None
@@ -102,10 +106,16 @@ def select_oracles_by_granularity(
 
 
 class DummyOracleRunner:
-    def run(self, oracles: list[Oracle], state: ControllerState, artifact: Artifact) -> list[OracleOutput]:
+    def run(
+        self,
+        oracles: list[Oracle],
+        state: ControllerState,
+        artifact: Artifact,
+        context: OracleContext,
+    ) -> list[OracleOutput]:
         outputs: list[OracleOutput] = []
         for oracle in oracles:
-            outputs.append(oracle.run(state, artifact))
+            outputs.append(oracle.run(state, artifact, context))
         return outputs
 
 
@@ -158,6 +168,32 @@ def _clear_repair_context(runtime: ControllerRuntime) -> None:
     runtime.repair_base_prefix = None
 
 
+def _closed_stack_diff(
+    previous: tuple[GroupStackFrame, ...] | None,
+    current: tuple[GroupStackFrame, ...] | None,
+) -> tuple[GroupStackFrame, ...]:
+    if not previous:
+        return ()
+    if current is None:
+        return previous
+    k = 0
+    while k < len(previous) and k < len(current) and previous[k] == current[k]:
+        k += 1
+    return previous[k:]
+
+
+def _closed_function_name(closed_stack: tuple[GroupStackFrame, ...]) -> str | None:
+    if not closed_stack:
+        return None
+    function_frame = next(
+        (frame for frame in reversed(closed_stack) if frame.kind == Granularity.FUNC and frame.name_id),
+        None,
+    )
+    if function_frame is None:
+        return None
+    return function_frame.name_id
+
+
 def _append_trace(
     trace: list[TraceEvent],
     *,
@@ -208,6 +244,7 @@ def _handle_generate(
     runtime.last_render_status = None
     runtime.last_artifact = None
     runtime.last_outputs = ()
+    runtime.last_closed_stack = ()
     runtime.last_action = Action.GENERATE
     _append_trace(
         trace,
@@ -232,22 +269,47 @@ def _handle_verify(
 ) -> None:
     if op.granularity is None:
         raise ValueError("VERIFY requires granularity")
+    # Render the current prefix and update runtime state
     render_result = renderer.try_render(runtime.state.prefix, op.granularity)
     runtime.last_render_status = render_result.status
     runtime.last_artifact = render_result.artifact if render_result.status == RenderStatus.OK else None
     outputs: list[OracleOutput] = []
     notes = render_result.notes
+    oracle_context = OracleContext()
     if render_result.status == RenderStatus.OK and runtime.last_artifact is not None:
+        # Track group stack changes and update closed stack
+        if runtime.last_artifact.group_stack is not None:
+            runtime.last_closed_stack = _closed_stack_diff(
+                runtime.last_group_stack,
+                runtime.last_artifact.group_stack,
+            )
+            runtime.last_group_stack = runtime.last_artifact.group_stack
+            oracle_context = OracleContext(
+                closed_stack=runtime.last_closed_stack,
+                closed_function_name=_closed_function_name(runtime.last_closed_stack),
+            )
+        else:
+            runtime.last_closed_stack = ()
+            runtime.last_group_stack = None
+        # Select and run oracles, update budget and feedback
         selected_oracles = policy.select_oracles(runtime.last_artifact, budget, oracles)
         if selected_oracles:
-            outputs = oracle_runner.run(selected_oracles, runtime.state, runtime.last_artifact)
+            outputs = oracle_runner.run(
+                selected_oracles,
+                runtime.state,
+                runtime.last_artifact,
+                oracle_context,
+            )
             for output in outputs:
                 budget.record_oracle_call(output.oracle_name, output.realized_cost)
             feedback_state.update(outputs)
         else:
             notes = notes or "no oracles selected"
+    else:
+        runtime.last_closed_stack = ()
     runtime.last_outputs = tuple(outputs)
 
+    # Handle repair context based on oracle verdicts
     if outputs:
         if any(out.verdict == Verdict.FAIL for out in outputs):
             runtime.failed_prefix = runtime.state.prefix
@@ -309,6 +371,8 @@ def _handle_rollback(
     runtime.last_render_status = None
     runtime.last_artifact = None
     runtime.last_outputs = ()
+    runtime.last_group_stack = None
+    runtime.last_closed_stack = ()
     runtime.last_action = Action.ROLLBACK
     _append_trace(
         trace,
@@ -364,6 +428,8 @@ def _handle_apply_patch(
     runtime.last_render_status = None
     runtime.last_artifact = None
     runtime.last_outputs = ()
+    runtime.last_group_stack = None
+    runtime.last_closed_stack = ()
     runtime.last_action = Action.APPLY_PATCH
     _append_trace(
         trace,
@@ -435,6 +501,7 @@ def run_dtv_loop(
         feedback_strategy = AppendToLastAssistant()
     if oracle_runner is None:
         oracle_runner = DummyOracleRunner()
+    oracle_runner_impl: OracleRunner = oracle_runner
 
     runtime = ControllerRuntime(state=ControllerState(prefix=""))
     trace: list[TraceEvent] = []
@@ -488,7 +555,7 @@ def run_dtv_loop(
                 renderer,
                 policy,
                 oracles,
-                oracle_runner,
+                oracle_runner_impl,
                 budget,
                 feedback_state,
                 trace,
