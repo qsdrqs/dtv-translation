@@ -7,7 +7,7 @@ from c_rust.render.context_rules import PatchPhase, apply_patch_rules
 from c_rust.render.groups import parse_rust, rust_group_stack
 from c_rust.render.scan import brace_close_plan, scan_unclosed
 from c_rust.render.suffix import create_plan, plan_to_suffix
-from core.types import Artifact, Granularity, RenderResult, RenderStatus
+from core.types import Artifact, Granularity, RenderResult, RenderStatus, TranslationSample
 
 
 @dataclass(frozen=True)
@@ -17,8 +17,13 @@ class RenderConfig:
 
 
 class CRustRenderer:
-    def __init__(self, config: RenderConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: RenderConfig | None = None,
+        sample: TranslationSample | None = None,
+    ) -> None:
         self.config = config or RenderConfig()
+        self.sample = sample
 
     def try_render(self, prefix: str, granularity: Granularity) -> RenderResult:
         try:
@@ -70,7 +75,7 @@ class CRustRenderer:
             code=code,
             granularity=granularity,
             ast_tree=tree,
-            sample=None,
+            sample=self.sample,
             group_events=(),
             group_stack=group_stack,
         )
