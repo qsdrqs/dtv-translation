@@ -1,0 +1,102 @@
+from __future__ import annotations
+
+from collections.abc import Callable, Sequence
+
+import torch
+import transformers
+from transformers import StoppingCriteria, StoppingCriteriaList
+
+from core.generator_backend import GeneratorBackend, infer_stop_reason
+from core.logger import get_logger
+from core.types import GenerateContext, GenerateResult
+
+logger = get_logger(__name__)
+
+
+class QwenGeneratorBackend(GeneratorBackend):
+    def __init__(
+        self,
+        model_name: str = "Qwen/Qwen3-4B-Instruct-2507",
+        stop_criteria_factory: Callable[
+            [transformers.PreTrainedTokenizerBase],
+            Sequence[StoppingCriteria],
+        ]
+        | None = None,
+    ) -> None:
+        super().__init__(model_name=model_name, stop_criteria_factory=stop_criteria_factory)
+        self.model_name = model_name
+        use_cuda = torch.cuda.is_available()
+        model_kwargs: dict[str, object] = {}
+        if use_cuda:
+            model_kwargs["device_map"] = "auto"
+            model_kwargs["torch_dtype"] = (
+                torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+            )
+        self.tokenizer = transformers.AutoTokenizer.from_pretrained(model_name)
+        self.model = transformers.AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
+        self.model.eval()
+        self._use_cuda = use_cuda
+        stop_criteria = stop_criteria_factory(self.tokenizer) if stop_criteria_factory is not None else []
+        self.stop_criteria: StoppingCriteriaList = StoppingCriteriaList(list(stop_criteria))
+
+    def _build_prompt(self, context: GenerateContext) -> str:
+        if not context.messages:
+            return ""
+
+        parts: list[str] = []
+        for msg in context.messages:
+            if isinstance(msg, dict):
+                if "stop" not in msg:
+                    raise ValueError("GenerateMessage requires explicit stop")
+                role = str(msg.get("role", ""))
+                content = str(msg.get("content", ""))
+                stop = bool(msg["stop"])
+            else:
+                role = msg.role
+                content = msg.content
+                stop = msg.stop
+
+            segment = f"<|im_start|>{role}\n{content}"
+            if stop:
+                segment = f"{segment}\n<|im_end|>"
+            parts.append(segment)
+        return "\n".join(parts)
+
+    def _get_eos_token_ids(self) -> set[int]:
+        if self.model.generation_config is None:
+            raise RuntimeError(f"Model {self.model_name} has no generation_config")
+        eos_ids = self.model.generation_config.eos_token_id
+        if eos_ids is None:
+            eos_ids = self.tokenizer.eos_token_id
+        if eos_ids is None:
+            return set()
+        if isinstance(eos_ids, (list, tuple, set)):
+            return {int(token_id) for token_id in eos_ids}
+        return {int(eos_ids)}
+
+    def generate_step(self, context: GenerateContext) -> GenerateResult:
+        prompt = self._build_prompt(context)
+        logger.model_input("%s", prompt)
+
+        inputs = self.tokenizer(prompt, return_tensors="pt")
+        if self._use_cuda:
+            inputs = inputs.to(self.model.device)
+        outputs = self.model.generate(
+            inputs.input_ids,
+            max_new_tokens=context.max_new_length,
+            stopping_criteria=self.stop_criteria,
+        )
+
+        output_ids = outputs[0]
+        input_len = inputs.input_ids.shape[-1]
+        new_ids = output_ids[input_len:]
+        delta_text = self.tokenizer.decode(new_ids, skip_special_tokens=True)
+        logger.model_output("%s", f"{prompt}{delta_text}")
+
+        delta_tokens = int(new_ids.shape[-1]) if new_ids is not None else 0
+        eos_ids = self._get_eos_token_ids()
+        eos_reached = False
+        if eos_ids and new_ids is not None and delta_tokens > 0:
+            eos_reached = int(new_ids[-1]) in eos_ids
+        stop_reason = infer_stop_reason(delta_text, delta_tokens, context.max_new_length, eos_reached)
+        return GenerateResult(delta_text=delta_text, delta_tokens=delta_tokens, stop_reason=stop_reason)

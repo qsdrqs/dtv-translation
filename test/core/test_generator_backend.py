@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from core.generator_backend import infer_stop_reason
+from core.qwen_generator_backend import QwenGeneratorBackend
+from core.types import GenerateContext, GenerateMessage
 
 
 def test_infer_stop_reason_eos_precedence() -> None:
@@ -27,3 +29,52 @@ def test_infer_stop_reason_empty() -> None:
 def test_infer_stop_reason_unknown() -> None:
     reason = infer_stop_reason("let x = 1", delta_tokens=3, max_new_length=10, eos_reached=False)
     assert reason.kind == "unknown"
+
+
+def test_build_prompt_trailing_assistant_no_stop() -> None:
+    backend = QwenGeneratorBackend.__new__(QwenGeneratorBackend)
+    context = GenerateContext(
+        messages=(
+            GenerateMessage(role="user", content="hello", stop=True),
+            GenerateMessage(role="assistant", content="prefix", stop=False),
+        )
+    )
+
+    prompt = backend._build_prompt(context)
+
+    assert prompt == "<|im_start|>user\nhello\n<|im_end|>\n<|im_start|>assistant\nprefix"
+
+
+def test_build_prompt_trailing_assistant_with_stop() -> None:
+    backend = QwenGeneratorBackend.__new__(QwenGeneratorBackend)
+    context = GenerateContext(
+        messages=(
+            GenerateMessage(role="user", content="hello", stop=True),
+            GenerateMessage(role="assistant", content="prefix", stop=True),
+        )
+    )
+
+    prompt = backend._build_prompt(context)
+
+    assert prompt == "<|im_start|>user\nhello\n<|im_end|>\n<|im_start|>assistant\nprefix\n<|im_end|>"
+
+
+def test_build_prompt_trailing_empty_assistant_no_stop() -> None:
+    backend = QwenGeneratorBackend.__new__(QwenGeneratorBackend)
+    context = GenerateContext(messages=(
+        GenerateMessage(role="user", content="hello", stop=True),
+        GenerateMessage(role="assistant", content="", stop=False),
+    ))
+
+    prompt = backend._build_prompt(context)
+
+    assert prompt == "<|im_start|>user\nhello\n<|im_end|>\n<|im_start|>assistant\n"
+
+
+def test_build_prompt_user_only() -> None:
+    backend = QwenGeneratorBackend.__new__(QwenGeneratorBackend)
+    context = GenerateContext(messages=(GenerateMessage(role="user", content="hello", stop=True),))
+
+    prompt = backend._build_prompt(context)
+
+    assert prompt == "<|im_start|>user\nhello\n<|im_end|>"

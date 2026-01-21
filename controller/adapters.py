@@ -5,6 +5,7 @@ from collections.abc import Callable, Sequence
 import transformers
 
 from core.generator_backend import GeneratorBackend
+from core.qwen_generator_backend import QwenGeneratorBackend
 from core.interfaces import Generator
 from core.types import GenerateContext, GenerateResult
 from transformers import StoppingCriteria
@@ -19,8 +20,9 @@ class GeneratorAdapter(Generator):
             Sequence[StoppingCriteria],
         ]
         | None = None,
+        backend_cls: type[GeneratorBackend] = QwenGeneratorBackend,
     ) -> None:
-        self.backend = GeneratorBackend(
+        self.backend = backend_cls(
             model_name=model_name,
             stop_criteria_factory=stop_criteria_factory,
         )

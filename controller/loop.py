@@ -128,7 +128,7 @@ def update_last_assistant(messages: list[GenerateMessage], content: str) -> None
                 stop=messages[idx].stop,
             )
             return
-    messages.append(GenerateMessage(role="assistant", content=content))
+    messages.append(GenerateMessage(role="assistant", content=content, stop=False))
 
 
 def _remaining_tokens(budget: Budget) -> int:
@@ -509,7 +509,7 @@ def run_dtv_loop(
     base_messages: list[GenerateMessage] = []
     if prompt_prefix:
         base_messages.append(GenerateMessage(role="user", content=prompt_prefix, stop=True))
-    base_messages.append(GenerateMessage(role="assistant", content=""))
+    base_messages.append(GenerateMessage(role="assistant", content="", stop=False))
     context = GenerateContext(messages=base_messages, steps=0, max_new_length=max_new_length)
 
     while runtime.state.step < max_steps:

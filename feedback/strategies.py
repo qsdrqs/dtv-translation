@@ -30,11 +30,13 @@ class AppendToLastAssistant:
         normalized: list[GenerateMessage | dict[str, Any]] = []
         for msg in messages:
             if isinstance(msg, dict):
+                if "stop" not in msg:
+                    raise ValueError("GenerateMessage requires explicit stop")
                 normalized.append(
                     GenerateMessage(
                         role=str(msg.get("role", "")),
                         content=str(msg.get("content", "")),
-                        stop=bool(msg.get("stop", False)),
+                        stop=bool(msg["stop"]),
                     )
                 )
             else:

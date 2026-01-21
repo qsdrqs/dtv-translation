@@ -14,7 +14,7 @@ class StopReason:
 class GenerateMessage:
     role: str
     content: str
-    stop: bool = False
+    stop: bool
 
 
 @dataclass
