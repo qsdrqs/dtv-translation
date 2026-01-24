@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 
@@ -8,6 +8,87 @@ class FenceState(str, Enum):
     OUTSIDE = "outside"
     INSIDE = "inside"
     DONE = "done"
+
+
+@dataclass
+class FenceTracker:
+    allowed_langs: tuple[str, ...]
+    state: FenceState = FenceState.OUTSIDE
+    _buffer: str = ""
+    _saw_fence: bool = False
+    _epoch: int = 0
+    _inside_parts: list[str] = field(default_factory=list)
+
+    def reset(self) -> None:
+        self.state = FenceState.OUTSIDE
+        self._buffer = ""
+        self._saw_fence = False
+        self._epoch += 1
+        self._inside_parts.clear()
+
+    @property
+    def saw_fence(self) -> bool:
+        return self._saw_fence
+
+    @property
+    def epoch(self) -> int:
+        return self._epoch
+
+    def feed(self, chunk: str) -> str:
+        if not chunk:
+            return ""
+        if self.state == FenceState.DONE and not self._buffer:
+            return ""
+
+        # Carry over incomplete line fragments so fence markers split across chunks are detected.
+        data = f"{self._buffer}{chunk}"
+        self._buffer = ""
+        output_parts: list[str] = []
+
+        # Fence detection is line-based; only process complete lines here.
+        while True:
+            newline_idx = data.find("\n")
+            if newline_idx == -1:
+                break
+            line = data[: newline_idx + 1]
+            data = data[newline_idx + 1 :]
+            if self.state == FenceState.OUTSIDE:
+                # Ignore everything before an opening fence.
+                if _is_opening_fence(line, self.allowed_langs):
+                    self.state = FenceState.INSIDE
+                    self._saw_fence = True
+                continue
+            if self.state == FenceState.INSIDE:
+                # Capture code lines until the closing fence appears.
+                if _is_closing_fence(line):
+                    self.state = FenceState.DONE
+                    continue
+                output_parts.append(line)
+                continue
+
+        if data:
+            if self.state == FenceState.INSIDE:
+                # Inside a fence, emit trailing fragments unless they might start a fence line.
+                if _looks_like_fence_start(data):
+                    self._buffer = data
+                else:
+                    output_parts.append(data)
+            else:
+                self._buffer = data
+
+        if output_parts:
+            output = "".join(output_parts)
+            # Accumulate inside text for consumers that pull after generation.
+            self._inside_parts.append(output)
+            return output
+        return ""
+
+    def consume_inside(self) -> str:
+        if not self._inside_parts:
+            return ""
+        output = "".join(self._inside_parts)
+        self._inside_parts.clear()
+        return output
 
 
 @dataclass

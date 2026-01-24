@@ -3,7 +3,7 @@
 ## Project: Decoding Time Verification (DTV) for Code Translation
 
 1. no trailing spaces, no lines with only spaces
-2. keep this file up to date (last updated: 2026-01-11)
+2. keep this file up to date (last updated: 2026-01-23)
 
 ### Goal
 Implement Decoding Time Verification (DTV): integrate deterministic program verifiers into the decoding loop
@@ -22,31 +22,40 @@ Key assumptions (current):
 This repo intentionally uses a flat top-level layout (no `src/`):
 
 - `core/`: shared data structures and model backend glue
-  - `core/types.py`: `Artifact`, `Granularity`, `StopReason`, `GenerateContext/Result`, `GroupEvent`, `TraceEvent`, etc.
+  - `core/types/`: type definitions (split into modules):
+    - `artifact.py`: `Artifact`, `GroupEvent`, `GroupStackFrame`, `RenderResult`.
+    - `enums.py`: `Action`, `Granularity`, `RenderStatus`, `Verdict`, `RollbackScope`, `GroupEventAction`.
+    - `generation.py`: `GenerateContext`, `GenerateMessage`, `GenerateResult`, `StopReason`.
+    - `oracle.py`: `Diagnostic`, `OracleOutput`, `OracleContext`.
+    - `controller.py`: `ControllerState`, `TraceEvent`.
+    - `diff_testing.py`: `TranslationSample`, `TestCase`, `ExecutionResult`, `ExecutionTraceEvent`, etc.
   - `core/generator_backend.py`: Transformers generation; returns `GenerateResult(delta_tokens, stop_reason, ...)`.
-  - `core/budget.py`: token-budget accounting (oracle costs counted but not wall-clock yet).
+  - `core/qwen_generator_backend.py`: Qwen-specific generator backend.
+  - `core/budget.py`: token-budget accounting (gen tokens + per-oracle cost tracking).
   - `core/interfaces.py`: Protocols for `Generator`, `Renderer`, `Oracle`, `OracleRunner`.
   - `core/logger.py`: logging helpers.
 - `controller/`: decoding-time controller logic
+  - `controller/loop.py`: DTV state machine (`run_dtv_loop`); actions: GENERATE, VERIFY, COMMIT, ROLLBACK, FEEDBACK, APPLY_PATCH, CONTINUE, TERMINATE.
+  - `controller/policy.py`: `DefaultPolicy` with ablation config knobs (`DefaultPolicyConfig`).
   - `controller/stop_criteria.py`: boundary-based `StoppingCriteria` (string/comment aware; TODO: brace/paren depth).
-  - `controller/loop.py`: DTV loop (currently step-wise generate->render->oracle->act; TODO: explicit action/state machine).
   - `controller/adapters.py`: adapter from `GeneratorBackend` to `Generator` protocol.
 - `feedback/`: deterministic feedback state + prompt augmentation strategies
   - `feedback/feedback.py`: `FeedbackState` (bounded, deduped diagnostics summary).
   - `feedback/strategies.py`: how feedback is inserted into chat/prompt (e.g., append to last assistant).
-- `rollback/`: rollback/checkpoint management (pre-CDHR)
+- `rollback/`: rollback/checkpoint management
   - `rollback/manager.py`: stmt checkpoints + block/func group stack (synced at COMMIT using `Artifact.group_stack`).
 - `c_rust/`: C->Rust task implementation
   - `c_rust/render/`: stmt-level Rust renderer (syntax+semantic patching; emits `Artifact.group_stack` + AST for rollback grouping).
   - `c_rust/oracles/compiler_oracle/`: `rustc` compile oracle (JSON diagnostics).
   - `c_rust/oracles/program_diff_test_oracle/`: program-level differential testing oracle (C vs Rust).
-  - `c_rust/oracles/function_diff_test_oracle/`: components for function-level diff testing (instrumentation + FFI bridge + trace compare; TODO: `FunctionOracle` wrapper).
+  - `c_rust/oracles/function_diff_test_oracle/`: function-level diff testing (`FunctionOracle` + instrumentation + FFI bridge + trace compare).
   - `c_rust/oracles/block_diff_test_oracle/`: placeholder (TODO).
 - `js_ts/`: JS->TS task implementation (currently placeholders; TODO: renderer + `tsc` oracle + diff testing).
 - `test/`: unit tests (use the venv Python)
-  - `test/controller/test_stop_criteria.py`
-  - `test/core/test_generator_backend.py`
-  - `test/rollback/test_manager.py`
+  - `test/controller/`: `test_stop_criteria`, `test_loop_integration`, `test_loop_repair_flow`, `test_loop_default_policy`, `test_policy`, `test_policy_default`.
+  - `test/core/`: `test_generator_backend`.
+  - `test/rollback/`: `test_manager`, `test_group_sync`.
+  - `test/c_rust/`: `test_rust_renderer`, `test_rust_group_stack`, `test_c_instrumenter`, `test_rust_instrumenter`, `test_ffi_bridge`, `test_trace_comparator`, `test_program_oracle`, `test_rustc_parser`.
 
 ### Contracts / Invariants (do not silently break)
 - Token budget uses `GenerateResult.delta_tokens` (not character length).
@@ -66,27 +75,28 @@ This repo intentionally uses a flat top-level layout (no `src/`):
 
 ## Roadmap (TODO)
 ### Core (paper-critical)
-- [ ] Refactor controller into explicit actions/state machine: `GENERATE`, `VERIFY(scope)`, `ROLLBACK(scope)`, `COMMIT`, `TERMINATE`.
-- [ ] Structural boundary protocol for variable-sized verification:
-  - [ ] Standardize `Artifact` fields for boundaries/anchors (stmt boundary + block/func grouping at minimum).
-  - [ ] Make rollback semantics depend on these boundaries (not just stmt retries).
+- [x] Refactor controller into explicit actions/state machine: `GENERATE`, `VERIFY(scope)`, `ROLLBACK(scope)`, `COMMIT`, `TERMINATE`.
+- [x] Structural boundary protocol for variable-sized verification:
+  - [x] Standardize `Artifact` fields for boundaries/anchors (stmt boundary + block/func grouping at minimum).
+  - [x] Make rollback semantics depend on these boundaries (not just stmt retries).
 - [ ] Process rewards without training:
   - [ ] Define a deterministic `ProcessSignal`/reward summary from `OracleOutput` (pass/fail/diag deltas) + scope + cost.
   - [ ] Define aggregation rules across multiple oracles and multiple scopes.
 - [ ] Feedback as interaction protocol (not just a string append):
   - [ ] Add a `FeedbackPlan` abstraction (what to ask the model to do next) + an output parser (how to consume structured model outputs).
-  - [ ] Support multi-round repair attempts per step under a fixed token budget (inference-time scaling via extra repair turns).
+  - [x] Support multi-round repair attempts per step under a fixed token budget (inference-time scaling via extra repair turns).
 - [ ] CDHR core component: `ScopeSelector` (diagnostics -> minimal plausible rollback scope) using oracle diagnostics + structure + rollback state.
 - [ ] Budget + trace infrastructure for research plots:
-  - [ ] Track token cost vs oracle cost separately (wall-clock later).
+  - [x] Track token cost vs oracle cost separately (wall-clock later).
   - [ ] Export JSONL traces for analysis (action sequence + costs + diagnostics summary).
-- [ ] Ablations/baselines as config knobs (same loop, different policy):
-  - [ ] outcome-only (verify only at end), naive-process (fixed verify cadence), no-rollback, no-CDHR, fixed-scope-only.
+- [x] Ablations/baselines as config knobs (same loop, different policy):
+  - [x] outcome-only (verify only at end), naive-process (fixed verify cadence), no-rollback, no-CDHR, fixed-scope-only.
 
 ### Task-specific
 - [ ] `c_rust`:
   - [x] Emit `Artifact.group_stack` from the renderer (block/func boundaries).
-  - [ ] Wrap existing components into `FunctionOracle` and `BlockOracle` (function/block-level diff testing).
+  - [x] Wrap existing components into `FunctionOracle` (function-level diff testing).
+  - [ ] Implement `BlockOracle` (block-level diff testing).
 - [ ] `js_ts`:
   - [ ] Implement a minimal renderer + `tsc` oracle + diff testing baseline.
 

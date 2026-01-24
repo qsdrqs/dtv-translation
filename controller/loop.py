@@ -256,6 +256,13 @@ def _handle_generate(
     runtime.last_outputs = ()
     runtime.last_closed_stack = ()
     runtime.last_action = Action.GENERATE
+    logger.info(
+        "generate: step=%s delta_tokens=%s stop_reason=%s prefix_len=%s",
+        runtime.state.step,
+        result.delta_tokens,
+        result.stop_reason.kind,
+        len(runtime.state.prefix),
+    )
     _append_trace(
         trace,
         step=runtime.state.step,
@@ -281,6 +288,12 @@ def _handle_verify(
         raise ValueError("VERIFY requires granularity")
     # Render the current prefix and update runtime state
     render_result = renderer.try_render(runtime.state.prefix, op.granularity)
+    logger.info(
+        "verify: step=%s granularity=%s render_status=%s",
+        runtime.state.step,
+        op.granularity,
+        render_result.status,
+    )
     runtime.last_render_status = render_result.status
     runtime.last_artifact = render_result.artifact if render_result.status == RenderStatus.OK else None
     outputs: list[OracleOutput] = []
@@ -303,6 +316,7 @@ def _handle_verify(
             runtime.last_group_stack = None
         # Select and run oracles, update budget and feedback
         selected_oracles = policy.select_oracles(runtime.last_artifact, budget, oracles)
+        logger.info("verify: selected_oracles=%s", [oracle.name for oracle in selected_oracles])
         if selected_oracles:
             outputs = oracle_runner.run(
                 selected_oracles,
@@ -312,6 +326,12 @@ def _handle_verify(
             )
             for output in outputs:
                 budget.record_oracle_call(output.oracle_name, output.realized_cost)
+                logger.info(
+                    "oracle_result: oracle=%s verdict=%s diagnostics=%s",
+                    output.oracle_name,
+                    output.verdict,
+                    len(output.diagnostics),
+                )
             feedback_state.update(outputs)
         else:
             notes = notes or "no oracles selected"
@@ -355,6 +375,12 @@ def _handle_commit(
     rollback_manager.add_stmt_checkpoint(runtime.state.prefix)
     _clear_repair_context(runtime)
     runtime.last_action = Action.COMMIT
+    logger.info(
+        "commit: step=%s granularity=%s prefix_len=%s",
+        runtime.state.step,
+        runtime.last_artifact.granularity,
+        len(runtime.state.prefix),
+    )
     _append_trace(
         trace,
         step=runtime.state.step,
@@ -384,6 +410,12 @@ def _handle_rollback(
     runtime.last_group_stack = None
     runtime.last_closed_stack = ()
     runtime.last_action = Action.ROLLBACK
+    logger.info(
+        "rollback: step=%s scope=%s prefix_len=%s",
+        runtime.state.step,
+        op.rollback_scope,
+        len(runtime.state.prefix),
+    )
     _append_trace(
         trace,
         step=runtime.state.step,
@@ -429,6 +461,13 @@ def _handle_feedback(
     budget.add_tokens(result.delta_tokens)
     runtime.last_stop_reason = result.stop_reason
     runtime.last_action = Action.FEEDBACK
+    logger.info(
+        "feedback: step=%s delta_tokens=%s stop_reason=%s patch_len=%s",
+        runtime.state.step,
+        result.delta_tokens,
+        result.stop_reason.kind,
+        len(runtime.pending_patch),
+    )
     _append_trace(
         trace,
         step=runtime.state.step,
@@ -454,6 +493,12 @@ def _handle_apply_patch(
     runtime.last_group_stack = None
     runtime.last_closed_stack = ()
     runtime.last_action = Action.APPLY_PATCH
+    logger.info(
+        "apply_patch: step=%s patch_len=%s prefix_len=%s",
+        runtime.state.step,
+        len(runtime.pending_patch),
+        len(runtime.state.prefix),
+    )
     _append_trace(
         trace,
         step=runtime.state.step,
@@ -471,6 +516,7 @@ def _handle_continue(
     trace: list[TraceEvent],
 ) -> None:
     runtime.last_action = Action.CONTINUE
+    logger.info("continue: step=%s", runtime.state.step)
     _append_trace(
         trace,
         step=runtime.state.step,
@@ -487,6 +533,7 @@ def _handle_terminate(
     trace: list[TraceEvent],
 ) -> None:
     runtime.last_action = Action.TERMINATE
+    logger.info("terminate: step=%s", runtime.state.step)
     _append_trace(
         trace,
         step=runtime.state.step,
@@ -551,6 +598,16 @@ def run_dtv_loop(
             repair_base_prefix=runtime.repair_base_prefix,
         )
         op = policy.next_action(ctx)
+        logger.info(
+            "policy: step=%s action=%s granularity=%s rollback_scope=%s feedback_mode=%s tokens_used=%s tokens_left=%s",
+            runtime.state.step,
+            op.action,
+            op.granularity,
+            op.rollback_scope,
+            op.feedback_mode,
+            budget.gen_tokens_used,
+            _remaining_tokens(budget),
+        )
 
         if op.action in {Action.GENERATE, Action.FEEDBACK}:
             if _remaining_tokens(budget) <= 0:
