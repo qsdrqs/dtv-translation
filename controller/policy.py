@@ -10,6 +10,7 @@ from core.interfaces import Oracle
 from core.types import (
     Action,
     Artifact,
+    FeedbackMode,
     Granularity,
     OracleOutput,
     RenderStatus,
@@ -36,6 +37,7 @@ class DefaultPolicyConfig:
     terminate_on_eos_and_pass: bool = True
     max_repair_rounds: int | None = None
     oracle_selector: Literal["by_granularity"] = "by_granularity"
+    feedback_mode: FeedbackMode = FeedbackMode.INLINE
 
 
 class DefaultPolicy(Policy):
@@ -75,7 +77,7 @@ class DefaultPolicy(Policy):
                 if not _can_start_repair(self.config, self._repair_rounds, ctx):
                     return ControllerOp(Action.GENERATE)
                 _record_repair_round(self._repair_rounds, ctx)
-                return ControllerOp(Action.FEEDBACK)
+                return ControllerOp(Action.FEEDBACK, feedback_mode=self.config.feedback_mode)
 
         if ctx.last_action is None:
             return _generate_or_terminate(tokens_left)

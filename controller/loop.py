@@ -6,11 +6,13 @@ from typing import Protocol
 
 from core.budget import Budget
 from core.interfaces import Generator, Oracle, OracleRunner, Renderer
+from core.llm_output import FenceState
 from core.logger import get_logger
 from core.types import (
     Action,
     Artifact,
     ControllerState,
+    FeedbackMode,
     GenerateContext,
     GenerateMessage,
     Granularity,
@@ -47,6 +49,7 @@ class ControllerOp:
     action: Action
     granularity: Granularity | None = None
     rollback_scope: RollbackScope | None = None
+    feedback_mode: FeedbackMode | None = None
 
 
 @dataclass(frozen=True)
@@ -234,6 +237,13 @@ def _handle_generate(
     feedback_strategy: FeedbackStrategy,
     trace: list[TraceEvent],
 ) -> None:
+    # Main generation expects fenced Rust output; extract only fenced code.
+    context.extract_fence = True
+    if runtime.last_action == Action.ROLLBACK and not runtime.state.prefix:
+        # Rollback to empty prefix implies we must restart fence tracking from scratch.
+        reset_extractor = getattr(generator, "reset_output_extractor", None)
+        if callable(reset_extractor):
+            reset_extractor()
     update_last_assistant(base_messages, runtime.state.prefix)
     feedback = feedback_state.encode()
     context.messages = feedback_strategy.apply(base_messages, feedback, runtime.state.prefix)
@@ -387,9 +397,11 @@ def _handle_rollback(
 
 def _handle_feedback(
     runtime: ControllerRuntime,
+    op: ControllerOp,
     base_messages: list[GenerateMessage],
     context: GenerateContext,
     generator: Generator,
+    feedback_generator: Generator | None,
     budget: Budget,
     feedback_state: FeedbackState,
     feedback_strategy: FeedbackStrategy,
@@ -397,11 +409,22 @@ def _handle_feedback(
 ) -> None:
     if runtime.failed_prefix is None or runtime.repair_base_prefix is None:
         raise RuntimeError("FEEDBACK requires failed_prefix and repair base prefix.")
+    feedback_gen = generator
+    if op.feedback_mode == FeedbackMode.FENCED:
+        # Fenced feedback uses a dedicated generator to avoid polluting the main stream.
+        if feedback_generator is None:
+            raise RuntimeError("feedback_generator is required for fenced feedback mode")
+        feedback_gen = feedback_generator
+        reset_extractor = getattr(feedback_gen, "reset_output_extractor", None)
+        if callable(reset_extractor):
+            reset_extractor()
+    # Feedback output is also fenced; keep extraction on for both modes.
+    context.extract_fence = True
     bad_snippet = _failed_snippet(runtime.repair_base_prefix, runtime.failed_prefix)
     repair_feedback = _build_repair_feedback(feedback_state, bad_snippet)
     update_last_assistant(base_messages, runtime.repair_base_prefix)
     context.messages = feedback_strategy.apply(base_messages, repair_feedback, runtime.repair_base_prefix)
-    result = generator.generate_step(context)
+    result = feedback_gen.generate_step(context)
     runtime.pending_patch = result.delta_text
     budget.add_tokens(result.delta_tokens)
     runtime.last_stop_reason = result.stop_reason
@@ -482,6 +505,7 @@ def run_dtv_loop(
     feedback_state: FeedbackState,
     rollback_manager: RollbackManager,
     policy: Policy,
+    feedback_generator: Generator | None = None,
     feedback_strategy: FeedbackStrategy | None = None,
     max_steps: int = 100,
     max_new_length: int = 1024,
@@ -546,6 +570,10 @@ def run_dtv_loop(
                 trace,
             )
             runtime.state.step += 1
+            # Terminate immediately if the model ended without producing a rust fence.
+            if runtime.last_stop_reason is not None and runtime.last_stop_reason.kind == "no_fence_eos":
+                _handle_terminate(runtime, budget, trace)
+                break
             continue
 
         if op.action == Action.VERIFY:
@@ -569,6 +597,11 @@ def run_dtv_loop(
             continue
 
         if op.action == Action.ROLLBACK:
+            state_getter = getattr(generator, "get_output_extractor_state", None)
+            if callable(state_getter):
+                extractor_state = state_getter()
+                # Invariant: rollback never happens after the fenced block is closed.
+                assert extractor_state != FenceState.DONE, "rollback after fence closed is unsupported"
             _handle_rollback(runtime, op, rollback_manager, budget, trace)
             runtime.state.step += 1
             continue
@@ -576,9 +609,11 @@ def run_dtv_loop(
         if op.action == Action.FEEDBACK:
             _handle_feedback(
                 runtime,
+                op,
                 base_messages,
                 context,
                 generator,
+                feedback_generator,
                 budget,
                 feedback_state,
                 feedback_strategy,
@@ -604,4 +639,3 @@ def run_dtv_loop(
         raise ValueError(f"Unsupported action: {op.action}")
 
     return runtime.state.prefix, trace
-

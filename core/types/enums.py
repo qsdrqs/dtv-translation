@@ -38,6 +38,11 @@ class Action(str, Enum):
     TERMINATE = "terminate"
 
 
+class FeedbackMode(str, Enum):
+    INLINE = "inline"
+    FENCED = "fenced"
+
+
 class RollbackScope(str, Enum):
     STMT = "stmt"
     BLOCK = "block"

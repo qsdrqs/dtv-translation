@@ -22,6 +22,7 @@ class GenerateContext:
     messages: Sequence[GenerateMessage | dict[str, Any]]
     steps: int = 0
     max_new_length: int = 1024
+    extract_fence: bool = False
 
 
 @dataclass(frozen=True)

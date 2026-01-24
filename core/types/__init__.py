@@ -12,7 +12,15 @@ from .diff_testing import (
     TraceSequence,
     TranslationSample,
 )
-from .enums import Action, Granularity, GroupEventAction, RenderStatus, RollbackScope, Verdict
+from .enums import (
+    Action,
+    FeedbackMode,
+    Granularity,
+    GroupEventAction,
+    RenderStatus,
+    RollbackScope,
+    Verdict,
+)
 from .generation import GenerateContext, GenerateMessage, GenerateResult, StopReason
 from .oracle import Diagnostic, OracleContext, OracleOutput
 
@@ -22,6 +30,7 @@ __all__ = [
     "ComparisonResult",
     "ControllerState",
     "Diagnostic",
+    "FeedbackMode",
     "ExecutionResult",
     "ExecutionTraceEvent",
     "GenerateContext",
