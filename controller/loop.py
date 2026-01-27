@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from core.budget import Budget
 from core.interfaces import Generator, Oracle, OracleRunner, Renderer
-from core.llm_output import FenceState
+from core.llm_output import AssistantContent, FenceState, merge_assistant_content
 from core.logger import get_logger
 from core.types import (
     Action,
@@ -77,9 +77,12 @@ class ControllerRuntime:
     last_outputs: tuple[OracleOutput, ...] = ()
     last_group_stack: tuple[GroupStackFrame, ...] | None = None
     last_closed_stack: tuple[GroupStackFrame, ...] = ()
+    assistant_prefix: AssistantContent = field(default_factory=AssistantContent.empty)
     failed_prefix: str | None = None
+    failed_assistant_prefix: AssistantContent | None = None
     pending_patch: str | None = None
     repair_base_prefix: str | None = None
+    repair_base_assistant_prefix: AssistantContent | None = None
 
 
 class Policy(Protocol):
@@ -122,7 +125,7 @@ class DummyOracleRunner:
         return outputs
 
 
-def update_last_assistant(messages: list[GenerateMessage], content: str) -> None:
+def update_last_assistant(messages: list[GenerateMessage], content: str | AssistantContent) -> None:
     for idx in range(len(messages) - 1, -1, -1):
         if messages[idx].role == "assistant":
             messages[idx] = GenerateMessage(
@@ -167,8 +170,10 @@ def _failed_snippet(base_prefix: str, failed_prefix: str) -> str:
 
 def _clear_repair_context(runtime: ControllerRuntime) -> None:
     runtime.failed_prefix = None
+    runtime.failed_assistant_prefix = None
     runtime.pending_patch = None
     runtime.repair_base_prefix = None
+    runtime.repair_base_assistant_prefix = None
 
 
 def _closed_stack_diff(
@@ -244,11 +249,13 @@ def _handle_generate(
         reset_extractor = getattr(generator, "reset_output_extractor", None)
         if callable(reset_extractor):
             reset_extractor()
-    update_last_assistant(base_messages, runtime.state.prefix)
+    update_last_assistant(base_messages, runtime.assistant_prefix)
     feedback = feedback_state.encode()
-    context.messages = feedback_strategy.apply(base_messages, feedback, runtime.state.prefix)
+    context.messages = feedback_strategy.apply(base_messages, feedback, runtime.assistant_prefix)
     result = generator.generate_step(context)
     runtime.state.prefix += result.delta_text
+    assistant_delta = result.assistant_delta or AssistantContent.from_unfenced(result.delta_text)
+    runtime.assistant_prefix = merge_assistant_content(runtime.assistant_prefix, assistant_delta)
     budget.add_tokens(result.delta_tokens)
     runtime.last_stop_reason = result.stop_reason
     runtime.last_render_status = None
@@ -343,6 +350,7 @@ def _handle_verify(
     if outputs:
         if any(out.verdict == Verdict.FAIL for out in outputs):
             runtime.failed_prefix = runtime.state.prefix
+            runtime.failed_assistant_prefix = runtime.assistant_prefix
         elif all(out.verdict == Verdict.PASS for out in outputs):
             _clear_repair_context(runtime)
     runtime.last_action = Action.VERIFY
@@ -372,7 +380,7 @@ def _handle_commit(
         rollback_manager.sync_groups(runtime.last_artifact.group_stack)
     else:
         rollback_manager.apply_group_events(runtime.last_artifact.group_events)
-    rollback_manager.add_stmt_checkpoint(runtime.state.prefix)
+    rollback_manager.add_stmt_checkpoint(runtime.state.prefix, runtime.assistant_prefix)
     _clear_repair_context(runtime)
     runtime.last_action = Action.COMMIT
     logger.info(
@@ -401,9 +409,12 @@ def _handle_rollback(
 ) -> None:
     if op.rollback_scope is None:
         raise ValueError("ROLLBACK requires rollback_scope")
-    runtime.state.prefix = rollback_manager.rollback(op.rollback_scope)
+    snapshot = rollback_manager.rollback(op.rollback_scope)
+    runtime.state.prefix = snapshot.code_prefix
+    runtime.assistant_prefix = snapshot.assistant_prefix
     runtime.pending_patch = None
     runtime.repair_base_prefix = runtime.state.prefix
+    runtime.repair_base_assistant_prefix = runtime.assistant_prefix
     runtime.last_render_status = None
     runtime.last_artifact = None
     runtime.last_outputs = ()
@@ -439,7 +450,11 @@ def _handle_feedback(
     feedback_strategy: FeedbackStrategy,
     trace: list[TraceEvent],
 ) -> None:
-    if runtime.failed_prefix is None or runtime.repair_base_prefix is None:
+    if (
+        runtime.failed_prefix is None
+        or runtime.repair_base_prefix is None
+        or runtime.repair_base_assistant_prefix is None
+    ):
         raise RuntimeError("FEEDBACK requires failed_prefix and repair base prefix.")
     feedback_gen = generator
     if op.feedback_mode == FeedbackMode.FENCED:
@@ -454,8 +469,12 @@ def _handle_feedback(
     context.extract_fence = True
     bad_snippet = _failed_snippet(runtime.repair_base_prefix, runtime.failed_prefix)
     repair_feedback = _build_repair_feedback(feedback_state, bad_snippet)
-    update_last_assistant(base_messages, runtime.repair_base_prefix)
-    context.messages = feedback_strategy.apply(base_messages, repair_feedback, runtime.repair_base_prefix)
+    update_last_assistant(base_messages, runtime.repair_base_assistant_prefix)
+    context.messages = feedback_strategy.apply(
+        base_messages,
+        repair_feedback,
+        runtime.repair_base_assistant_prefix,
+    )
     result = feedback_gen.generate_step(context)
     runtime.pending_patch = result.delta_text
     budget.add_tokens(result.delta_tokens)
@@ -483,9 +502,15 @@ def _handle_apply_patch(
     budget: Budget,
     trace: list[TraceEvent],
 ) -> None:
-    if runtime.pending_patch is None or runtime.repair_base_prefix is None:
+    if (
+        runtime.pending_patch is None
+        or runtime.repair_base_prefix is None
+        or runtime.repair_base_assistant_prefix is None
+    ):
         raise RuntimeError("APPLY_PATCH requires pending_patch and repair base prefix.")
+    patch_len = len(runtime.pending_patch)
     runtime.state.prefix = f"{runtime.repair_base_prefix}{runtime.pending_patch}"
+    runtime.assistant_prefix = runtime.repair_base_assistant_prefix.with_code(runtime.state.prefix)
     _clear_repair_context(runtime)
     runtime.last_render_status = None
     runtime.last_artifact = None
@@ -496,7 +521,7 @@ def _handle_apply_patch(
     logger.info(
         "apply_patch: step=%s patch_len=%s prefix_len=%s",
         runtime.state.step,
-        len(runtime.pending_patch),
+        patch_len,
         len(runtime.state.prefix),
     )
     _append_trace(
@@ -580,7 +605,9 @@ def run_dtv_loop(
     base_messages: list[GenerateMessage] = []
     if prompt_prefix:
         base_messages.append(GenerateMessage(role="user", content=prompt_prefix, stop=True))
-    base_messages.append(GenerateMessage(role="assistant", content="", stop=False))
+    base_messages.append(
+        GenerateMessage(role="assistant", content=AssistantContent.empty(), stop=False)
+    )
     context = GenerateContext(messages=base_messages, steps=0, max_new_length=max_new_length)
 
     while runtime.state.step < max_steps:
@@ -628,7 +655,9 @@ def run_dtv_loop(
             )
             runtime.state.step += 1
             # Terminate immediately if the model ended without producing a rust fence.
-            if runtime.last_stop_reason is not None and runtime.last_stop_reason.kind == "no_fence_eos":
+            if runtime.last_stop_reason is not None and runtime.last_stop_reason.kind in {
+                "no_fence_eos",
+            }:
                 _handle_terminate(runtime, budget, trace)
                 break
             continue

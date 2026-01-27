@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol, Sequence
 
+from core.llm_output import AssistantContent
 from core.types import GenerateMessage
 
 
@@ -11,7 +12,7 @@ class FeedbackStrategy(Protocol):
         self,
         messages: Sequence[GenerateMessage | dict[str, Any]],
         feedback: str,
-        prefix: str,
+        prefix: str | AssistantContent,
     ) -> list[GenerateMessage | dict[str, Any]]:
         ...
 
@@ -25,7 +26,7 @@ class AppendToLastAssistant:
         self,
         messages: Sequence[GenerateMessage | dict[str, Any]],
         feedback: str,
-        prefix: str,
+        prefix: str | AssistantContent,
     ) -> list[GenerateMessage | dict[str, Any]]:
         normalized: list[GenerateMessage | dict[str, Any]] = []
         for msg in messages:
@@ -50,7 +51,7 @@ class AppendToLastAssistant:
             None,
         )
 
-        content = prefix
+        content = prefix.render() if isinstance(prefix, AssistantContent) else prefix
         if feedback:
             if self.header:
                 content = f"{content}\n\n{self.header}\n{feedback}"

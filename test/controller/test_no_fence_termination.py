@@ -62,3 +62,4 @@ def test_run_loop_terminates_on_no_fence_eos() -> None:
     )
 
     assert trace[-1].action == Action.TERMINATE
+

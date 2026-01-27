@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import cast
 
+import pytest
 import torch
 from torch import FloatTensor, LongTensor
 
@@ -11,7 +12,7 @@ from controller.stop_criteria import (
     TS_PROFILE,
     _scan_string_comment_state,
 )
-from core.llm_output import FenceState, FenceTracker
+from core.llm_output import FenceParser, FenceReopenError, FenceState
 
 
 class _FakeTokenizer:
@@ -101,19 +102,19 @@ def test_stop_criteria_gates_on_fence() -> None:
         5: ";\n",
         6: "```\n",
     }
-    tracker = FenceTracker(allowed_langs=("rust", "rs"))
-    criteria = DTVStoppingCriteria(_FakeTokenizer(mapping), RUST_PROFILE, fence_tracker=tracker)
+    parser = FenceParser(allowed_langs=("rust", "rs"))
+    criteria = DTVStoppingCriteria(_FakeTokenizer(mapping), RUST_PROFILE, fence_parser=parser)
 
     tokens: list[int] = [1]
     assert not _call(criteria, tokens)
 
     tokens.append(2)
     assert not _call(criteria, tokens)
-    assert tracker.state == FenceState.OUTSIDE
+    assert parser.state == FenceState.OUTSIDE
 
     tokens.append(3)
     assert not _call(criteria, tokens)
-    assert tracker.state == FenceState.INSIDE
+    assert parser.state == FenceState.INSIDE
 
     tokens.append(4)
     assert not _call(criteria, tokens)
@@ -123,4 +124,24 @@ def test_stop_criteria_gates_on_fence() -> None:
 
     tokens.append(6)
     assert not _call(criteria, tokens)
-    assert tracker.state == FenceState.DONE
+    assert parser.state == FenceState.DONE
+
+
+def test_stop_criteria_raises_on_fence_reopen() -> None:
+    mapping = {
+        1: "```rust\n",
+        2: "let x = 1\n",
+        3: "```rust\n",
+    }
+    parser = FenceParser(allowed_langs=("rust", "rs"))
+    criteria = DTVStoppingCriteria(_FakeTokenizer(mapping), RUST_PROFILE, fence_parser=parser)
+
+    tokens: list[int] = [1]
+    assert not _call(criteria, tokens)
+
+    tokens.append(2)
+    assert not _call(criteria, tokens)
+
+    tokens.append(3)
+    with pytest.raises(FenceReopenError):
+        _call(criteria, tokens)

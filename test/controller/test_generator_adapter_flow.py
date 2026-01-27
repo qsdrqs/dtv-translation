@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import pytest
+
 from controller.adapters import GeneratorAdapter
+from core.llm_output import FenceReopenError
 from core.generator_backend import GeneratorBackend
 from core.types import GenerateContext, GenerateResult, StopReason
 
@@ -26,8 +29,13 @@ class _StubBackend(GeneratorBackend):
         return _STEPS[_CALLS - 1]
 
 
-def _context(*, extract_fence: bool) -> GenerateContext:
-    return GenerateContext(messages=(), steps=0, max_new_length=16, extract_fence=extract_fence)
+def _context(*, extract_fence: bool, steps: int = 0) -> GenerateContext:
+    return GenerateContext(
+        messages=(),
+        steps=steps,
+        max_new_length=16,
+        extract_fence=extract_fence,
+    )
 
 
 def _set_steps(steps: list[GenerateResult]) -> None:
@@ -56,6 +64,10 @@ def test_adapter_continues_until_code_extracted() -> None:
     assert result.delta_text == "line1\n"
     assert result.delta_tokens == 3
     assert result.stop_reason.kind == "boundary"
+    assert result.assistant_delta is not None
+    assert result.assistant_delta.pre_fence == "preface\n"
+    assert result.assistant_delta.fence_lang == "rust"
+    assert result.assistant_delta.code == "line1\n"
     assert _CALLS == 2
 
 
@@ -74,6 +86,8 @@ def test_adapter_no_fence_eos_terminates() -> None:
     assert result.delta_text == ""
     assert result.delta_tokens == 2
     assert result.stop_reason.kind == "no_fence_eos"
+    assert result.assistant_delta is not None
+    assert result.assistant_delta.pre_fence == "header\n"
 
 
 def test_adapter_passes_through_when_extraction_disabled() -> None:
@@ -90,3 +104,20 @@ def test_adapter_passes_through_when_extraction_disabled() -> None:
 
     assert result.delta_text == "raw output"
     assert result.delta_tokens == 1
+
+
+def test_adapter_fence_reopen_raises() -> None:
+    adapter = GeneratorAdapter(model_name="stub", backend_cls=_StubBackend)
+    _set_steps([
+        GenerateResult(
+            delta_text="""```rust
+line1
+```rust
+""",
+            delta_tokens=3,
+            stop_reason=StopReason(kind="boundary"),
+        ),
+    ])
+
+    with pytest.raises(FenceReopenError):
+        adapter.generate_step(_context(extract_fence=True))

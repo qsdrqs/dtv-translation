@@ -3,13 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Sequence
 
+from core.llm_output import AssistantContent
 from core.types import Granularity, GroupEvent, GroupEventAction, GroupStackFrame, RollbackScope
 
 
 @dataclass
 class Checkpoint:
     """Snapshot of the prefix after a committed statement."""
-    prefix: str
+    code_prefix: str
+    assistant_prefix: AssistantContent
 
 
 @dataclass(frozen=True)
@@ -29,8 +31,10 @@ class RollbackManager:
     max_stmt_retries: int = 3
     max_block_retries: int = 2
 
-    def add_stmt_checkpoint(self, prefix: str) -> None:
-        self.stmt_checkpoints.append(Checkpoint(prefix=prefix))
+    def add_stmt_checkpoint(self, code_prefix: str, assistant_prefix: AssistantContent) -> None:
+        self.stmt_checkpoints.append(
+            Checkpoint(code_prefix=code_prefix, assistant_prefix=assistant_prefix)
+        )
 
     def open_group(self, kind: Granularity) -> None:
         if kind not in {Granularity.BLOCK, Granularity.FUNC}:
@@ -70,19 +74,19 @@ class RollbackManager:
         for kind in desired_kinds[k:]:
             self.open_group(kind)
 
-    def _truncate_to(self, keep_count: int) -> str:
+    def _truncate_to(self, keep_count: int) -> Checkpoint:
         keep_count = max(0, keep_count)
         if keep_count < len(self.stmt_checkpoints):
             del self.stmt_checkpoints[keep_count:]
         self.group_stack = [g for g in self.group_stack if g.start_stmt < keep_count]
         if keep_count == 0:
-            return ""
-        return self.stmt_checkpoints[keep_count - 1].prefix
+            return Checkpoint(code_prefix="", assistant_prefix=AssistantContent.empty())
+        return self.stmt_checkpoints[keep_count - 1]
 
-    def _last_checkpoint_prefix(self) -> str:
+    def _last_checkpoint(self) -> Checkpoint:
         if not self.stmt_checkpoints:
-            return ""
-        return self.stmt_checkpoints[-1].prefix
+            return Checkpoint(code_prefix="", assistant_prefix=AssistantContent.empty())
+        return self.stmt_checkpoints[-1]
 
     def _target_start_for_scope(self, scope: RollbackScope) -> int | None:
         if scope == RollbackScope.BLOCK:
@@ -97,19 +101,18 @@ class RollbackManager:
             return None
         return None
 
-    def rollback(self, scope: RollbackScope) -> str:
+    def rollback(self, scope: RollbackScope) -> Checkpoint:
         if scope == RollbackScope.PROGRAM:
             self.stmt_checkpoints.clear()
             self.group_stack.clear()
-            return ""
+            return Checkpoint(code_prefix="", assistant_prefix=AssistantContent.empty())
         if scope == RollbackScope.STMT:
-            return self._last_checkpoint_prefix()
+            return self._last_checkpoint()
         target_start = self._target_start_for_scope(scope)
         if target_start is None:
-            return self._last_checkpoint_prefix()
+            return self._last_checkpoint()
         return self._truncate_to(target_start)
 
     def record_retry(self, key: str) -> int:
         self.retry_counters[key] = self.retry_counters.get(key, 0) + 1
         return self.retry_counters[key]
-

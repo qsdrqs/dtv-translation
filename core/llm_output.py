@@ -10,8 +10,66 @@ class FenceState(str, Enum):
     DONE = "done"
 
 
+@dataclass(frozen=True)
+class AssistantContent:
+    pre_fence: str = ""
+    fence_lang: str = ""
+    code: str = ""
+    post_fence: str = ""
+    # Streaming buffer: text that may be a fence marker prefix (e.g. "```")
+    # but has not been confirmed by a newline yet.  Included in render() so
+    # the LLM sees a faithful snapshot; reclassified on the next
+    # FenceParser.feed() call via the internal _buffer.
+    pending_text: str = ""
+    fence_state: FenceState = FenceState.OUTSIDE
+
+    @classmethod
+    def empty(cls) -> "AssistantContent":
+        return cls()
+
+    @classmethod
+    def from_unfenced(cls, text: str) -> "AssistantContent":
+        return cls(pre_fence=text, fence_state=FenceState.OUTSIDE)
+
+    def render(self) -> str:
+        if self.fence_state == FenceState.OUTSIDE:
+            return f"{self.pre_fence}{self.pending_text}"
+        if self.fence_state == FenceState.INSIDE:
+            return f"{self.pre_fence}```{self.fence_lang}\n{self.code}{self.pending_text}"
+        return (
+            f"{self.pre_fence}```{self.fence_lang}\n{self.code}"
+            f"```\n{self.post_fence}{self.pending_text}"
+        )
+
+    def with_code(self, code: str) -> "AssistantContent":
+        return AssistantContent(
+            pre_fence=self.pre_fence,
+            fence_lang=self.fence_lang,
+            code=code,
+            post_fence=self.post_fence,
+            pending_text=self.pending_text,
+            fence_state=self.fence_state,
+        )
+
+
+def merge_assistant_content(prefix: AssistantContent, delta: AssistantContent) -> AssistantContent:
+    fence_lang = prefix.fence_lang or delta.fence_lang
+    return AssistantContent(
+        pre_fence=prefix.pre_fence + delta.pre_fence,
+        fence_lang=fence_lang,
+        code=prefix.code + delta.code,
+        post_fence=prefix.post_fence + delta.post_fence,
+        pending_text=delta.pending_text,
+        fence_state=delta.fence_state,
+    )
+
+
+class FenceReopenError(RuntimeError):
+    pass
+
+
 @dataclass
-class FenceTracker:
+class FenceParser:
     allowed_langs: tuple[str, ...]
     state: FenceState = FenceState.OUTSIDE
     _buffer: str = ""
@@ -34,18 +92,19 @@ class FenceTracker:
     def epoch(self) -> int:
         return self._epoch
 
-    def feed(self, chunk: str) -> str:
+    def feed(self, chunk: str) -> AssistantContent:
         if not chunk:
-            return ""
+            return AssistantContent.empty()
         if self.state == FenceState.DONE and not self._buffer:
-            return ""
+            return AssistantContent(post_fence=chunk, fence_state=self.state)
 
-        # Carry over incomplete line fragments so fence markers split across chunks are detected.
         data = f"{self._buffer}{chunk}"
         self._buffer = ""
-        output_parts: list[str] = []
+        pre_parts: list[str] = []
+        code_parts: list[str] = []
+        post_parts: list[str] = []
+        fence_lang = ""
 
-        # Fence detection is line-based; only process complete lines here.
         while True:
             newline_idx = data.find("\n")
             if newline_idx == -1:
@@ -53,35 +112,49 @@ class FenceTracker:
             line = data[: newline_idx + 1]
             data = data[newline_idx + 1 :]
             if self.state == FenceState.OUTSIDE:
-                # Ignore everything before an opening fence.
-                if _is_opening_fence(line, self.allowed_langs):
+                lang = _extract_fence_lang(line, self.allowed_langs)
+                if lang is not None:
                     self.state = FenceState.INSIDE
                     self._saw_fence = True
+                    fence_lang = lang
+                else:
+                    pre_parts.append(line)
                 continue
             if self.state == FenceState.INSIDE:
-                # Capture code lines until the closing fence appears.
+                lang = _extract_fence_lang(line, self.allowed_langs)
+                if lang is not None:
+                    raise FenceReopenError("Fence reopened before closing fence")
                 if _is_closing_fence(line):
                     self.state = FenceState.DONE
                     continue
-                output_parts.append(line)
+                code_parts.append(line)
                 continue
+            post_parts.append(line)
 
+        pending = ""
         if data:
-            if self.state == FenceState.INSIDE:
-                # Inside a fence, emit trailing fragments unless they might start a fence line.
-                if _looks_like_fence_start(data):
-                    self._buffer = data
-                else:
-                    output_parts.append(data)
-            else:
+            if _looks_like_fence_start(data):
                 self._buffer = data
+                pending = data
+            elif self.state == FenceState.OUTSIDE:
+                pre_parts.append(data)
+            elif self.state == FenceState.INSIDE:
+                code_parts.append(data)
+            else:
+                post_parts.append(data)
 
-        if output_parts:
-            output = "".join(output_parts)
-            # Accumulate inside text for consumers that pull after generation.
-            self._inside_parts.append(output)
-            return output
-        return ""
+        inside_piece = "".join(code_parts)
+        if inside_piece:
+            self._inside_parts.append(inside_piece)
+
+        return AssistantContent(
+            pre_fence="".join(pre_parts),
+            fence_lang=fence_lang,
+            code=inside_piece,
+            post_fence="".join(post_parts),
+            pending_text=pending,
+            fence_state=self.state,
+        )
 
     def consume_inside(self) -> str:
         if not self._inside_parts:
@@ -90,86 +163,13 @@ class FenceTracker:
         self._inside_parts.clear()
         return output
 
-
-@dataclass
-class FenceExtractor:
-    """Incremental fenced-code extractor with line-based fence detection."""
-
-    allowed_langs: tuple[str, ...]
-    state: FenceState = FenceState.OUTSIDE
-    _buffer: str = ""
-    _saw_fence: bool = False
-    _warning_emitted: bool = False
-
-    def reset(self) -> None:
-        self.state = FenceState.OUTSIDE
-        self._buffer = ""
-        self._saw_fence = False
-        self._warning_emitted = False
-
-    @property
-    def saw_fence(self) -> bool:
-        return self._saw_fence
-
-    @property
-    def warning_emitted(self) -> bool:
-        return self._warning_emitted
-
-    def mark_warning_emitted(self) -> None:
-        self._warning_emitted = True
-
-    def feed(self, chunk: str) -> str:
-        if not chunk:
-            return ""
-        if self.state == FenceState.DONE and not self._buffer:
-            return ""
-
-        # Carry over incomplete line fragments so fence markers split across chunks are detected.
-        data = f"{self._buffer}{chunk}"
-        self._buffer = ""
-        output_parts: list[str] = []
-
-        # Fence detection is line-based; only process complete lines here.
-        while True:
-            newline_idx = data.find("\n")
-            if newline_idx == -1:
-                break
-            line = data[: newline_idx + 1]
-            data = data[newline_idx + 1 :]
-            self._process_line(line, output_parts)
-            if self.state == FenceState.DONE:
-                data = ""
-                break
-
-        if data:
-            if self.state == FenceState.INSIDE:
-                # Inside a fence, emit trailing fragments unless they might start a fence line.
-                if _looks_like_fence_start(data):
-                    self._buffer = data
-                else:
-                    output_parts.append(data)
-            else:
-                self._buffer = data
-
-        return "".join(output_parts)
-
-    def _process_line(self, line: str, output_parts: list[str]) -> None:
-        if self.state == FenceState.OUTSIDE:
-            if _is_opening_fence(line, self.allowed_langs):
-                self.state = FenceState.INSIDE
-                self._saw_fence = True
-            return
-        if self.state == FenceState.INSIDE:
-            if _is_closing_fence(line):
-                self.state = FenceState.DONE
-                return
-            output_parts.append(line)
-            return
-
-
-@dataclass
-class RustFenceExtractor(FenceExtractor):
-    allowed_langs: tuple[str, ...] = ("rust", "rs")
+def _extract_fence_lang(line: str, allowed_langs: tuple[str, ...]) -> str | None:
+    """Return the language tag if *line* is an opening fence for an allowed language, else None."""
+    stripped = line.strip()
+    if not stripped.startswith("```"):
+        return None
+    lang = stripped[3:].strip()
+    return lang if lang in allowed_langs else None
 
 
 def _is_opening_fence(line: str, allowed_langs: tuple[str, ...]) -> bool:
@@ -185,4 +185,12 @@ def _is_closing_fence(line: str) -> bool:
 
 
 def _looks_like_fence_start(text: str) -> bool:
-    return text.lstrip().startswith("```")
+    stripped = text.lstrip()
+    if not stripped.startswith("`"):
+        return False
+    tick_count = 0
+    for ch in stripped:
+        if ch != "`":
+            break
+        tick_count += 1
+    return 1 <= tick_count <= 3

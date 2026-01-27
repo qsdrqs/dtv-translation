@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Sequence
 
+from core.llm_output import AssistantContent
+
 
 @dataclass(frozen=True)
 class StopReason:
@@ -13,7 +15,7 @@ class StopReason:
 @dataclass(frozen=True)
 class GenerateMessage:
     role: str
-    content: str
+    content: str | AssistantContent
     stop: bool
 
 
@@ -30,3 +32,4 @@ class GenerateResult:
     delta_text: str
     delta_tokens: int
     stop_reason: StopReason
+    assistant_delta: AssistantContent | None = None

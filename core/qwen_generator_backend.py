@@ -7,6 +7,7 @@ import transformers
 from transformers import StoppingCriteria, StoppingCriteriaList
 
 from core.generator_backend import GeneratorBackend, infer_stop_reason
+from core.llm_output import AssistantContent
 from core.logger import get_logger
 from core.types import GenerateContext, GenerateResult
 
@@ -49,12 +50,17 @@ class QwenGeneratorBackend(GeneratorBackend):
                 if "stop" not in msg:
                     raise ValueError("GenerateMessage requires explicit stop")
                 role = str(msg.get("role", ""))
-                content = str(msg.get("content", ""))
+                raw_content = msg.get("content", "")
+                content = (
+                    raw_content if isinstance(raw_content, AssistantContent) else str(raw_content)
+                )
                 stop = bool(msg["stop"])
             else:
                 role = msg.role
                 content = msg.content
                 stop = msg.stop
+
+            content = self._render_content(content)
 
             segment = f"<|im_start|>{role}\n{content}"
             if stop:
