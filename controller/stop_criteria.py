@@ -129,6 +129,7 @@ class DTVStoppingCriteria(StoppingCriteria):
         self._log_limit = 20
         self._last_token_count = 0
         self._code_text = ""
+        self._last_boundary_len: int | None = None
         self._parser_epoch = fence_parser.epoch if fence_parser is not None else None
 
     def _reset_stream_state(self) -> None:
@@ -138,6 +139,7 @@ class DTVStoppingCriteria(StoppingCriteria):
         self._boundary_triggered = 0
         self._last_token_count = 0
         self._code_text = ""
+        self._last_boundary_len = None
 
     def __call__(self, input_ids, scores, **kwargs) -> BoolTensor:
         if self.fence_parser is not None and self._parser_epoch != self.fence_parser.epoch:
@@ -183,6 +185,10 @@ class DTVStoppingCriteria(StoppingCriteria):
         if last_char not in {";", "}"}:
             return TORCH_FALSE
 
+        current_len = len(stripped)
+        if self._last_boundary_len is not None and current_len == self._last_boundary_len:
+            return TORCH_FALSE
+
         self._boundary_checks += 1
         state = _scan_string_comment_state(stripped, self.language_profile)
         if state["in_string"] or state["in_line_comment"] or state["in_block_comment"]:
@@ -201,6 +207,7 @@ class DTVStoppingCriteria(StoppingCriteria):
         # TODO: bracket/brace depth tracking to avoid stopping mid-block context.
         # TODO: raw strings (Rust) and template literals (TS) are not handled here.
         self._boundary_triggered += 1
+        self._last_boundary_len = current_len
         if self._boundary_checks <= self._log_limit:
             logger.info("stop triggered: last_char=%s tail=%s", last_char, stripped[-80:])
         return TORCH_TRUE

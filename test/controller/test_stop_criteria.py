@@ -145,3 +145,21 @@ def test_stop_criteria_raises_on_fence_reopen() -> None:
     tokens.append(3)
     with pytest.raises(FenceReopenError):
         _call(criteria, tokens)
+
+
+def test_stop_criteria_dedupes_same_boundary_across_calls() -> None:
+    mapping = {
+        1: "let x = 1;",
+        2: "\n",
+        3: "let y = 2;",
+    }
+    criteria = DTVStoppingCriteria(_FakeTokenizer(mapping), RUST_PROFILE, fence_parser=None)
+
+    tokens: list[int] = [1]
+    assert _call(criteria, tokens)
+
+    tokens.append(2)
+    assert not _call(criteria, tokens)
+
+    tokens.append(3)
+    assert _call(criteria, tokens)

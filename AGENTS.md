@@ -4,6 +4,9 @@
 
 1. no trailing spaces, no lines with only spaces
 2. keep this file up to date (last updated: 2026-01-23)
+3. Except for explicit reasons, do not use non-ASCII characters in the codebase or documentation.
+4. Although redundant comments are generally discouraged, necessary comments should be written at complex logic to explain the logic.
+5. Except for explicit reasons, always add imports at the beginning of the file. For explicit reasons, like slow imports, add a comment explaining why the import is not at the top.
 
 ### Goal
 Implement Decoding Time Verification (DTV): integrate deterministic program verifiers into the decoding loop
