@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from controller.loop import run_dtv_loop
 from controller.policy import DefaultPolicy, DefaultPolicyConfig
 from core.budget import Budget
+from core.llm_output import FenceState
 from core.types import (
     Action,
     Artifact,
@@ -48,6 +49,12 @@ class _SequenceGenerator:
             delta_tokens=step.tokens,
             stop_reason=step.stop_reason,
         )
+
+    def reset_output_extractor(self) -> None:
+        return None
+
+    def get_output_extractor_state(self) -> FenceState:
+        return FenceState.OUTSIDE
 
 
 class _OkRenderer:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from core.llm_output import FenceState
 from core.types import (
     Artifact,
     ControllerState,
@@ -16,6 +17,12 @@ from core.types import (
 
 class Generator(Protocol):
     def generate_step(self, context: GenerateContext) -> GenerateResult:
+        ...
+
+    def reset_output_extractor(self) -> None:
+        ...
+
+    def get_output_extractor_state(self) -> FenceState:
         ...
 
 

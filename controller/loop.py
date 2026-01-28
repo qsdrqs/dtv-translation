@@ -247,8 +247,13 @@ def _handle_generate(
     if runtime.last_action == Action.ROLLBACK and not runtime.state.prefix:
         # Rollback to empty prefix implies we must restart fence tracking from scratch.
         reset_extractor = getattr(generator, "reset_output_extractor", None)
-        if callable(reset_extractor):
-            reset_extractor()
+        if reset_extractor is None:
+            raise TypeError(
+                f"Generator {type(generator).__name__} missing reset_output_extractor()"
+            )
+        if not callable(reset_extractor):
+            raise TypeError("reset_output_extractor is not callable on generator")
+        reset_extractor()
     update_last_assistant(base_messages, runtime.assistant_prefix)
     feedback = feedback_state.encode()
     context.messages = feedback_strategy.apply(base_messages, feedback, runtime.assistant_prefix)
@@ -463,8 +468,13 @@ def _handle_feedback(
             raise RuntimeError("feedback_generator is required for fenced feedback mode")
         feedback_gen = feedback_generator
         reset_extractor = getattr(feedback_gen, "reset_output_extractor", None)
-        if callable(reset_extractor):
-            reset_extractor()
+        if reset_extractor is None:
+            raise TypeError(
+                f"Generator {type(feedback_gen).__name__} missing reset_output_extractor()"
+            )
+        if not callable(reset_extractor):
+            raise TypeError("reset_output_extractor is not callable on feedback generator")
+        reset_extractor()
     # Feedback output is also fenced; keep extraction on for both modes.
     context.extract_fence = True
     bad_snippet = _failed_snippet(runtime.repair_base_prefix, runtime.failed_prefix)
@@ -684,10 +694,15 @@ def run_dtv_loop(
 
         if op.action == Action.ROLLBACK:
             state_getter = getattr(generator, "get_output_extractor_state", None)
-            if callable(state_getter):
-                extractor_state = state_getter()
-                # Invariant: rollback never happens after the fenced block is closed.
-                assert extractor_state != FenceState.DONE, "rollback after fence closed is unsupported"
+            if state_getter is None:
+                raise TypeError(
+                    f"Generator {type(generator).__name__} missing get_output_extractor_state()"
+                )
+            if not callable(state_getter):
+                raise TypeError("get_output_extractor_state is not callable on generator")
+            extractor_state = state_getter()
+            # Invariant: rollback never happens after the fenced block is closed.
+            assert extractor_state != FenceState.DONE, "rollback after fence closed is unsupported"
             _handle_rollback(runtime, op, rollback_manager, budget, trace)
             runtime.state.step += 1
             continue

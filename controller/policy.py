@@ -177,7 +177,14 @@ def _any_fail(outputs: tuple[OracleOutput, ...]) -> bool:
 
 
 def _all_pass(outputs: tuple[OracleOutput, ...]) -> bool:
-    return all(output.verdict == Verdict.PASS for output in outputs)
+    # NOTE: Treat NOT_APPLICABLE as neutral; require at least one PASS and no FAIL.
+    saw_pass = False
+    for output in outputs:
+        if output.verdict == Verdict.FAIL:
+            return False
+        if output.verdict == Verdict.PASS:
+            saw_pass = True
+    return saw_pass
 
 
 def _select_fail_scope(config: DefaultPolicyConfig, outputs: tuple[OracleOutput, ...]) -> RollbackScope:

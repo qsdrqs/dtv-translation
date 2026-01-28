@@ -60,6 +60,12 @@ class GeneratorAdapter(Generator):
             context.extract_fence,
             context.max_new_length,
         )
+        if context.steps == 0:
+            if self._fence_parser is not None:
+                self._fence_parser.reset()
+            self._segment_parser.reset()
+            self._extract_parser.reset()
+            self._warning_emitted = False
         result = self.backend.generate_step(context)
         if not context.extract_fence:
             assistant_delta = AssistantContent.from_unfenced(result.delta_text)
@@ -74,12 +80,6 @@ class GeneratorAdapter(Generator):
                 stop_reason=result.stop_reason,
                 assistant_delta=assistant_delta,
             )
-        if context.steps == 0:
-            if self._fence_parser is not None:
-                self._fence_parser.reset()
-            self._segment_parser.reset()
-            self._extract_parser.reset()
-            self._warning_emitted = False
 
         assistant_accum = self._segment_parser.feed(result.delta_text)
         if self._fence_parser is not None:

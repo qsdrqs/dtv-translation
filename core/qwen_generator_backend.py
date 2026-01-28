@@ -87,6 +87,16 @@ class QwenGeneratorBackend(GeneratorBackend):
         inputs = self.tokenizer(prompt, return_tensors="pt")
         if self._use_cuda:
             inputs = inputs.to(self.model.device)
+        prompt_token_count = int(inputs.input_ids.shape[-1])
+        for criteria in self.stop_criteria:
+            setter = getattr(criteria, "set_prompt_token_count", None)
+            if setter is None:
+                raise TypeError(
+                    "StoppingCriteria must implement set_prompt_token_count(prompt_token_count)"
+                )
+            if not callable(setter):
+                raise TypeError("set_prompt_token_count is not callable on StoppingCriteria")
+            setter(prompt_token_count)
         outputs = self.model.generate(
             inputs.input_ids,
             max_new_tokens=context.max_new_length,

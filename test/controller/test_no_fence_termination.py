@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from controller.loop import ControllerOp, run_dtv_loop
 from core.budget import Budget
+from core.llm_output import FenceState
 from core.types import (
     Action,
     Artifact,
@@ -24,6 +25,12 @@ class _NoFenceGenerator:
             delta_tokens=1,
             stop_reason=StopReason(kind="no_fence_eos"),
         )
+
+    def reset_output_extractor(self) -> None:
+        return None
+
+    def get_output_extractor_state(self) -> FenceState:
+        return FenceState.OUTSIDE
 
 
 class _DummyRenderer:
@@ -62,4 +69,3 @@ def test_run_loop_terminates_on_no_fence_eos() -> None:
     )
 
     assert trace[-1].action == Action.TERMINATE
-

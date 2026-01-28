@@ -127,6 +127,39 @@ def test_stop_criteria_gates_on_fence() -> None:
     assert parser.state == FenceState.DONE
 
 
+def test_stop_criteria_skips_prompt_tokens() -> None:
+    mapping = {
+        1: "```rust\n",
+        2: "let x = 0;\n",
+        3: "```\n",
+        4: "```rust\n",
+        5: "let y = 1",
+        6: ";\n",
+        7: "```\n",
+    }
+    parser = FenceParser(allowed_langs=("rust", "rs"))
+    criteria = DTVStoppingCriteria(_FakeTokenizer(mapping), RUST_PROFILE, fence_parser=parser)
+    criteria.set_prompt_token_count(3)
+
+    tokens: list[int] = [1, 2, 3]
+    assert not _call(criteria, tokens)
+    assert parser.state == FenceState.OUTSIDE
+
+    tokens.append(4)
+    assert not _call(criteria, tokens)
+    assert parser.state == FenceState.INSIDE
+
+    tokens.append(5)
+    assert not _call(criteria, tokens)
+
+    tokens.append(6)
+    assert _call(criteria, tokens)
+
+    tokens.append(7)
+    assert not _call(criteria, tokens)
+    assert parser.state == FenceState.DONE
+
+
 def test_stop_criteria_raises_on_fence_reopen() -> None:
     mapping = {
         1: "```rust\n",

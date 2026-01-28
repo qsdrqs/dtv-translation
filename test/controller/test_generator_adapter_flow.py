@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
+import torch
+from torch import FloatTensor, LongTensor
 
 from controller.adapters import GeneratorAdapter
-from core.llm_output import FenceReopenError
+from controller.stop_criteria import DTVStoppingCriteria, RUST_PROFILE
+from core.llm_output import FenceParser, FenceReopenError
 from core.generator_backend import GeneratorBackend
 from core.types import GenerateContext, GenerateResult, StopReason
 
@@ -27,6 +32,39 @@ class _StubBackend(GeneratorBackend):
                 stop_reason=StopReason(kind="empty"),
             )
         return _STEPS[_CALLS - 1]
+
+
+class _FakeTokenizer:
+    def __init__(self, mapping: dict[int, str]) -> None:
+        self._mapping = mapping
+
+    def decode(self, ids, skip_special_tokens: bool = True) -> str:
+        _ = skip_special_tokens
+        return "".join(self._mapping[int(token_id)] for token_id in ids)
+
+
+class _StopCriteriaBackend(GeneratorBackend):
+    def __init__(self, model_name: str, stop_criteria_factory=None) -> None:
+        super().__init__(model_name=model_name, stop_criteria_factory=stop_criteria_factory)
+        mapping = {
+            1: "```rust\n",
+            2: "let x = 1;\n",
+            3: "```\n",
+        }
+        self._tokenizer = _FakeTokenizer(mapping)
+        self._criteria = stop_criteria_factory(self._tokenizer) if stop_criteria_factory else []
+
+    def generate_step(self, context: GenerateContext) -> GenerateResult:
+        _ = context
+        input_ids = cast(LongTensor, torch.tensor([[1, 2, 3]], dtype=torch.long))
+        scores = cast(FloatTensor, torch.empty((1, 0), dtype=torch.float))
+        for criteria in self._criteria:
+            _ = criteria(input_ids, scores)
+        return GenerateResult(
+            delta_text="",
+            delta_tokens=3,
+            stop_reason=StopReason(kind="eos"),
+        )
 
 
 def _context(*, extract_fence: bool, steps: int = 0) -> GenerateContext:
@@ -121,3 +159,21 @@ line1
 
     with pytest.raises(FenceReopenError):
         adapter.generate_step(_context(extract_fence=True))
+
+
+def test_adapter_keeps_fence_parser_state_from_stop_criteria() -> None:
+    parser = FenceParser(allowed_langs=("rust", "rs"))
+
+    def _criteria_factory(tokenizer):
+        return [DTVStoppingCriteria(tokenizer, RUST_PROFILE, fence_parser=parser)]
+
+    adapter = GeneratorAdapter(
+        model_name="stub",
+        backend_cls=_StopCriteriaBackend,
+        stop_criteria_factory=_criteria_factory,
+        fence_parser=parser,
+    )
+
+    result = adapter.generate_step(_context(extract_fence=True))
+
+    assert result.stop_reason.kind == "eos"

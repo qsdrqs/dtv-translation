@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from c_rust.oracles import RustcOracle
+from core.llm_output import FenceState
 from core.types import TestCase, TranslationSample
 from c_rust.render import CRustRenderer
 from controller.loop import ControllerOp, run_dtv_loop, select_oracles_by_granularity
@@ -38,6 +39,12 @@ class _FakeGenerator:
             delta_tokens=1,
             stop_reason=StopReason(kind="boundary"),
         )
+
+    def reset_output_extractor(self) -> None:
+        return None
+
+    def get_output_extractor_state(self) -> FenceState:
+        return FenceState.OUTSIDE
 
 
 class _DummyRenderer:
@@ -100,6 +107,12 @@ class _SequenceGenerator:
             delta_tokens=1,
             stop_reason=StopReason(kind="boundary"),
         )
+
+    def reset_output_extractor(self) -> None:
+        return None
+
+    def get_output_extractor_state(self) -> FenceState:
+        return FenceState.OUTSIDE
 
 
 class _SingleStepPolicy:
@@ -356,4 +369,3 @@ fn foo() -> i32 {
     assert any(event.action == Action.ROLLBACK for event in trace)
     assert final_prefix == step1
     assert len(rollback_manager.stmt_checkpoints) == 1
-

@@ -33,9 +33,6 @@ TS_PROFILE = LanguageProfile(
     string_delims=('"', "'", "`"),
 )
 
-TORCH_FALSE = cast(BoolTensor, torch.tensor([False], dtype=torch.bool))
-TORCH_TRUE = cast(BoolTensor, torch.tensor([True], dtype=torch.bool))
-
 logger = get_logger(__name__)
 
 
@@ -126,8 +123,8 @@ class DTVStoppingCriteria(StoppingCriteria):
         self._boundary_checks = 0
         self._boundary_suppressed = 0
         self._boundary_triggered = 0
-        self._log_limit = 20
         self._last_token_count = 0
+        self._prompt_token_count: int | None = None
         self._code_text = ""
         self._last_boundary_len: int | None = None
         self._parser_epoch = fence_parser.epoch if fence_parser is not None else None
@@ -137,11 +134,21 @@ class DTVStoppingCriteria(StoppingCriteria):
         self._boundary_checks = 0
         self._boundary_suppressed = 0
         self._boundary_triggered = 0
-        self._last_token_count = 0
+        self._last_token_count = self._prompt_token_count or 0
         self._code_text = ""
         self._last_boundary_len = None
 
+    def set_prompt_token_count(self, prompt_token_count: int) -> None:
+        if prompt_token_count < 0:
+            raise ValueError("prompt_token_count must be >= 0")
+        self._prompt_token_count = prompt_token_count
+        self._last_token_count = prompt_token_count
+        self._calls = 0
+
     def __call__(self, input_ids, scores, **kwargs) -> BoolTensor:
+        TORCH_FALSE = cast(BoolTensor, torch.tensor([False], dtype=torch.bool, device=input_ids.device))
+        TORCH_TRUE = cast(BoolTensor, torch.tensor([True], dtype=torch.bool, device=input_ids.device))
+
         if self.fence_parser is not None and self._parser_epoch != self.fence_parser.epoch:
             self._parser_epoch = self.fence_parser.epoch
             self._reset_stream_state()
@@ -193,21 +200,19 @@ class DTVStoppingCriteria(StoppingCriteria):
         state = _scan_string_comment_state(stripped, self.language_profile)
         if state["in_string"] or state["in_line_comment"] or state["in_block_comment"]:
             self._boundary_suppressed += 1
-            if self._boundary_checks <= self._log_limit:
-                logger.info(
-                    "stop suppressed: last_char=%s in_string=%s in_line_comment=%s in_block_comment=%s tail=%s",
-                    last_char,
-                    state["in_string"],
-                    state["in_line_comment"],
-                    state["in_block_comment"],
-                    stripped[-80:],
-                )
+            logger.info(
+                "stop suppressed: last_char=%s in_string=%s in_line_comment=%s in_block_comment=%s tail=%s",
+                last_char,
+                state["in_string"],
+                state["in_line_comment"],
+                state["in_block_comment"],
+                stripped[-80:],
+            )
             return TORCH_FALSE
 
         # TODO: bracket/brace depth tracking to avoid stopping mid-block context.
         # TODO: raw strings (Rust) and template literals (TS) are not handled here.
         self._boundary_triggered += 1
         self._last_boundary_len = current_len
-        if self._boundary_checks <= self._log_limit:
-            logger.info("stop triggered: last_char=%s tail=%s", last_char, stripped[-80:])
+        logger.info("stop triggered: last_char=%s tail=%s", last_char, stripped[-80:])
         return TORCH_TRUE

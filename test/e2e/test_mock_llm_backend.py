@@ -80,6 +80,9 @@ def test_stop_criteria_factory_triggers_boundary(tmp_path: Path) -> None:
         def __init__(self, limit: int) -> None:
             self.limit = limit
 
+        def set_prompt_token_count(self, prompt_token_count: int) -> None:
+            _ = prompt_token_count
+
         def __call__(self, input_ids, scores, **kwargs):
             _ = scores
             _ = kwargs
