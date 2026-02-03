@@ -175,3 +175,96 @@ fn foo() -> i32 {
     print(result.artifact.code)
     compile = compile_rust(result.artifact.code)
     assert not compile.ok # should not compile due to type error
+
+
+def test_match_empty_block_compiles() -> None:
+    prefix = """\
+fn foo(a: i32) -> i32 {
+    match a {
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_match_missing_wildcard_without_comma_compiles() -> None:
+    prefix = """\
+fn foo(a: i32) -> i32 {
+    match a {
+        0 => 1
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_match_missing_wildcard_with_comma_compiles() -> None:
+    prefix = """\
+fn foo(a: i32) -> i32 {
+    match a {
+        0 => 1,
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_match_arm_block_semicolon_compiles() -> None:
+    prefix = """\
+fn foo(a: i32) {
+    match a {
+        0 => {
+            let x = 1;
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_match_arm_block_closing_brace_compiles() -> None:
+    prefix = """\
+fn foo(a: i32) -> i32 {
+    match a {
+        0 => { 1 }
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_match_guard_arm_compiles() -> None:
+    prefix = """\
+fn foo(a: i32) {
+    match a {
+        n if n > 0 => {
+            let y = 1;
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_match_let_initializer_compiles() -> None:
+    prefix = """\
+fn foo(a: i32) {
+    let x = match a {
+        0 => {
+            let y = 1;
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr

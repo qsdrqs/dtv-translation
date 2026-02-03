@@ -25,6 +25,19 @@ class IfContext:
 
 
 @dataclass(frozen=True)
+class MatchContext:
+    """Analysis hints for an enclosing match-expression."""
+    in_expression: bool = False
+    in_value_context: bool = False
+    in_block: bool = False
+    block_start: int | None = None  # Byte offset of match block start.
+    block_end: int | None = None  # Byte offset of match block end.
+    has_arms: bool = False
+    has_wildcard: bool = False
+    last_arm_has_comma: bool = False
+
+
+@dataclass(frozen=True)
 class LetContext:
     """Analysis hints for a let binding."""
     in_initializer: bool = False
@@ -201,6 +214,13 @@ def has_else_clause(if_node) -> bool:
     return False
 
 
+def _is_wildcard_match_pattern(pattern_node, prefix_bytes: bytes) -> bool:
+    if pattern_node is None:
+        return False
+    pattern_bytes = prefix_bytes[pattern_node.start_byte:pattern_node.end_byte]
+    return pattern_bytes.strip() == b"_"
+
+
 class ContextRule:
     key: str = ""
     node_types: tuple[str, ...] = ()
@@ -303,6 +323,81 @@ class IfContextRule(ContextRule):
                 plan.notes.append("render_patch:if_else_tail")
 
 
+class MatchContextRule(ContextRule):
+    key = "match"
+    node_types = ("match_expression",)
+    phase = PatchPhase.SEMANTIC
+
+    def apply_analysis(self, nodes, *, anchor, end_byte: int, prefix_bytes: bytes, registry: ContextRegistry) -> None:
+        for node in nodes:
+            in_value_context = ancestor_of_type(
+                node,
+                [
+                    "let_declaration",
+                    "let_statement",
+                    "assignment_expression",
+                    "return_expression",
+                    "argument_list",
+                ],
+            ) is not None
+            body = node.child_by_field_name("body")
+            block_start = body.start_byte if body is not None else None
+            block_end = body.end_byte if body is not None else None
+            in_block = False
+            if body is not None:
+                in_block = body.start_byte <= end_byte < body.end_byte
+
+            match_arms = []
+            if body is not None:
+                for child in body.named_children:
+                    if child.type == "match_arm":
+                        match_arms.append(child)
+
+            has_arms = bool(match_arms)
+            has_wildcard = False
+            last_arm_has_comma = False
+            for arm in match_arms:
+                pattern = arm.child_by_field_name("pattern")
+                if _is_wildcard_match_pattern(pattern, prefix_bytes):
+                    has_wildcard = True
+                    break
+            if match_arms:
+                last_arm = match_arms[-1]
+                arm_bytes = prefix_bytes[last_arm.start_byte:last_arm.end_byte]
+                last_arm_has_comma = arm_bytes.rstrip().endswith(b",")
+
+            registry.add(
+                self.key,
+                MatchContext(
+                    in_expression=True,
+                    in_value_context=in_value_context,
+                    in_block=in_block,
+                    block_start=block_start,
+                    block_end=block_end,
+                    has_arms=has_arms,
+                    has_wildcard=has_wildcard,
+                    last_arm_has_comma=last_arm_has_comma,
+                ),
+            )
+
+    def apply_patch(self, plan: PatchPlan, analysis: Analysis) -> None:
+        for match_ctx in self.get_contexts(analysis):
+            if not isinstance(match_ctx, MatchContext):
+                continue
+            if not (match_ctx.in_expression and match_ctx.in_block):
+                continue
+            if match_ctx.has_wildcard:
+                continue
+            close_idx = plan.index_for(match_ctx.block_start)
+            if close_idx is None:
+                continue
+            text = "_ => todo!()"
+            if match_ctx.has_arms and not match_ctx.last_arm_has_comma:
+                text = ", _ => todo!()"
+            plan.scaffold.add_before(close_idx, text)
+            plan.notes.append("render_patch:match_wildcard")
+
+
 class LetContextRule(ContextRule):
     key = "let"
     node_types = ("let_declaration", "let_statement")
@@ -344,6 +439,10 @@ class LetContextRule(ContextRule):
                         cons = value_node.child_by_field_name("consequence")
                         if cons is not None and cons.type == "block":
                             value_block_start = cons.start_byte
+                elif value_node.type == "match_expression":
+                    match_block = value_node.child_by_field_name("body")
+                    if match_block is not None and match_block.type == "match_block":
+                        value_block_start = match_block.start_byte
 
             registry.add(
                 self.key,
@@ -457,6 +556,7 @@ class FunctionContextRule(ContextRule):
 
 CONTEXT_RULES: tuple[ContextRule, ...] = (
     IfContextRule(),
+    MatchContextRule(),
     LetContextRule(),
     FunctionContextRule(),
 )
