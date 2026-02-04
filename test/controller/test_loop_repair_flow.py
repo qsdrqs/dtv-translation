@@ -25,6 +25,7 @@ from rollback.manager import RollbackManager
 class _OracleFail:
     name: str = "oracle"
     required_granularity: Granularity = Granularity.STMT
+    rollback_scope: RollbackScope = RollbackScope.STMT
 
     def run(self, state, artifact, context):
         _ = state

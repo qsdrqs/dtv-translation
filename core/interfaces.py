@@ -12,6 +12,7 @@ from core.types import (
     OracleContext,
     OracleOutput,
     RenderResult,
+    RollbackScope,
 )
 
 
@@ -35,6 +36,7 @@ class Oracle(Protocol):
     """Deterministic verifier; raise on tool/infra failures instead of returning a verdict."""
     name: str
     required_granularity: Granularity
+    rollback_scope: RollbackScope
 
     def run(self, state: ControllerState, artifact: Artifact, context: OracleContext) -> OracleOutput:
         ...

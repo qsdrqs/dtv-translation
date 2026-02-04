@@ -12,6 +12,7 @@ from core.types import (
     Granularity,
     OracleContext,
     OracleOutput,
+    RollbackScope,
     Verdict,
 )
 from c_rust.oracles.compiler_oracle.rustc_driver import RustcDriver
@@ -21,6 +22,7 @@ from c_rust.oracles.compiler_oracle.rustc_parser import has_errors, parse_rustc_
 class RustcOracle(Oracle):
     name = "rustc"
     required_granularity = Granularity.STMT
+    rollback_scope = RollbackScope.STMT
 
     def __init__(self, timeout_s: float | None = 10.0, rustc_path: str = "rustc") -> None:
         self.timeout_s = timeout_s

@@ -174,6 +174,7 @@ class _TwoStepPolicy:
 class _PassOracle:
     name = "pass"
     required_granularity = Granularity.STMT
+    rollback_scope = RollbackScope.STMT
 
     def run(self, state, artifact, context) -> OracleOutput:
         _ = state
@@ -185,6 +186,7 @@ class _PassOracle:
 class _FunctionNameOracle:
     name = "function_diff"
     required_granularity = Granularity.FUNC
+    rollback_scope = RollbackScope.FUNC
 
     def __init__(self, expected: str) -> None:
         self.expected = expected

@@ -27,6 +27,7 @@ class ProgramOracle(Oracle):
 
     name = "program_diff"
     required_granularity = Granularity.PROGRAM
+    rollback_scope = RollbackScope.PROGRAM
 
     def __init__(
         self,

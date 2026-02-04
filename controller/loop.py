@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Protocol
 
 from core.budget import Budget
@@ -30,19 +30,6 @@ from feedback.feedback import FeedbackState
 from rollback.manager import RollbackManager
 
 logger = get_logger(__name__)
-
-
-_GRANULARITY_ORDER = {
-    Granularity.STMT: 0,
-    Granularity.BLOCK: 1,
-    Granularity.FUNC: 2,
-    Granularity.PROGRAM: 3,
-}
-
-
-def _granularity_at_least(actual: Granularity, required: Granularity) -> bool:
-    return _GRANULARITY_ORDER[actual] >= _GRANULARITY_ORDER[required]
-
 
 @dataclass(frozen=True)
 class ControllerOp:
@@ -117,12 +104,9 @@ def select_oracles_by_granularity(
     actual_granularity = selection_granularity
     selected: list[Oracle] = []
     for oracle in available:
-        if not _granularity_at_least(actual_granularity, oracle.required_granularity):
+        if actual_granularity < oracle.required_granularity:
             continue
-        if min_granularity is not None and not _granularity_at_least(
-            oracle.required_granularity,
-            min_granularity,
-        ):
+        if min_granularity is not None and oracle.required_granularity < min_granularity:
             continue
         selected.append(oracle)
     return selected
@@ -138,7 +122,10 @@ class DummyOracleRunner:
     ) -> list[OracleOutput]:
         outputs: list[OracleOutput] = []
         for oracle in oracles:
-            outputs.append(oracle.run(state, artifact, context))
+            output = oracle.run(state, artifact, context)
+            if output.rollback_scope is None:
+                output = replace(output, rollback_scope=oracle.rollback_scope)
+            outputs.append(output)
         return outputs
 
 

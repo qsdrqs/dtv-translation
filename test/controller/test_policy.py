@@ -3,14 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from controller.loop import _effective_boundary_granularity, select_oracles_by_granularity
+from controller.policy import _select_fail_scope, DefaultPolicyConfig
 from core.budget import Budget
-from core.types import Artifact, ControllerState, Granularity, GroupStackFrame, OracleContext, OracleOutput
+from core.types import Artifact, ControllerState, Granularity, GroupStackFrame, OracleContext, OracleOutput, RollbackScope, Verdict
 
 
 @dataclass
 class _FakeOracle:
     name: str
     required_granularity: Granularity
+    rollback_scope: RollbackScope = RollbackScope.STMT
 
     def run(
         self,
@@ -72,3 +74,43 @@ def test_effective_boundary_prefers_func_over_block() -> None:
         GroupStackFrame(kind=Granularity.FUNC),
     )
     assert _effective_boundary_granularity(Granularity.STMT, closed_stack) == Granularity.FUNC
+
+
+def test_select_fail_scope_single_oracle_rollback_scope() -> None:
+    config = DefaultPolicyConfig()
+    outputs = (
+        OracleOutput(
+            oracle_name="func_oracle",
+            verdict=Verdict.FAIL,
+            rollback_scope=RollbackScope.FUNC,
+        ),
+    )
+    assert _select_fail_scope(config, outputs) == RollbackScope.FUNC
+
+
+def test_select_fail_scope_max_rollback_scope() -> None:
+    config = DefaultPolicyConfig()
+    outputs = (
+        OracleOutput(
+            oracle_name="stmt_oracle",
+            verdict=Verdict.FAIL,
+            rollback_scope=RollbackScope.STMT,
+        ),
+        OracleOutput(
+            oracle_name="func_oracle",
+            verdict=Verdict.FAIL,
+            rollback_scope=RollbackScope.FUNC,
+        ),
+    )
+    assert _select_fail_scope(config, outputs) == RollbackScope.FUNC
+
+
+def test_select_fail_scope_fallback_default() -> None:
+    config = DefaultPolicyConfig(default_fail_scope=RollbackScope.STMT)
+    outputs = (
+        OracleOutput(
+            oracle_name="oracle_no_scope",
+            verdict=Verdict.FAIL,
+        ),
+    )
+    assert _select_fail_scope(config, outputs) == RollbackScope.STMT

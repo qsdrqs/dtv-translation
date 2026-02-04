@@ -202,7 +202,11 @@ def _all_pass(outputs: tuple[OracleOutput, ...]) -> bool:
     return saw_pass
 
 
-def _select_fail_scope(config: DefaultPolicyConfig, outputs: tuple[OracleOutput, ...]) -> RollbackScope:
+def _select_fail_scope(config: DefaultPolicyConfig, outputs: tuple[OracleOutput, ...]) -> Granularity:
+    fail_outputs = [o for o in outputs if o.verdict == Verdict.FAIL]
+    scopes = [o.rollback_scope for o in fail_outputs if o.rollback_scope is not None]
+    if scopes:
+        return max(scopes)
     if config.enable_cdhr:
         for output in outputs:
             for diag in output.diagnostics:

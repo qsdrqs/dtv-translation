@@ -38,6 +38,7 @@ class FunctionOracle(Oracle):
 
     name = "function_diff"
     required_granularity = Granularity.FUNC
+    rollback_scope = RollbackScope.FUNC
 
     def __init__(
         self,

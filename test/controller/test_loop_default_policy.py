@@ -16,6 +16,7 @@ from core.types import (
     OracleOutput,
     RenderResult,
     RenderStatus,
+    RollbackScope,
     StopReason,
     Verdict,
 )
@@ -99,10 +100,12 @@ class _SequenceOracle:
         *,
         name: str = "oracle",
         required_granularity: Granularity = Granularity.STMT,
+        rollback_scope: RollbackScope | None = None,
     ) -> None:
         self.verdicts = verdicts
         self.name = name
         self.required_granularity = required_granularity
+        self.rollback_scope = rollback_scope if rollback_scope is not None else RollbackScope(required_granularity.value)
         self.idx = 0
 
     def run(self, state, artifact, context) -> OracleOutput:

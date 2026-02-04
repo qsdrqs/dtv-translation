@@ -9,6 +9,36 @@ class Granularity(str, Enum):
     FUNC = "func"
     PROGRAM = "program"
 
+    _ORDER = {
+        "stmt": 0,
+        "block": 1,
+        "func": 2,
+        "program": 3,
+    }
+
+    def _order(self) -> int:
+        return self._ORDER[self.value]
+
+    def __lt__(self, other: object) -> bool:
+        if not isinstance(other, Granularity):
+            return NotImplemented
+        return self._order() < other._order()
+
+    def __le__(self, other: object) -> bool:
+        if not isinstance(other, Granularity):
+            return NotImplemented
+        return self._order() <= other._order()
+
+    def __gt__(self, other: object) -> bool:
+        if not isinstance(other, Granularity):
+            return NotImplemented
+        return self._order() > other._order()
+
+    def __ge__(self, other: object) -> bool:
+        if not isinstance(other, Granularity):
+            return NotImplemented
+        return self._order() >= other._order()
+
 
 class RenderStatus(str, Enum):
     OK = "ok"
@@ -43,8 +73,4 @@ class FeedbackMode(str, Enum):
     FENCED = "fenced"
 
 
-class RollbackScope(str, Enum):
-    STMT = "stmt"
-    BLOCK = "block"
-    FUNC = "func"
-    PROGRAM = "program"
+RollbackScope = Granularity
