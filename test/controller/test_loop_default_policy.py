@@ -12,6 +12,7 @@ from core.types import (
     GenerateContext,
     GenerateResult,
     Granularity,
+    GroupStackFrame,
     OracleOutput,
     RenderResult,
     RenderStatus,
@@ -58,8 +59,8 @@ class _SequenceGenerator:
 
 
 class _OkRenderer:
-    def try_render(self, prefix: str, granularity: Granularity) -> RenderResult:
-        artifact = Artifact(code=prefix, granularity=granularity)
+    def try_render(self, prefix: str) -> RenderResult:
+        artifact = Artifact(code=prefix)
         return RenderResult(status=RenderStatus.OK, artifact=artifact)
 
 
@@ -68,13 +69,27 @@ class _SequenceRenderer:
         self.statuses = statuses
         self.calls = 0
 
-    def try_render(self, prefix: str, granularity: Granularity) -> RenderResult:
+    def try_render(self, prefix: str) -> RenderResult:
         status = self.statuses[min(self.calls, len(self.statuses) - 1)]
         self.calls += 1
         if status == RenderStatus.OK:
-            artifact = Artifact(code=prefix, granularity=granularity)
+            artifact = Artifact(code=prefix)
             return RenderResult(status=status, artifact=artifact)
         return RenderResult(status=status, artifact=None, notes="mock")
+
+
+class _BlockCloseRenderer:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def try_render(self, prefix: str) -> RenderResult:
+        self.calls += 1
+        if self.calls == 1:
+            group_stack = (GroupStackFrame(kind=Granularity.BLOCK),)
+        else:
+            group_stack = ()
+        artifact = Artifact(code=prefix, group_stack=group_stack)
+        return RenderResult(status=RenderStatus.OK, artifact=artifact)
 
 
 class _SequenceOracle:
@@ -182,6 +197,34 @@ def test_default_policy_no_oracles_continue_then_generate() -> None:
         Action.COMMIT,
     ]
     assert final_prefix == "let x = 1;let y = 2;"
+
+
+def test_default_policy_block_boundary_skips_stmt_oracle() -> None:
+    generator = _SequenceGenerator([
+        _Step("let x = 1;", StopReason(kind="boundary")),
+        _Step("}", StopReason(kind="boundary")),
+    ])
+    renderer = _BlockCloseRenderer()
+    oracles = [
+        _SequenceOracle([Verdict.PASS], name="stmt", required_granularity=Granularity.STMT),
+        _SequenceOracle([Verdict.PASS], name="block", required_granularity=Granularity.BLOCK),
+    ]
+    policy = DefaultPolicy(DefaultPolicyConfig(boundary_granularity=Granularity.BLOCK))
+
+    _, trace = _run_loop(generator, renderer, oracles, policy, max_steps=6)
+
+    verify_events = [event for event in trace if event.action == Action.VERIFY]
+    assert verify_events
+    assert all(
+        output.oracle_name != "stmt"
+        for event in verify_events
+        for output in event.oracle_outputs
+    )
+    assert any(
+        output.oracle_name == "block"
+        for event in verify_events
+        for output in event.oracle_outputs
+    )
 
 
 def test_default_policy_inconclusive_render_continue_then_generate() -> None:

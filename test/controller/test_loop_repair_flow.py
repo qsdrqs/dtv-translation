@@ -72,18 +72,18 @@ class _ToggleRenderer:
     def __init__(self) -> None:
         self.calls = 0
 
-    def try_render(self, prefix: str, granularity: Granularity) -> RenderResult:
+    def try_render(self, prefix: str) -> RenderResult:
         _ = prefix
         self.calls += 1
         if self.calls == 1:
-            artifact = Artifact(code=prefix, granularity=granularity)
+            artifact = Artifact(code=prefix)
             return RenderResult(status=RenderStatus.OK, artifact=artifact)
         return RenderResult(status=RenderStatus.CONTINUE, artifact=None, notes="need more")
 
 
 class _OkRenderer:
-    def try_render(self, prefix: str, granularity: Granularity) -> RenderResult:
-        artifact = Artifact(code=prefix, granularity=granularity)
+    def try_render(self, prefix: str) -> RenderResult:
+        artifact = Artifact(code=prefix)
         return RenderResult(status=RenderStatus.OK, artifact=artifact)
 
 
@@ -99,7 +99,7 @@ class _RepairFlowPolicy:
         # 1: verify -> fail
         if self.stage == 1:
             self.stage = 2
-            return ControllerOp(Action.VERIFY, granularity=Granularity.STMT)
+            return ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT)
         # 2: rollback to base
         if self.stage == 2:
             self.stage = 3
@@ -107,15 +107,22 @@ class _RepairFlowPolicy:
         # 3: probing verify that is inconclusive
         if self.stage == 3:
             self.stage = 4
-            return ControllerOp(Action.VERIFY, granularity=Granularity.STMT)
+            return ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT)
         # 4: feedback should still be possible
         if self.stage == 4:
             self.stage = 5
             return ControllerOp(Action.FEEDBACK)
         return ControllerOp(Action.TERMINATE)
 
-    def select_oracles(self, artifact, budget, available):
-        return select_oracles_by_granularity(artifact, budget, available)
+    def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
+        if selection_granularity is None:
+            raise ValueError("selection_granularity is required")
+        return select_oracles_by_granularity(
+            artifact,
+            budget,
+            available,
+            selection_granularity=selection_granularity,
+        )
 
 
 class _ContinueGeneratePolicy:
@@ -128,7 +135,7 @@ class _ContinueGeneratePolicy:
             return ControllerOp(Action.GENERATE)
         if self.stage == 1:
             self.stage = 2
-            return ControllerOp(Action.VERIFY, granularity=Granularity.STMT)
+            return ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT)
         if self.stage == 2:
             self.stage = 3
             return ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.STMT)
@@ -142,8 +149,15 @@ class _ContinueGeneratePolicy:
             return ControllerOp(Action.FEEDBACK)
         return ControllerOp(Action.TERMINATE)
 
-    def select_oracles(self, artifact, budget, available):
-        return select_oracles_by_granularity(artifact, budget, available)
+    def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
+        if selection_granularity is None:
+            raise ValueError("selection_granularity is required")
+        return select_oracles_by_granularity(
+            artifact,
+            budget,
+            available,
+            selection_granularity=selection_granularity,
+        )
 
 
 class _NoOraclePolicy:
@@ -157,21 +171,28 @@ class _NoOraclePolicy:
             return ControllerOp(Action.GENERATE)
         if self.stage == 1:
             self.stage = 2
-            return ControllerOp(Action.VERIFY, granularity=Granularity.STMT)
+            return ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT)
         if self.stage == 2:
             self.stage = 3
             return ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.STMT)
         if self.stage == 3:
             self.stage = 4
             self.allow_oracles = False
-            return ControllerOp(Action.VERIFY, granularity=Granularity.STMT)
+            return ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT)
         if self.stage == 4:
             return ControllerOp(Action.FEEDBACK)
         return ControllerOp(Action.TERMINATE)
 
-    def select_oracles(self, artifact, budget, available):
+    def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
+        if selection_granularity is None:
+            raise ValueError("selection_granularity is required")
         if self.allow_oracles:
-            return select_oracles_by_granularity(artifact, budget, available)
+            return select_oracles_by_granularity(
+                artifact,
+                budget,
+                available,
+                selection_granularity=selection_granularity,
+            )
         return []
 
 

@@ -7,7 +7,7 @@ from c_rust.render.context_rules import PatchPhase, apply_patch_rules
 from c_rust.render.groups import parse_rust, rust_group_stack
 from c_rust.render.scan import brace_close_plan, scan_unclosed
 from c_rust.render.suffix import create_plan, plan_to_suffix
-from core.types import Artifact, Granularity, RenderResult, RenderStatus, TranslationSample
+from core.types import Artifact, RenderResult, RenderStatus, TranslationSample
 
 
 @dataclass(frozen=True)
@@ -25,9 +25,9 @@ class CRustRenderer:
         self.config = config or RenderConfig()
         self.sample = sample
 
-    def try_render(self, prefix: str, granularity: Granularity) -> RenderResult:
+    def try_render(self, prefix: str) -> RenderResult:
         try:
-            return self._try_render(prefix, granularity)
+            return self._try_render(prefix)
         except Exception as exc:  # pragma: no cover - defensive
             return RenderResult(
                 status=RenderStatus.FAIL,
@@ -35,7 +35,7 @@ class CRustRenderer:
                 notes=f"render_fail:{exc.__class__.__name__}",
             )
 
-    def _try_render(self, prefix: str, granularity: Granularity) -> RenderResult:
+    def _try_render(self, prefix: str) -> RenderResult:
         if not prefix.strip():
             return RenderResult(status=RenderStatus.CONTINUE, notes="render_continue:empty")
 
@@ -73,7 +73,6 @@ class CRustRenderer:
         )
         artifact = Artifact(
             code=code,
-            granularity=granularity,
             ast_tree=tree,
             sample=self.sample,
             group_events=(),

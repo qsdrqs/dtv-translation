@@ -5,7 +5,7 @@ Tests for program-level differential oracle.
 from pathlib import Path
 import pytest
 
-from core.types import Artifact, ControllerState, Granularity, OracleContext, TestCase, TranslationSample, Verdict
+from core.types import Artifact, ControllerState, OracleContext, TestCase, TranslationSample, Verdict
 from c_rust.oracles.program_diff_test_oracle.program_oracle import ProgramOracle
 from test.c_rust.utils import _gcc_path, _rustc_path
 
@@ -99,7 +99,6 @@ def test_program_oracle_pass_simple():
 
     artifact = Artifact(
         code=RUST_HELLO_WORLD,
-        granularity=Granularity.PROGRAM,
         sample=sample,
     )
 
@@ -128,7 +127,6 @@ def test_program_oracle_pass_with_input():
 
     artifact = Artifact(
         code=RUST_ECHO_INPUT,
-        granularity=Granularity.PROGRAM,
         sample=sample,
     )
 
@@ -152,7 +150,6 @@ def test_program_oracle_pass_exit_code():
 
     artifact = Artifact(
         code=RUST_EXIT_CODE_CORRECT,
-        granularity=Granularity.PROGRAM,
         sample=sample,
     )
 
@@ -175,7 +172,6 @@ def test_program_oracle_fail_exit_code_mismatch():
 
     artifact = Artifact(
         code=RUST_EXIT_CODE_WRONG,
-        granularity=Granularity.PROGRAM,
         sample=sample,
     )
 
@@ -200,7 +196,6 @@ def test_program_oracle_fail_output_mismatch():
 
     artifact = Artifact(
         code=RUST_WRONG_OUTPUT,
-        granularity=Granularity.PROGRAM,
         sample=sample,
     )
 
@@ -219,7 +214,6 @@ def test_program_oracle_not_applicable_no_sample():
 
     artifact = Artifact(
         code=RUST_HELLO_WORLD,
-        granularity=Granularity.PROGRAM,
         sample=None,
     )
 
@@ -243,7 +237,6 @@ def test_program_oracle_not_applicable_no_test_cases():
 
     artifact = Artifact(
         code=RUST_HELLO_WORLD,
-        granularity=Granularity.PROGRAM,
         sample=sample,
     )
 
@@ -273,7 +266,6 @@ fn main() {
 
     artifact = Artifact(
         code=invalid_rust,
-        granularity=Granularity.PROGRAM,
         sample=sample,
     )
 
@@ -301,7 +293,6 @@ def test_program_oracle_cost_accounting():
 
     artifact = Artifact(
         code=RUST_HELLO_WORLD,
-        granularity=Granularity.PROGRAM,
         sample=sample,
     )
 

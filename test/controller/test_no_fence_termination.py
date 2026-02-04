@@ -8,7 +8,6 @@ from core.types import (
     Artifact,
     GenerateContext,
     GenerateResult,
-    Granularity,
     RenderResult,
     RenderStatus,
     StopReason,
@@ -34,8 +33,8 @@ class _NoFenceGenerator:
 
 
 class _DummyRenderer:
-    def try_render(self, prefix: str, granularity: Granularity) -> RenderResult:
-        artifact = Artifact(code=prefix, granularity=granularity)
+    def try_render(self, prefix: str) -> RenderResult:
+        artifact = Artifact(code=prefix)
         return RenderResult(status=RenderStatus.OK, artifact=artifact)
 
 
@@ -45,7 +44,8 @@ class _GenerateOnlyPolicy:
             return ControllerOp(Action.GENERATE)
         return ControllerOp(Action.CONTINUE)
 
-    def select_oracles(self, artifact, budget, available):
+    def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
+        _ = selection_granularity
         _ = artifact
         _ = budget
         _ = available

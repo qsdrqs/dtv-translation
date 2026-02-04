@@ -23,7 +23,6 @@ class GroupEvent:
 @dataclass(frozen=True)
 class Artifact:
     code: str
-    granularity: Granularity
     ast_tree: Tree | None = None
     sample: TranslationSample | None = None
     group_events: tuple[GroupEvent, ...] = ()

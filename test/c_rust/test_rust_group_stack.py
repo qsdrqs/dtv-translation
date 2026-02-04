@@ -20,7 +20,7 @@ def _stack(prefix: str, suffix: str = "") -> tuple[Granularity, ...]:
 
 def _render_stack(prefix: str) -> tuple[Granularity, ...] | None:
     renderer = CRustRenderer()
-    result = renderer.try_render(prefix, Granularity.STMT)
+    result = renderer.try_render(prefix)
     if result.status != RenderStatus.OK or result.artifact is None:
         return None
     stack = result.artifact.group_stack
@@ -109,4 +109,3 @@ fn foo() {
     s2;
 """
     assert _render_stack(prefix) == (Granularity.FUNC, Granularity.BLOCK)
-

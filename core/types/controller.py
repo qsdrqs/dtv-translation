@@ -19,7 +19,7 @@ class TraceEvent:
     step: int
     stop_reason: StopReason | None
     action: Action
-    granularity: Granularity | None = None
+    verification_granularity: Granularity | None = None
     render_status: RenderStatus | None = None
     rollback_scope: RollbackScope | None = None
     patch_applied: bool = False

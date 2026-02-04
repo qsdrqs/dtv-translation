@@ -63,7 +63,7 @@ def test_default_policy_verify_inconclusive_returns_continue() -> None:
 
 def test_default_policy_no_oracle_selected_commits_when_enabled() -> None:
     policy = DefaultPolicy(DefaultPolicyConfig(commit_when_no_oracle_selected=True))
-    artifact = Artifact(code="let x = 1;", granularity=Granularity.STMT)
+    artifact = Artifact(code="let x = 1;")
     ctx = _ctx(
         prefix="let x = 1;",
         last_action=Action.VERIFY,
@@ -100,7 +100,7 @@ def test_default_policy_generate_boundary_triggers_verify() -> None:
     )
     op = policy.next_action(ctx)
     assert op.action == Action.VERIFY
-    assert op.granularity == Granularity.STMT
+    assert op.verification_granularity == Granularity.STMT
 
 
 def test_default_policy_eos_uses_program_granularity() -> None:
@@ -112,7 +112,7 @@ def test_default_policy_eos_uses_program_granularity() -> None:
     )
     op = policy.next_action(ctx)
     assert op.action == Action.VERIFY
-    assert op.granularity == Granularity.PROGRAM
+    assert op.verification_granularity == Granularity.PROGRAM
 
 
 def test_default_policy_continue_then_generate() -> None:

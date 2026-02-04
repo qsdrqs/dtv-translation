@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from c_rust.render import CRustRenderer
-from core.types import Granularity, RenderStatus
+from core.types import RenderStatus
 from test.c_rust.utils import compile_rust
 
 
 def _render(prefix: str):
     renderer = CRustRenderer()
-    return renderer.try_render(prefix, Granularity.STMT)
+    return renderer.try_render(prefix)
 
 
 def test_missing_brace_only_compiles() -> None:

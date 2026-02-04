@@ -12,10 +12,10 @@ from rollback.manager import RollbackManager
 
 
 class DummyRenderer:
-    def try_render(self, prefix, granularity):
+    def try_render(self, prefix):
         return RenderResult(
             status=RenderStatus.OK,
-            artifact=Artifact(code=prefix, granularity=granularity or Granularity.STMT),
+            artifact=Artifact(code=prefix),
         )
 
 
@@ -24,7 +24,7 @@ class DemoPolicy:
         if ctx.last_action is None:
             return ControllerOp(Action.GENERATE)
         if ctx.last_action == Action.GENERATE:
-            return ControllerOp(Action.VERIFY, granularity=Granularity.STMT)
+            return ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT)
         if ctx.last_action == Action.VERIFY:
             if any(out.verdict == Verdict.FAIL for out in ctx.last_outputs):
                 return ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.STMT)
@@ -35,8 +35,15 @@ class DemoPolicy:
             return ControllerOp(Action.GENERATE)
         return ControllerOp(Action.TERMINATE)
 
-    def select_oracles(self, artifact, budget, available):
-        return select_oracles_by_granularity(artifact, budget, available)
+    def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
+        if selection_granularity is None:
+            raise ValueError("selection_granularity is required")
+        return select_oracles_by_granularity(
+            artifact,
+            budget,
+            available,
+            selection_granularity=selection_granularity,
+        )
 
 
 def main() -> None:

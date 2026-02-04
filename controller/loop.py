@@ -47,7 +47,7 @@ def _granularity_at_least(actual: Granularity, required: Granularity) -> bool:
 @dataclass(frozen=True)
 class ControllerOp:
     action: Action
-    granularity: Granularity | None = None
+    verification_granularity: Granularity | None = None
     rollback_scope: RollbackScope | None = None
     feedback_mode: FeedbackMode | None = None
 
@@ -75,6 +75,7 @@ class ControllerRuntime:
     last_render_status: RenderStatus | None = None
     last_artifact: Artifact | None = None
     last_outputs: tuple[OracleOutput, ...] = ()
+    last_verification_granularity: Granularity | None = None
     last_group_stack: tuple[GroupStackFrame, ...] | None = None
     last_closed_stack: tuple[GroupStackFrame, ...] = ()
     assistant_prefix: AssistantContent = field(default_factory=AssistantContent.empty)
@@ -94,6 +95,8 @@ class Policy(Protocol):
         artifact: Artifact,
         budget: Budget,
         available: Sequence[Oracle],
+        *,
+        selection_granularity: Granularity | None = None,
     ) -> list[Oracle]:
         ...
 
@@ -102,13 +105,27 @@ def select_oracles_by_granularity(
     artifact: Artifact,
     budget: Budget,
     available: Sequence[Oracle],
+    *,
+    selection_granularity: Granularity,
+    min_granularity: Granularity | None = None,
 ) -> list[Oracle]:
     _ = budget
-    return [
-        oracle
-        for oracle in available
-        if _granularity_at_least(artifact.granularity, oracle.required_granularity)
-    ]
+    # Terms used in granularity filtering:
+    # - required_granularity: each oracle's declared scope (e.g., STMT/FUNC/PROGRAM).
+    # - boundary_granularity (min_granularity): policy lower bound; skip oracles below it.
+    # - effective_boundary (selection_granularity): actual closed boundary upper bound for this verify.
+    actual_granularity = selection_granularity
+    selected: list[Oracle] = []
+    for oracle in available:
+        if not _granularity_at_least(actual_granularity, oracle.required_granularity):
+            continue
+        if min_granularity is not None and not _granularity_at_least(
+            oracle.required_granularity,
+            min_granularity,
+        ):
+            continue
+        selected.append(oracle)
+    return selected
 
 
 class DummyOracleRunner:
@@ -202,13 +219,28 @@ def _closed_function_name(closed_stack: tuple[GroupStackFrame, ...]) -> str | No
     return function_frame.name_id
 
 
+def _effective_boundary_granularity(
+    op_granularity: Granularity,
+    closed_stack: tuple[GroupStackFrame, ...],
+) -> Granularity:
+    # Use the highest closed boundary as the effective upper bound.
+    if op_granularity == Granularity.PROGRAM:
+        # EOS verification always uses PROGRAM as the upper bound.
+        return Granularity.PROGRAM
+    if any(frame.kind == Granularity.FUNC for frame in closed_stack):
+        return Granularity.FUNC
+    if any(frame.kind == Granularity.BLOCK for frame in closed_stack):
+        return Granularity.BLOCK
+    return Granularity.STMT
+
+
 def _append_trace(
     trace: list[TraceEvent],
     *,
     step: int,
     stop_reason: StopReason | None,
     action: Action,
-    granularity: Granularity | None,
+    verification_granularity: Granularity | None,
     budget: Budget,
     oracle_outputs: tuple[OracleOutput, ...] = (),
     render_status: RenderStatus | None = None,
@@ -221,7 +253,7 @@ def _append_trace(
             step=step,
             stop_reason=stop_reason,
             action=action,
-            granularity=granularity,
+            verification_granularity=verification_granularity,
             render_status=render_status,
             rollback_scope=rollback_scope,
             patch_applied=patch_applied,
@@ -267,6 +299,7 @@ def _handle_generate(
     runtime.last_artifact = None
     runtime.last_outputs = ()
     runtime.last_closed_stack = ()
+    runtime.last_verification_granularity = None
     runtime.last_action = Action.GENERATE
     logger.info(
         "generate: step=%s delta_tokens=%s stop_reason=%s prefix_len=%s",
@@ -280,7 +313,7 @@ def _handle_generate(
         step=runtime.state.step,
         stop_reason=runtime.last_stop_reason,
         action=Action.GENERATE,
-        granularity=None,
+        verification_granularity=None,
         budget=budget,
     )
 
@@ -296,14 +329,14 @@ def _handle_verify(
     feedback_state: FeedbackState,
     trace: list[TraceEvent],
 ) -> None:
-    if op.granularity is None:
+    if op.verification_granularity is None:
         raise ValueError("VERIFY requires granularity")
     # Render the current prefix and update runtime state
-    render_result = renderer.try_render(runtime.state.prefix, op.granularity)
+    render_result = renderer.try_render(runtime.state.prefix)
     logger.info(
-        "verify: step=%s granularity=%s render_status=%s",
+        "verify: step=%s verification_granularity=%s render_status=%s",
         runtime.state.step,
-        op.granularity,
+        op.verification_granularity,
         render_result.status,
     )
     runtime.last_render_status = render_result.status
@@ -311,6 +344,7 @@ def _handle_verify(
     outputs: list[OracleOutput] = []
     notes = render_result.notes
     oracle_context = OracleContext()
+    effective_granularity = op.verification_granularity
     if render_result.status == RenderStatus.OK and runtime.last_artifact is not None:
         # Track group stack changes and update closed stack
         if runtime.last_artifact.group_stack is not None:
@@ -326,8 +360,17 @@ def _handle_verify(
         else:
             runtime.last_closed_stack = ()
             runtime.last_group_stack = None
+        effective_granularity = _effective_boundary_granularity(
+            op.verification_granularity,
+            runtime.last_closed_stack,
+        )
         # Select and run oracles, update budget and feedback
-        selected_oracles = policy.select_oracles(runtime.last_artifact, budget, oracles)
+        selected_oracles = policy.select_oracles(
+            runtime.last_artifact,
+            budget,
+            oracles,
+            selection_granularity=effective_granularity,
+        )
         logger.info("verify: selected_oracles=%s", [oracle.name for oracle in selected_oracles])
         if selected_oracles:
             outputs = oracle_runner.run(
@@ -350,6 +393,7 @@ def _handle_verify(
     else:
         runtime.last_closed_stack = ()
     runtime.last_outputs = tuple(outputs)
+    runtime.last_verification_granularity = effective_granularity
 
     # Handle repair context based on oracle verdicts
     if outputs:
@@ -365,7 +409,7 @@ def _handle_verify(
         step=runtime.state.step,
         stop_reason=runtime.last_stop_reason,
         action=Action.VERIFY,
-        granularity=op.granularity,
+        verification_granularity=effective_granularity,
         budget=budget,
         oracle_outputs=runtime.last_outputs,
         render_status=runtime.last_render_status,
@@ -389,9 +433,9 @@ def _handle_commit(
     _clear_repair_context(runtime)
     runtime.last_action = Action.COMMIT
     logger.info(
-        "commit: step=%s granularity=%s prefix_len=%s",
+        "commit: step=%s verification_granularity=%s prefix_len=%s",
         runtime.state.step,
-        runtime.last_artifact.granularity,
+        runtime.last_verification_granularity,
         len(runtime.state.prefix),
     )
     _append_trace(
@@ -399,7 +443,7 @@ def _handle_commit(
         step=runtime.state.step,
         stop_reason=runtime.last_stop_reason,
         action=Action.COMMIT,
-        granularity=runtime.last_artifact.granularity,
+        verification_granularity=runtime.last_verification_granularity,
         budget=budget,
         oracle_outputs=runtime.last_outputs,
     )
@@ -425,6 +469,7 @@ def _handle_rollback(
     runtime.last_outputs = ()
     runtime.last_group_stack = None
     runtime.last_closed_stack = ()
+    runtime.last_verification_granularity = None
     runtime.last_action = Action.ROLLBACK
     logger.info(
         "rollback: step=%s scope=%s prefix_len=%s",
@@ -437,7 +482,7 @@ def _handle_rollback(
         step=runtime.state.step,
         stop_reason=runtime.last_stop_reason,
         action=Action.ROLLBACK,
-        granularity=None,
+        verification_granularity=None,
         budget=budget,
         rollback_scope=op.rollback_scope,
     )
@@ -502,7 +547,7 @@ def _handle_feedback(
         step=runtime.state.step,
         stop_reason=runtime.last_stop_reason,
         action=Action.FEEDBACK,
-        granularity=None,
+        verification_granularity=None,
         budget=budget,
     )
 
@@ -539,7 +584,7 @@ def _handle_apply_patch(
         step=runtime.state.step,
         stop_reason=runtime.last_stop_reason,
         action=Action.APPLY_PATCH,
-        granularity=None,
+        verification_granularity=None,
         budget=budget,
         patch_applied=True,
     )
@@ -557,7 +602,7 @@ def _handle_continue(
         step=runtime.state.step,
         stop_reason=runtime.last_stop_reason,
         action=Action.CONTINUE,
-        granularity=None,
+        verification_granularity=None,
         budget=budget,
     )
 
@@ -574,7 +619,7 @@ def _handle_terminate(
         step=runtime.state.step,
         stop_reason=runtime.last_stop_reason,
         action=Action.TERMINATE,
-        granularity=None,
+        verification_granularity=None,
         budget=budget,
     )
 
@@ -636,10 +681,10 @@ def run_dtv_loop(
         )
         op = policy.next_action(ctx)
         logger.info(
-            "policy: step=%s action=%s granularity=%s rollback_scope=%s feedback_mode=%s tokens_used=%s tokens_left=%s",
+            "policy: step=%s action=%s verification_granularity=%s rollback_scope=%s feedback_mode=%s tokens_used=%s tokens_left=%s",
             runtime.state.step,
             op.action,
-            op.granularity,
+            op.verification_granularity,
             op.rollback_scope,
             op.feedback_mode,
             budget.gen_tokens_used,

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from collections.abc import Sequence
-from typing import Literal
 
 from controller.loop import ControllerOp, Policy, select_oracles_by_granularity
 from core.budget import Budget
@@ -36,7 +35,6 @@ class DefaultPolicyConfig:
     commit_when_no_oracle_selected: bool = False
     terminate_on_eos_and_pass: bool = True
     max_repair_rounds: int | None = None
-    oracle_selector: Literal["by_granularity"] = "by_granularity"
     feedback_mode: FeedbackMode = FeedbackMode.INLINE
 
 
@@ -66,7 +64,10 @@ class DefaultPolicy(Policy):
             if ctx.pending_patch is not None and ctx.repair_base_prefix is not None:
                 return ControllerOp(Action.APPLY_PATCH)
             if ctx.last_action == Action.APPLY_PATCH:
-                return ControllerOp(Action.VERIFY, granularity=self.config.repair_verify_granularity)
+                return ControllerOp(
+                    Action.VERIFY,
+                    verification_granularity=self.config.repair_verify_granularity,
+                )
             if (
                 ctx.failed_prefix is not None
                 and ctx.repair_base_prefix is not None
@@ -85,10 +86,16 @@ class DefaultPolicy(Policy):
         if ctx.last_action == Action.GENERATE:
             if tokens_left <= 0:
                 if can_verify:
-                    return ControllerOp(Action.VERIFY, granularity=_select_verify_granularity(self.config, is_eos))
+                    return ControllerOp(
+                        Action.VERIFY,
+                        verification_granularity=_select_verify_granularity(self.config, is_eos),
+                    )
                 return ControllerOp(Action.TERMINATE)
             if can_verify:
-                return ControllerOp(Action.VERIFY, granularity=_select_verify_granularity(self.config, is_eos))
+                return ControllerOp(
+                    Action.VERIFY,
+                    verification_granularity=_select_verify_granularity(self.config, is_eos),
+                )
             return ControllerOp(Action.GENERATE)
 
         if ctx.last_action == Action.VERIFY:
@@ -134,10 +141,18 @@ class DefaultPolicy(Policy):
         artifact: Artifact,
         budget: Budget,
         available: Sequence[Oracle],
+        *,
+        selection_granularity: Granularity | None = None,
     ) -> list[Oracle]:
-        if self.config.oracle_selector == "by_granularity":
-            return select_oracles_by_granularity(artifact, budget, available)
-        return select_oracles_by_granularity(artifact, budget, available)
+        if selection_granularity is None:
+            raise ValueError("selection_granularity is required")
+        return select_oracles_by_granularity(
+            artifact,
+            budget,
+            available,
+            selection_granularity=selection_granularity,
+            min_granularity=self.config.boundary_granularity,
+        )
 
 
 def _tokens_left(budget: Budget) -> int:

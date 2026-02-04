@@ -48,16 +48,15 @@ class _FakeGenerator:
 
 
 class _DummyRenderer:
-    def try_render(self, prefix: str, granularity: Granularity) -> RenderResult:
-        artifact = Artifact(code=prefix, granularity=granularity)
+    def try_render(self, prefix: str) -> RenderResult:
+        artifact = Artifact(code=prefix)
         return RenderResult(status=RenderStatus.OK, artifact=artifact)
 
 
 class _GroupStackRenderer:
-    def try_render(self, prefix: str, granularity: Granularity) -> RenderResult:
+    def try_render(self, prefix: str) -> RenderResult:
         artifact = Artifact(
             code=prefix,
-            granularity=granularity,
             group_stack=(GroupStackFrame(kind=Granularity.FUNC),),
             group_events=(GroupEvent(action=GroupEventAction.OPEN, kind=Granularity.BLOCK),),
         )
@@ -70,7 +69,7 @@ class _FunctionCloseRenderer:
         self.function_name = function_name
         self.calls = 0
 
-    def try_render(self, prefix: str, granularity: Granularity) -> RenderResult:
+    def try_render(self, prefix: str) -> RenderResult:
         self.calls += 1
         if self.calls == 1:
             group_stack = (GroupStackFrame(kind=Granularity.FUNC, name_id=self.function_name),)
@@ -80,7 +79,6 @@ class _FunctionCloseRenderer:
             group_events = (GroupEvent(action=GroupEventAction.CLOSE, kind=Granularity.FUNC),)
         artifact = Artifact(
             code=prefix,
-            granularity=granularity,
             sample=self.sample,
             group_stack=group_stack,
             group_events=group_events,
@@ -120,7 +118,7 @@ class _SingleStepPolicy:
         if ctx.last_action is None:
             return ControllerOp(Action.GENERATE)
         if ctx.last_action == Action.GENERATE:
-            return ControllerOp(Action.VERIFY, granularity=Granularity.STMT)
+            return ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT)
         if ctx.last_action == Action.VERIFY:
             if any(out.verdict == Verdict.FAIL for out in ctx.last_outputs):
                 return ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.STMT)
@@ -131,8 +129,15 @@ class _SingleStepPolicy:
             return ControllerOp(Action.TERMINATE)
         return ControllerOp(Action.GENERATE)
 
-    def select_oracles(self, artifact, budget, available):
-        return select_oracles_by_granularity(artifact, budget, available)
+    def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
+        if selection_granularity is None:
+            raise ValueError("selection_granularity is required")
+        return select_oracles_by_granularity(
+            artifact,
+            budget,
+            available,
+            selection_granularity=selection_granularity,
+        )
 
 
 class _TwoStepPolicy:
@@ -143,7 +148,7 @@ class _TwoStepPolicy:
         if ctx.last_action is None:
             return ControllerOp(Action.GENERATE)
         if ctx.last_action == Action.GENERATE:
-            return ControllerOp(Action.VERIFY, granularity=Granularity.STMT)
+            return ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT)
         if ctx.last_action == Action.VERIFY:
             if self.phase == 0:
                 self.phase += 1
@@ -155,8 +160,15 @@ class _TwoStepPolicy:
             return ControllerOp(Action.TERMINATE)
         return ControllerOp(Action.TERMINATE)
 
-    def select_oracles(self, artifact, budget, available):
-        return select_oracles_by_granularity(artifact, budget, available)
+    def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
+        if selection_granularity is None:
+            raise ValueError("selection_granularity is required")
+        return select_oracles_by_granularity(
+            artifact,
+            budget,
+            available,
+            selection_granularity=selection_granularity,
+        )
 
 
 class _PassOracle:
@@ -193,7 +205,7 @@ class _FunctionClosePolicy:
         if ctx.last_action is None:
             return ControllerOp(Action.GENERATE)
         if ctx.last_action == Action.GENERATE:
-            return ControllerOp(Action.VERIFY, granularity=Granularity.FUNC)
+            return ControllerOp(Action.VERIFY, verification_granularity=Granularity.FUNC)
         if ctx.last_action == Action.VERIFY:
             if self.phase == 0:
                 self.phase = 1
@@ -203,7 +215,8 @@ class _FunctionClosePolicy:
             return ControllerOp(Action.TERMINATE)
         return ControllerOp(Action.TERMINATE)
 
-    def select_oracles(self, artifact, budget, available):
+    def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
+        _ = selection_granularity
         if self.phase == 0:
             return []
         return available

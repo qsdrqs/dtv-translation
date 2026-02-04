@@ -27,7 +27,7 @@ class Generator(Protocol):
 
 
 class Renderer(Protocol):
-    def try_render(self, prefix: str, granularity: Granularity) -> RenderResult:
+    def try_render(self, prefix: str) -> RenderResult:
         ...
 
 
