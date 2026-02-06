@@ -1,4 +1,4 @@
-use std::io;
+use std::io::{self, Read};
 
 fn trap(height: &[i32]) -> i32 {
     if height.len() < 3 {
@@ -13,7 +13,6 @@ fn trap(height: &[i32]) -> i32 {
 
     while left < right {
         if height[left] < height[right] {
-            // The left side is the bottleneck
             if height[left] >= left_max {
                 left_max = height[left];
             } else {
@@ -21,7 +20,6 @@ fn trap(height: &[i32]) -> i32 {
             }
             left += 1;
         } else {
-            // The right side is the bottleneck
             if height[right] >= right_max {
                 right_max = height[right];
             } else {
@@ -35,55 +33,37 @@ fn trap(height: &[i32]) -> i32 {
 }
 
 fn main() {
-    let mut n: i32 = 0;
     let mut input = String::new();
-    
-    // Read the first integer (n)
-    match io::stdin().read_line(&mut input) {
-        Ok(_) => {
-            if let Ok(n_val) = input.trim().parse::<i32>() {
-                n = n_val;
-            } else {
-                println!("Error: invalid input");
-                return;
-            }
-        }
-        Err(_) => {
-            println!("Error: failed to read input");
-            return;
-        }
-    }
+    std::io::stdin().read_line(&mut input).unwrap();
+
+    let n: i32 = input
+        .trim()
+        .parse()
+        .expect("Invalid input: expected a valid integer for n");
 
     if n < 0 {
-        println!("Error: n must be non-negative");
+        println!("1");
         return;
     }
 
     let mut height: Vec<i32> = Vec::new();
 
     if n > 0 {
-        // Read n integers
-        let mut input = String::new();
-        match io::stdin().read_line(&mut input) {
-            Ok(_) => {
-                let values: Vec<i32> = input
-                    .trim()
-                    .split_whitespace()
-                    .map(|s| s.parse::<i32>().unwrap_or(0))
-                    .collect();
-                
-                if values.len() != n as usize {
-                    println!("Error: expected {} values", n);
-                    return;
-                }
-                
-                height = values;
-            }
-            Err(_) => {
-                println!("Error: failed to read values");
-                return;
-            }
+        let mut input_line = String::new();
+        std::io::stdin().read_line(&mut input_line).unwrap();
+
+        let values: Vec<i32> = input_line
+            .trim()
+            .split_whitespace()
+            .map(|s| s.parse::<i32>().unwrap())
+            .collect();
+
+        if values.len() != n as usize {
+            println!("1");
+            return;
         }
+
+        height = values;
     }
 
     let result = trap(&height);

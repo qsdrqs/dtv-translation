@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import time
 from pathlib import Path
 from typing import Sequence
 
+from core.toolchain import env_with_pinned_rustup_toolchain
 from core.types import ExecutionResult, TestCase
 
 
@@ -132,6 +134,7 @@ class RustcCompilationDriver(CompilationDriver):
                 cwd=workdir,
                 check=False,
                 text=True,
+                env=env_with_pinned_rustup_toolchain(),
             )
             elapsed_ms = (time.time() - start_time) * 1000
 
@@ -162,8 +165,18 @@ def run_binary(
     binary_path: Path,
     test_case: TestCase,
     timeout_s: float | None = 5.0,
+    ld_preload: Path | str | None = None,
 ) -> ExecutionResult:
     """Run a compiled binary with a single test input."""
+    # Inherit full environment; overlay LD_PRELOAD when cdylib injection is requested
+    env: dict[str, str] | None = None
+    if ld_preload is not None:
+        env = os.environ.copy()
+        preload_value = str(ld_preload)
+        if env.get("LD_PRELOAD"):
+            preload_value = f"{preload_value}:{env['LD_PRELOAD']}"
+        env["LD_PRELOAD"] = preload_value
+
     start_time = time.time()
     try:
         result = subprocess.run(
@@ -173,6 +186,7 @@ def run_binary(
             timeout=timeout_s,
             check=False,
             text=True,
+            env=env,
         )
         elapsed_ms = (time.time() - start_time) * 1000
 

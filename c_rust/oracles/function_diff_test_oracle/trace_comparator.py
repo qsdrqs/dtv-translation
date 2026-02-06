@@ -147,6 +147,17 @@ def _compare_field_list(
             suggested_scope=scope,
         )
     if len(c_list) != len(rust_list):
+        if field_name == "args":
+            mismatch = _compare_slice_arg_lengths(
+                c_list,
+                rust_list,
+                stats,
+                position,
+                scope,
+            )
+            if mismatch is None:
+                return None
+            return mismatch
         return Mismatch(
             position=position,
             c_value=f"{field_name}_len={len(c_list)}",
@@ -166,6 +177,40 @@ def _compare_field_list(
         if mismatch:
             return mismatch
     return None
+
+
+def _compare_slice_arg_lengths(
+    c_list: list[dict[str, Any]],
+    rust_list: list[dict[str, Any]],
+    stats: TraceComparisonStats,
+    position: int,
+    scope: RollbackScope,
+) -> Mismatch | None:
+    if len(c_list) == 2 and len(rust_list) == 1:
+        c_ptr, c_len = c_list
+        r_ptr = rust_list[0]
+        if _is_ptr_arg(c_ptr) and _is_len_arg(c_len) and _is_ptr_arg(r_ptr):
+            if c_ptr.get("ty") != r_ptr.get("ty"):
+                return Mismatch(
+                    position=position,
+                    c_value=_item_repr(c_ptr),
+                    rust_value=_item_repr(r_ptr),
+                    message=(
+                        "args[0] pointer type mismatch at position "
+                        f"{position}: {_item_repr(c_ptr)} vs {_item_repr(r_ptr)}"
+                    ),
+                    suggested_scope=scope,
+                )
+            stats.total_fields += 1
+            stats.skipped_fields += 1
+            return _compare_field_item(c_ptr, r_ptr, stats, position, scope, field_name="args[0]")
+    return Mismatch(
+        position=position,
+        c_value=f"args_len={len(c_list)}",
+        rust_value=f"args_len={len(rust_list)}",
+        message=f"args length mismatch at position {position} (C={len(c_list)}, Rust={len(rust_list)})",
+        suggested_scope=scope,
+    )
 
 
 def _compare_field_object(
@@ -211,6 +256,15 @@ def _compare_field_item(
             suggested_scope=scope,
         )
     return None
+
+
+def _is_ptr_arg(item: dict[str, Any]) -> bool:
+    ty = item.get("ty")
+    return isinstance(ty, str) and ty.startswith("ptr_")
+
+
+def _is_len_arg(item: dict[str, Any]) -> bool:
+    return item.get("ty") in {"i32", "i64", "isize", "u32", "u64", "usize"}
 
 
 def _is_skip(item: dict[str, Any]) -> bool:

@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import time
 
+from core.toolchain import env_with_pinned_rustup_toolchain
 from core.types import OracleContext
 
 
@@ -57,6 +58,7 @@ class RustcDriver:
                 capture_output=True,
                 text=True,
                 timeout=ctx.timeout_s,
+                env=env_with_pinned_rustup_toolchain(),
             )
         except FileNotFoundError as exc:
             raise RuntimeError(f"rustc not found: {self.rustc_path}") from exc
@@ -109,6 +111,7 @@ def _check_rustc_version(rustc_path: str) -> None:
             check=True,
             capture_output=True,
             text=True,
+            env=env_with_pinned_rustup_toolchain(),
         )
     except (OSError, subprocess.CalledProcessError) as exc:
         raise RuntimeError(f"failed to execute rustc --version: {exc}") from exc

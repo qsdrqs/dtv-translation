@@ -1,0 +1,6 @@
+{
+    "tests": [
+        {"stdin": "1\n", "test_id": "t1"},
+        {"stdin": "41\n", "test_id": "t2"}
+    ]
+}

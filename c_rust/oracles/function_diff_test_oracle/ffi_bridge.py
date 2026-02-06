@@ -51,7 +51,7 @@ def find_missing_functions(rust_source: str, c_source: str) -> MissingFunctionsR
     rust_imports = _extract_rust_function_imports_from_tree(rust_tree, rust_bytes)
     rust_defs.update(rust_imports)
     c_defs = _extract_c_function_defs(c_source)
-    normalized_c = _build_normalized_lookup(c_defs)
+    normalized_c = build_normalized_lookup(c_defs)
 
     missing: set[str] = set()
     for func_name in rust_calls:
@@ -60,7 +60,7 @@ def find_missing_functions(rust_source: str, c_source: str) -> MissingFunctionsR
         if func_name in c_defs:
             missing.add(func_name)
             continue
-        normalized = _resolve_normalized(func_name, normalized_c)
+        normalized = resolve_normalized(func_name, normalized_c)
         if normalized is None:
             # Not applicable: ambiguous or no normalized C match. Should return NOT_APPLICABLE in oracle.
             reason = f"unresolved rust call: {func_name}"
@@ -81,7 +81,7 @@ def generate_ffi_bridge(rust_source: str, c_source: str) -> FfiBridgeResult:
 
     c_functions, unsupported = _extract_c_function_signatures(c_source)
     all_names = set(c_functions) | set(unsupported)
-    normalized_c = _build_normalized_lookup(all_names)
+    normalized_c = build_normalized_lookup(all_names)
 
     extern_decls = []
     wrappers = []
@@ -89,7 +89,7 @@ def generate_ffi_bridge(rust_source: str, c_source: str) -> FfiBridgeResult:
     for func_name in missing_funcs:
         c_name = func_name
         if c_name not in all_names:
-            normalized = _resolve_normalized(c_name, normalized_c)
+            normalized = resolve_normalized(c_name, normalized_c)
             if normalized is None:
                 reason = f"unresolved C match for rust call: {func_name}"
                 _LOG.debug("FFI not applicable: %s", reason)
@@ -457,19 +457,22 @@ def _slice_text(source: bytes, node) -> str:
     return source[node.start_byte:node.end_byte].decode("utf8")
 
 
-def _normalize_identifier(name: str) -> str:
+def normalize_identifier(name: str) -> str:
     return name.replace("_", "").lower()
 
 
-def _build_normalized_lookup(names) -> dict[str, list[str]]:
+def build_normalized_lookup(names) -> dict[str, list[str]]:
     lookup: dict[str, list[str]] = defaultdict(list)
     for name in names:
-        lookup[_normalize_identifier(name)].append(name)
+        lookup[normalize_identifier(name)].append(name)
     return lookup
 
 
-def _resolve_normalized(name: str, lookup: dict[str, list[str]]) -> str | None:
-    matches = lookup.get(_normalize_identifier(name))
+def resolve_normalized(name: str, lookup: dict[str, list[str]]) -> str | None:
+    matches = lookup.get(normalize_identifier(name))
     if not matches or len(matches) != 1:
         return None
     return matches[0]
+
+
+

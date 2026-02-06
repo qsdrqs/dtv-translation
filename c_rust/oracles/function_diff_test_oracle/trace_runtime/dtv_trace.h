@@ -29,6 +29,10 @@
 #ifndef DTV_TRACE_H
 #define DTV_TRACE_H
 
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include <stdio.h>
 #include <stdint.h>
 #include <stddef.h>

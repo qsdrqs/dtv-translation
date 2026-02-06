@@ -128,16 +128,25 @@ fn json_value_empty_slice(ptr_tag: &str) -> String {
 }
 
 macro_rules! json_int {
-    ($name:ident, $ty:ty, $tag:expr, $ptr_tag:expr) => {
-        pub fn json_value_$name(value: $ty) -> String {
+    (
+        $value_fn:ident,
+        $ref_fn:ident,
+        $raw_ptr_fn:ident,
+        $slice_fn:ident,
+        $array_fn:ident,
+        $ty:ty,
+        $tag:expr,
+        $ptr_tag:expr
+    ) => {
+        pub fn $value_fn(value: $ty) -> String {
             format!("{{\"ty\":\"{}\",\"val\":{}}}", $tag, value)
         }
 
-        pub fn json_value_ref_$name(value: &$ty) -> String {
+        pub fn $ref_fn(value: &$ty) -> String {
             format!("{{\"ty\":\"{}\",\"val\":{}}}", $ptr_tag, *value)
         }
 
-        pub fn json_value_raw_ptr_$name(value: *const $ty) -> String {
+        pub fn $raw_ptr_fn(value: *const $ty) -> String {
             if value.is_null() {
                 json_value_null($ptr_tag)
             } else {
@@ -145,7 +154,7 @@ macro_rules! json_int {
             }
         }
 
-        pub fn json_value_slice_$name(value: &[$ty]) -> String {
+        pub fn $slice_fn(value: &[$ty]) -> String {
             if let Some(first) = value.first() {
                 format!("{{\"ty\":\"{}\",\"val\":{}}}", $ptr_tag, *first)
             } else {
@@ -153,7 +162,7 @@ macro_rules! json_int {
             }
         }
 
-        pub fn json_value_array_$name<const N: usize>(value: &[$ty; N]) -> String {
+        pub fn $array_fn<const N: usize>(value: &[$ty; N]) -> String {
             if let Some(first) = value.get(0) {
                 format!("{{\"ty\":\"{}\",\"val\":{}}}", $ptr_tag, *first)
             } else {
@@ -164,8 +173,18 @@ macro_rules! json_int {
 }
 
 macro_rules! json_float {
-    ($name:ident, $ty:ty, $tag:expr, $ptr_tag:expr, $fmt:expr) => {
-        pub fn json_value_$name(value: $ty) -> String {
+    (
+        $value_fn:ident,
+        $ref_fn:ident,
+        $raw_ptr_fn:ident,
+        $slice_fn:ident,
+        $array_fn:ident,
+        $ty:ty,
+        $tag:expr,
+        $ptr_tag:expr,
+        $fmt:expr
+    ) => {
+        pub fn $value_fn(value: $ty) -> String {
             format!(
                 "{{\"ty\":\"{}\",\"val\":\"0x{}\"}}",
                 $tag,
@@ -173,7 +192,7 @@ macro_rules! json_float {
             )
         }
 
-        pub fn json_value_ref_$name(value: &$ty) -> String {
+        pub fn $ref_fn(value: &$ty) -> String {
             format!(
                 "{{\"ty\":\"{}\",\"val\":\"0x{}\"}}",
                 $ptr_tag,
@@ -181,7 +200,7 @@ macro_rules! json_float {
             )
         }
 
-        pub fn json_value_raw_ptr_$name(value: *const $ty) -> String {
+        pub fn $raw_ptr_fn(value: *const $ty) -> String {
             if value.is_null() {
                 json_value_null($ptr_tag)
             } else {
@@ -195,7 +214,7 @@ macro_rules! json_float {
             }
         }
 
-        pub fn json_value_slice_$name(value: &[$ty]) -> String {
+        pub fn $slice_fn(value: &[$ty]) -> String {
             if let Some(first) = value.first() {
                 format!(
                     "{{\"ty\":\"{}\",\"val\":\"0x{}\"}}",
@@ -207,7 +226,7 @@ macro_rules! json_float {
             }
         }
 
-        pub fn json_value_array_$name<const N: usize>(value: &[$ty; N]) -> String {
+        pub fn $array_fn<const N: usize>(value: &[$ty; N]) -> String {
             if let Some(first) = value.get(0) {
                 format!(
                     "{{\"ty\":\"{}\",\"val\":\"0x{}\"}}",
@@ -302,19 +321,129 @@ pub fn json_value_array_char<const N: usize>(value: &[char; N]) -> String {
     }
 }
 
-json_int!(i8, i8, "i8", "ptr_i8");
-json_int!(i16, i16, "i16", "ptr_i16");
-json_int!(i32, i32, "i32", "ptr_i32");
-json_int!(i64, i64, "i64", "ptr_i64");
-json_int!(isize, isize, "isize", "ptr_isize");
-json_int!(u8, u8, "u8", "ptr_u8");
-json_int!(u16, u16, "u16", "ptr_u16");
-json_int!(u32, u32, "u32", "ptr_u32");
-json_int!(u64, u64, "u64", "ptr_u64");
-json_int!(usize, usize, "usize", "ptr_usize");
+json_int!(
+    json_value_i8,
+    json_value_ref_i8,
+    json_value_raw_ptr_i8,
+    json_value_slice_i8,
+    json_value_array_i8,
+    i8,
+    "i8",
+    "ptr_i8"
+);
+json_int!(
+    json_value_i16,
+    json_value_ref_i16,
+    json_value_raw_ptr_i16,
+    json_value_slice_i16,
+    json_value_array_i16,
+    i16,
+    "i16",
+    "ptr_i16"
+);
+json_int!(
+    json_value_i32,
+    json_value_ref_i32,
+    json_value_raw_ptr_i32,
+    json_value_slice_i32,
+    json_value_array_i32,
+    i32,
+    "i32",
+    "ptr_i32"
+);
+json_int!(
+    json_value_i64,
+    json_value_ref_i64,
+    json_value_raw_ptr_i64,
+    json_value_slice_i64,
+    json_value_array_i64,
+    i64,
+    "i64",
+    "ptr_i64"
+);
+json_int!(
+    json_value_isize,
+    json_value_ref_isize,
+    json_value_raw_ptr_isize,
+    json_value_slice_isize,
+    json_value_array_isize,
+    isize,
+    "isize",
+    "ptr_isize"
+);
+json_int!(
+    json_value_u8,
+    json_value_ref_u8,
+    json_value_raw_ptr_u8,
+    json_value_slice_u8,
+    json_value_array_u8,
+    u8,
+    "u8",
+    "ptr_u8"
+);
+json_int!(
+    json_value_u16,
+    json_value_ref_u16,
+    json_value_raw_ptr_u16,
+    json_value_slice_u16,
+    json_value_array_u16,
+    u16,
+    "u16",
+    "ptr_u16"
+);
+json_int!(
+    json_value_u32,
+    json_value_ref_u32,
+    json_value_raw_ptr_u32,
+    json_value_slice_u32,
+    json_value_array_u32,
+    u32,
+    "u32",
+    "ptr_u32"
+);
+json_int!(
+    json_value_u64,
+    json_value_ref_u64,
+    json_value_raw_ptr_u64,
+    json_value_slice_u64,
+    json_value_array_u64,
+    u64,
+    "u64",
+    "ptr_u64"
+);
+json_int!(
+    json_value_usize,
+    json_value_ref_usize,
+    json_value_raw_ptr_usize,
+    json_value_slice_usize,
+    json_value_array_usize,
+    usize,
+    "usize",
+    "ptr_usize"
+);
 
-json_float!(f32, f32, "f32", "ptr_f32", "{:08x}");
-json_float!(f64, f64, "f64", "ptr_f64", "{:016x}");
+json_float!(
+    json_value_f32,
+    json_value_ref_f32,
+    json_value_raw_ptr_f32,
+    json_value_slice_f32,
+    json_value_array_f32,
+    f32,
+    "f32",
+    "ptr_f32",
+    "{:08x}"
+);
+json_float!(
+    json_value_f64,
+    json_value_ref_f64,
+    json_value_raw_ptr_f64,
+    json_value_slice_f64,
+    json_value_array_f64,
+    f64,
+    "f64",
+    "ptr_f64",
+    "{:016x}"
+);
 
 /* Function-level tracing */
 #[inline]

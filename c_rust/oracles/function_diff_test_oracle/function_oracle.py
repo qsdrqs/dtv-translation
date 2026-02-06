@@ -5,10 +5,11 @@ from __future__ import annotations
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from core.interfaces import Oracle
+from core.toolchain import env_with_pinned_rustup_toolchain
 from core.types import (
     Artifact,
     ControllerState,
@@ -19,9 +20,25 @@ from core.types import (
     RollbackScope,
     Verdict,
 )
-from c_rust.oracles.function_diff_test_oracle.c_instrumenter import instrument_c_functions
-from c_rust.oracles.function_diff_test_oracle.ffi_bridge import find_missing_functions, generate_ffi_bridge
-from c_rust.oracles.function_diff_test_oracle.rust_instrumenter import instrument_rust_functions
+from c_rust.oracles.function_diff_test_oracle.c_instrumenter import (
+    FunctionSignature,
+    find_c_function_info,
+    instrument_c_functions,
+    list_c_function_names,
+)
+from c_rust.oracles.function_diff_test_oracle.extern_c_bridge import generate_extern_c_wrapper
+from c_rust.oracles.function_diff_test_oracle.ffi_bridge import (
+    build_normalized_lookup,
+    find_missing_functions,
+    generate_ffi_bridge,
+    normalize_identifier,
+)
+from c_rust.oracles.function_diff_test_oracle.rust_instrumenter import (
+    RustSignature,
+    extract_function_signature as extract_rust_signature,
+    instrument_rust_functions,
+    list_rust_function_names,
+)
 from c_rust.oracles.function_diff_test_oracle.trace_comparator import (
     TraceComparisonStats,
     find_first_mismatch,
@@ -55,14 +72,67 @@ class FunctionOracle(Oracle):
     def run(self, state: ControllerState, artifact: Artifact, context: OracleContext) -> OracleOutput:
         """Run differential tests against the C reference with trace comparison."""
         sample = _extract_sample(artifact)
-        function_name = context.closed_function_name
-        validation = _validate_sample(sample, function_name, self.name)
+        requested_name = context.closed_function_name
+        validation = _validate_sample(sample, requested_name, self.name)
         if validation is not None:
             return validation
         assert sample is not None
-        assert function_name is not None
+        assert requested_name is not None
 
-        prepared = _prepare_sources(artifact, sample, function_name, self.name)
+        c_candidates = list_c_function_names(sample.source_code)
+        c_function_name, c_reason = _resolve_function_name(requested_name, c_candidates, "C")
+        if c_function_name is None:
+            return OracleOutput(
+                oracle_name=self.name,
+                verdict=Verdict.NOT_APPLICABLE,
+                diagnostics=(Diagnostic(message=c_reason or "C function not found"),),
+                realized_cost=0,
+            )
+
+        rust_candidates = list_rust_function_names(artifact.code)
+        rust_function_name, rust_reason = _resolve_function_name(requested_name, rust_candidates, "Rust")
+        if rust_function_name is None:
+            return OracleOutput(
+                oracle_name=self.name,
+                verdict=Verdict.NOT_APPLICABLE,
+                diagnostics=(Diagnostic(message=rust_reason or "Rust function not found"),),
+                realized_cost=0,
+            )
+
+        c_info = find_c_function_info(sample.source_code, c_function_name)
+        if c_info is None or c_info.signature is None:
+            return OracleOutput(
+                oracle_name=self.name,
+                verdict=Verdict.NOT_APPLICABLE,
+                diagnostics=(Diagnostic(message="C signature not found"),),
+                realized_cost=0,
+            )
+        if c_info.is_static:
+            return OracleOutput(
+                oracle_name=self.name,
+                verdict=Verdict.NOT_APPLICABLE,
+                diagnostics=(Diagnostic(message="C function is static"),),
+                realized_cost=0,
+            )
+
+        rust_sig = extract_rust_signature(artifact.code, rust_function_name)
+        if rust_sig is None:
+            return OracleOutput(
+                oracle_name=self.name,
+                verdict=Verdict.NOT_APPLICABLE,
+                diagnostics=(Diagnostic(message="Rust signature not found"),),
+                realized_cost=0,
+            )
+
+        prepared = _prepare_sources(
+            artifact,
+            sample,
+            c_function_name,
+            rust_function_name,
+            self.name,
+            c_info.signature,
+            rust_sig,
+        )
         if isinstance(prepared, OracleOutput):
             return prepared
 
@@ -80,17 +150,19 @@ class FunctionOracle(Oracle):
                 rustc_path=self.rustc_path,
                 timeout_s=self.compile_timeout_s,
                 oracle_name=self.name,
+                function_name=c_function_name,
             )
             if isinstance(compiled, OracleOutput):
                 return compiled
 
-            c_binary, rust_binary = compiled
+            c_binary, cdylib_path = compiled
             return _run_tests_and_compare(
                 oracle_name=self.name,
                 sample=sample,
-                function_name=function_name,
+                c_function_name=c_function_name,
+                rust_function_name=rust_function_name,
                 c_binary=c_binary,
-                rust_binary=rust_binary,
+                cdylib_path=cdylib_path,
                 run_timeout_s=self.run_timeout_s,
             )
 
@@ -99,7 +171,6 @@ class FunctionOracle(Oracle):
 class PreparedSources:
     c_source: str
     rust_source: str
-    needs_ffi: bool
 
 
 def _extract_sample(artifact: Artifact) -> TranslationSample | None:
@@ -145,14 +216,50 @@ def _validate_sample(
     return None
 
 
+def _resolve_function_name(
+    requested_name: str,
+    candidates: list[str],
+    label: str,
+) -> tuple[str | None, str | None]:
+    if not candidates:
+        return None, f"No {label} functions found"
+    if requested_name in candidates:
+        return requested_name, None
+    lookup = build_normalized_lookup(candidates)
+    normalized = normalize_identifier(requested_name)
+    matches = lookup.get(normalized)
+    if not matches:
+        return None, f"{label} function not found: {requested_name}"
+    if len(matches) != 1:
+        return None, f"{label} function name ambiguous for {requested_name}"
+    return matches[0], None
+
+
 def _prepare_sources(
     artifact: Artifact,
     sample: TranslationSample,
-    function_name: str,
+    c_function_name: str,
+    rust_function_name: str,
     oracle_name: str,
+    c_signature: FunctionSignature,
+    rust_signature: RustSignature,
 ) -> PreparedSources | OracleOutput:
-    instrumented_c = instrument_c_functions(sample.source_code, target_function=function_name)
-    instrumented_rust = instrument_rust_functions(artifact.code, target_function=function_name)
+    instrumented_c = instrument_c_functions(sample.source_code, target_function=c_function_name)
+    instrumented_rust = instrument_rust_functions(artifact.code, target_function=rust_function_name)
+
+    wrapper_result = generate_extern_c_wrapper(
+        c_function_name,
+        rust_function_name,
+        c_signature,
+        rust_signature,
+    )
+    if wrapper_result.code is None:
+        return OracleOutput(
+            oracle_name=oracle_name,
+            verdict=Verdict.NOT_APPLICABLE,
+            diagnostics=(Diagnostic(message=wrapper_result.reason or "extern wrapper not applicable"),),
+            realized_cost=0,
+        )
 
     # FFI discovery uses the original sources to avoid trace wrappers skewing call/def detection.
     missing = find_missing_functions(artifact.code, sample.source_code)
@@ -179,10 +286,11 @@ def _prepare_sources(
     if bridge_code:
         instrumented_rust = f"{instrumented_rust}\n\n{bridge_code}\n"
 
+    instrumented_rust = f"{instrumented_rust}\n\n{wrapper_result.code}\n"
+
     return PreparedSources(
         c_source=instrumented_c,
         rust_source=instrumented_rust,
-        needs_ffi=bool(missing.missing),
     )
 
 
@@ -194,7 +302,12 @@ def _compile_binaries(
     rustc_path: str,
     timeout_s: float | None,
     oracle_name: str,
+    function_name: str,
 ) -> tuple[Path, Path] | OracleOutput:
+    """Compile C executable (baseline) and Rust cdylib (LD_PRELOAD override).
+
+    Returns (c_binary_path, cdylib_path) on success.
+    """
     c_compile_result = _compile_c_binary(
         prepared.c_source,
         c_dir,
@@ -219,67 +332,41 @@ def _compile_binaries(
             realized_cost=1,
         )
 
-    c_object_path = None
-    if prepared.needs_ffi:
-        # Only build a C object when Rust needs to link missing C symbols.
-        c_object_result, c_object_path = _compile_c_object(
-            prepared.c_source,
-            c_dir,
-            gcc_path=gcc_path,
-            timeout_s=timeout_s,
-        )
-        if c_object_result.timed_out:
-            return OracleOutput(
-                oracle_name=oracle_name,
-                verdict=Verdict.FAIL,
-                diagnostics=(Diagnostic(message="C object compilation timeout", error_code="C_OBJECT_TIMEOUT"),),
-                realized_cost=1,
-            )
-        if c_object_result.compilation_failed:
-            return OracleOutput(
-                oracle_name=oracle_name,
-                verdict=Verdict.FAIL,
-                diagnostics=(
-                    Diagnostic(message="C object compilation failed", error_code="C_OBJECT_FAIL"),
-                    Diagnostic(message=f"gcc stderr: {c_object_result.stderr}"),
-                ),
-                realized_cost=1,
-            )
-
-    rust_compile_result = _compile_rust_binary(
+    cdylib_compile_result, cdylib_path = _compile_cdylib(
         prepared.rust_source,
         rust_dir,
         rustc_path=rustc_path,
         timeout_s=timeout_s,
-        link_objects=(c_object_path,) if c_object_path else (),
+        function_name=function_name,
     )
-    if rust_compile_result.timed_out:
+    if cdylib_compile_result.timed_out:
         return OracleOutput(
             oracle_name=oracle_name,
             verdict=Verdict.FAIL,
-            diagnostics=(Diagnostic(message="Rust compilation timeout", error_code="RUST_COMPILE_TIMEOUT"),),
+            diagnostics=(Diagnostic(message="Rust cdylib compilation timeout", error_code="RUST_CDYLIB_TIMEOUT"),),
             realized_cost=1,
         )
-    if rust_compile_result.compilation_failed:
+    if cdylib_compile_result.compilation_failed:
         return OracleOutput(
             oracle_name=oracle_name,
             verdict=Verdict.FAIL,
             diagnostics=(
-                Diagnostic(message="Rust compilation failed", error_code="RUST_COMPILE_FAIL"),
-                Diagnostic(message=f"rustc stderr: {rust_compile_result.stderr}"),
+                Diagnostic(message="Rust cdylib compilation failed", error_code="RUST_CDYLIB_FAIL"),
+                Diagnostic(message=f"rustc stderr: {cdylib_compile_result.stderr}"),
             ),
             realized_cost=1,
         )
 
-    return c_dir / "program", rust_dir / "program"
+    return c_dir / "program", cdylib_path
 
 
 def _run_tests_and_compare(
     oracle_name: str,
     sample: TranslationSample,
-    function_name: str,
+    c_function_name: str,
+    rust_function_name: str,
     c_binary: Path,
-    rust_binary: Path,
+    cdylib_path: Path,
     run_timeout_s: float | None,
 ) -> OracleOutput:
     cost = 1
@@ -287,9 +374,9 @@ def _run_tests_and_compare(
     for i, test_case in enumerate(sample.test_cases):
         test_id = test_case.test_id or f"test_{i}"
 
-        # Two binaries: instrumented C for the baseline, instrumented Rust for translation.
+        # Baseline: native C function.  LD_PRELOAD run: Rust cdylib overrides target symbol.
         c_exec = run_binary(c_binary, test_case, timeout_s=run_timeout_s)
-        rust_exec = run_binary(rust_binary, test_case, timeout_s=run_timeout_s)
+        rust_exec = run_binary(c_binary, test_case, timeout_s=run_timeout_s, ld_preload=cdylib_path)
         cost += 2
 
         if c_exec.timed_out:
@@ -324,12 +411,20 @@ def _run_tests_and_compare(
         # Function oracle compares only the target function's enter/exit events.
         c_trace = _filter_trace_for_function(
             parse_trace_events(c_exec.stderr),
-            function_name,
+            c_function_name,
         )
-        rust_trace = _filter_trace_for_function(
-            parse_trace_events(rust_exec.stderr),
-            function_name,
-        )
+        rust_events = parse_trace_events(rust_exec.stderr)
+        # Instrumented Rust emits trace events under the Rust function name,
+        # while the extern "C" wrapper exports under the C name.  When the
+        # two names differ (e.g. calculateSum vs calculate_sum), the first
+        # filter by c_function_name will be empty and the fallback by
+        # rust_function_name is the actual match.  When names are identical
+        # the first filter succeeds directly.
+        rust_trace = _filter_trace_for_function(rust_events, c_function_name)
+        if not rust_trace:
+            rust_trace = _filter_trace_for_function(rust_events, rust_function_name)
+            if rust_trace and rust_function_name != c_function_name:
+                rust_trace = _remap_trace_function_id(rust_trace, c_function_name)
         mismatch, stats = find_first_mismatch(
             c_trace,
             rust_trace,
@@ -386,6 +481,8 @@ def _compile_c_binary(
         str(source_file),
         "-std=c11",
         "-Wall",
+        # Export symbols so LD_PRELOAD cdylib can resolve C helpers (e.g. clamp_value).
+        "-rdynamic",
     ]
     return _run_compile(cmd, workdir, timeout_s)
 
@@ -412,26 +509,29 @@ def _compile_c_object(
     return _run_compile(cmd, workdir, timeout_s), object_file
 
 
-def _compile_rust_binary(
+def _compile_cdylib(
     source_code: str,
     workdir: Path,
     rustc_path: str,
     timeout_s: float | None,
     link_objects: tuple[Path, ...] = (),
-) -> ExecutionResult:
+    function_name: str = "lib",
+) -> tuple[ExecutionResult, Path]:
+    """Compile Rust source as a cdylib shared library for LD_PRELOAD injection."""
     source_file = workdir / "program.rs"
-    binary_file = workdir / "program"
+    lib_file = workdir / f"lib{function_name}.so"
     source_file.write_text(source_code, encoding="utf-8")
 
     cmd = [
         rustc_path,
         str(source_file),
-        "-o",
-        str(binary_file),
+        "--crate-type=cdylib",
         "--edition=2021",
+        "-o",
+        str(lib_file),
     ]
     cmd.extend(str(path) for path in link_objects)
-    return _run_compile(cmd, workdir, timeout_s)
+    return _run_compile(cmd, workdir, timeout_s), lib_file
 
 
 def _run_compile(
@@ -448,6 +548,7 @@ def _run_compile(
             cwd=workdir,
             check=False,
             text=True,
+            env=env_with_pinned_rustup_toolchain(),
         )
         elapsed_ms = (time.time() - start_time) * 1000
         return ExecutionResult(
@@ -480,3 +581,10 @@ def _filter_trace_for_function(
         if event.kind in (TraceEventKind.FUNC_ENTER, TraceEventKind.FUNC_EXIT)
         and event.id == function_name
     ]
+
+
+def _remap_trace_function_id(
+    events: list[ExecutionTraceEvent],
+    function_name: str,
+) -> list[ExecutionTraceEvent]:
+    return [replace(event, id=function_name) for event in events]

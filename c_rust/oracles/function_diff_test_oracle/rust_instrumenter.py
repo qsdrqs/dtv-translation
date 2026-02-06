@@ -48,6 +48,7 @@ class RustTypeInfo:
     is_raw_pointer: bool = False
     is_reference: bool = False
     is_void: bool = False
+    is_mutable: bool = False
 
     @property
     def json_tag(self) -> str | None:
@@ -70,6 +71,17 @@ class RustSignature:
     ret: RustTypeInfo
 
 
+def extract_function_signature(rust_source: str, function_name: str) -> RustSignature | None:
+    """Extract the RustSignature of a named function from Rust source."""
+    parser = get_parser("rust")
+    source_bytes = rust_source.encode("utf8")
+    tree = parser.parse(source_bytes)
+    for func in _find_functions(tree.root_node, source_bytes):
+        if func["name"] == function_name and func.get("signature") is not None:
+            return func["signature"]
+    return None
+
+
 def instrument_rust_functions(rust_source: str, target_function: str | None = None) -> str:
     """Instrument all Rust functions with trace calls (args/ret for target function)."""
     # TODO: Handle ? operator (early returns from Result/Option)
@@ -87,10 +99,9 @@ def instrument_rust_functions(rust_source: str, target_function: str | None = No
         return_nodes = func["return_nodes"]
         implicit_return = func["implicit_return"]
         ends_with_return = _block_ends_with_return(body_node)
-        signature = func.get("signature")
-        is_target = target_function is not None and func_name == target_function and signature is not None
+        signature: RustSignature | None = func.get("signature")
 
-        if is_target:
+        if target_function is not None and func_name == target_function and signature is not None:
             enter_code = _render_rust_enter(func_name, signature)
             edits.append(
                 (
@@ -190,6 +201,13 @@ def instrument_rust_functions(rust_source: str, target_function: str | None = No
     header += "use dtv_trace::*;\n\n"
 
     return header + instrumented
+
+
+def list_rust_function_names(rust_source: str) -> list[str]:
+    parser = get_parser("rust")
+    source_bytes = rust_source.encode("utf8")
+    tree = parser.parse(source_bytes)
+    return [func["name"] for func in _find_functions(tree.root_node, source_bytes)]
 
 
 def _apply_insertions(
@@ -441,6 +459,8 @@ def _parse_rust_type(node, source: bytes) -> RustTypeInfo:
         return RustTypeInfo(tag=None, supported=False, reason="unsupported_type")
 
     if node.type == "reference_type":
+        # Detect &mut vs & from presence of mutable_specifier child
+        is_mutable = any(child.type == "mutable_specifier" for child in node.children)
         inner = node.child_by_field_name("type") or _last_named_child(node)
         inner_info = _parse_rust_type(inner, source)
         if not inner_info.supported or inner_info.is_void:
@@ -454,6 +474,7 @@ def _parse_rust_type(node, source: bytes) -> RustTypeInfo:
                     is_reference=True,
                     is_slice=inner_info.is_slice,
                     is_array=inner_info.is_array,
+                    is_mutable=is_mutable,
                 )
             return RustTypeInfo(tag=None, supported=False, reason="pointer_depth>1")
         return RustTypeInfo(
@@ -461,6 +482,7 @@ def _parse_rust_type(node, source: bytes) -> RustTypeInfo:
             supported=True,
             pointer_like=True,
             is_reference=True,
+            is_mutable=is_mutable,
         )
 
     if node.type == "pointer_type":
@@ -526,6 +548,7 @@ def _mark_unsupported(info: RustTypeInfo, reason: str) -> RustTypeInfo:
         is_raw_pointer=info.is_raw_pointer,
         is_reference=info.is_reference,
         is_void=info.is_void,
+        is_mutable=info.is_mutable,
     )
 
 

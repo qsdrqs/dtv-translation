@@ -9,15 +9,8 @@ class Granularity(str, Enum):
     FUNC = "func"
     PROGRAM = "program"
 
-    _ORDER = {
-        "stmt": 0,
-        "block": 1,
-        "func": 2,
-        "program": 3,
-    }
-
     def _order(self) -> int:
-        return self._ORDER[self.value]
+        return _GRANULARITY_RANK[self]
 
     def __lt__(self, other: object) -> bool:
         if not isinstance(other, Granularity):
@@ -38,6 +31,14 @@ class Granularity(str, Enum):
         if not isinstance(other, Granularity):
             return NotImplemented
         return self._order() >= other._order()
+
+
+_GRANULARITY_RANK = {
+    Granularity.STMT: 0,
+    Granularity.BLOCK: 1,
+    Granularity.FUNC: 2,
+    Granularity.PROGRAM: 3,
+}
 
 
 class RenderStatus(str, Enum):

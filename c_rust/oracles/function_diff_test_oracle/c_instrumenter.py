@@ -83,6 +83,24 @@ class FunctionSignature:
     ret: ReturnSpec
 
 
+@dataclass(frozen=True)
+class CFunctionInfo:
+    name: str
+    signature: FunctionSignature | None
+    is_static: bool
+
+
+def extract_function_signature(c_source: str, function_name: str) -> FunctionSignature | None:
+    """Extract the FunctionSignature of a named function from C source."""
+    parser = get_parser("c")
+    source_bytes = c_source.encode("utf8")
+    tree = parser.parse(source_bytes)
+    for func in _find_functions(tree.root_node, source_bytes):
+        if func["name"] == function_name and func.get("signature") is not None:
+            return func["signature"]
+    return None
+
+
 def instrument_c_functions(c_source: str, target_function: str | None = None) -> str:
     """Instrument all C functions with trace calls (args/ret for target function)."""
     parser = get_parser("c")
@@ -96,10 +114,8 @@ def instrument_c_functions(c_source: str, target_function: str | None = None) ->
         func_name = func["name"]
         body_node = func["body_node"]
         return_nodes = func["return_nodes"]
-        signature = func.get("signature")
-        is_target = target_function is not None and func_name == target_function and signature is not None
-
-        if is_target:
+        signature: FunctionSignature | None = func.get("signature")
+        if target_function is not None and func_name == target_function and signature is not None:
             enter_code = _render_c_enter(func_name, signature.params)
             edits.append(
                 (
@@ -174,6 +190,28 @@ def instrument_c_functions(c_source: str, target_function: str | None = None) ->
     return header_include + instrumented
 
 
+def find_c_function_info(c_source: str, target_function: str) -> CFunctionInfo | None:
+    parser = get_parser("c")
+    source_bytes = c_source.encode("utf8")
+    tree = parser.parse(source_bytes)
+    functions = _find_functions(tree.root_node, source_bytes)
+    for func in functions:
+        if func["name"] == target_function:
+            return CFunctionInfo(
+                name=func["name"],
+                signature=func.get("signature"),
+                is_static=bool(func.get("is_static")),
+            )
+    return None
+
+
+def list_c_function_names(c_source: str) -> list[str]:
+    parser = get_parser("c")
+    source_bytes = c_source.encode("utf8")
+    tree = parser.parse(source_bytes)
+    return [func["name"] for func in _find_functions(tree.root_node, source_bytes)]
+
+
 def _apply_insertions(
     source_bytes: bytes,
     insertions: list[tuple[int, str, bytes]],
@@ -238,13 +276,30 @@ def _extract_function_info(func_node, source: bytes) -> dict | None:
     func_name = source[name_node.start_byte:name_node.end_byte].decode("utf8")
     return_nodes = _find_return_statements(body_node)
     signature = _extract_function_signature(func_node, source)
+    is_static = _is_static_function(func_node, source)
 
     return {
         "name": func_name,
         "body_node": body_node,
         "return_nodes": return_nodes,
         "signature": signature,
+        "is_static": is_static,
     }
+
+
+def _is_static_function(func_node, source: bytes) -> bool:
+    def visit(node) -> bool:
+        if node.type == "compound_statement":
+            return False
+        if node.type == "storage_class_specifier":
+            if _slice_text(source, node).strip() == "static":
+                return True
+        for child in node.children:
+            if visit(child):
+                return True
+        return False
+
+    return visit(func_node)
 
 
 def _find_return_statements(block_node) -> list:

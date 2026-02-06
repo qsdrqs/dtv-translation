@@ -1,0 +1,8 @@
+{
+    "tests": [
+        {"stdin": "0 0\n", "test_id": "zero"},
+        {"stdin": "50 60\n", "test_id": "clamp_hi"},
+        {"stdin": "-50 -60\n", "test_id": "clamp_lo"},
+        {"stdin": "10 5\n", "test_id": "no_clamp"}
+    ]
+}

@@ -3,7 +3,7 @@
 ## Project: Decoding Time Verification (DTV) for Code Translation
 
 1. no trailing spaces, no lines with only spaces
-2. keep this file up to date (last updated: 2026-02-02)
+2. keep this file up to date (last updated: 2026-02-03)
 3. Except for explicit reasons, do not use non-ASCII characters in the codebase or documentation.
 4. Although redundant comments are generally discouraged, necessary comments should be written at complex logic to explain the logic.
 5. Except for explicit reasons, always add imports at the beginning of the file. For explicit reasons, like slow imports, add a comment explaining why the import is not at the top.
@@ -63,6 +63,7 @@ This repo intentionally uses a flat top-level layout (no `src/`):
 ### Contracts / Invariants (do not silently break)
 - Token budget uses `GenerateResult.delta_tokens` (not character length).
 - `StopReason` is a best-effort label inferred from generation outcome; do not treat it as ground truth.
+- Granularity ordering: STMT < BLOCK < FUNC < PROGRAM (enum comparisons).
 - Rollback semantics (current, tested):
   - `rollback(STMT)` means retry: return the last committed stmt checkpoint without deleting it.
   - `rollback(BLOCK/FUNC)` means retry: truncate to the group start and drop the corresponding group frame(s).
