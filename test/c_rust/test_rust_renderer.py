@@ -268,3 +268,181 @@ fn foo(a: i32) {
     assert result.artifact is not None
     compile = compile_rust(result.artifact.code)
     assert compile.ok, compile.stderr
+
+
+def test_type_witness_parse_ok_empty_arm_compiles() -> None:
+    prefix = """\
+fn foo(input: &str) {
+    let n: usize = match input.trim().parse() {
+        Ok(num) => {
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    assert "render_patch:match_arm_type_witness" in result.notes
+    assert result.artifact.code == """\
+fn foo(input: &str) {
+    let n: usize = match input.trim().parse() {
+        Ok(num) => {
+
+let _: usize = num;
+todo!()}
+, _ => todo!()}
+;}"""
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_type_witness_parse_ok_nonempty_arm_compiles() -> None:
+    prefix = """\
+fn foo(input: &str) {
+    let n: usize = match input.trim().parse() {
+        Ok(num) => {
+            if num == 0 {
+                println!("zero");
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    assert "render_patch:match_arm_type_witness" in result.notes
+    assert result.artifact.code == """\
+fn foo(input: &str) {
+    let n: usize = match input.trim().parse() {
+        Ok(num) => {
+            if num == 0 {
+                println!("zero");
+
+todo!()
+} else { todo!()}
+let _: usize = num;
+todo!()}
+, _ => todo!()}
+;}"""
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_type_witness_parse_some_compiles() -> None:
+    prefix = """\
+fn foo(x: Option<i32>) {
+    let val: i32 = match x {
+        Some(v) => {
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    assert "render_patch:match_arm_type_witness" not in result.notes
+
+
+def test_type_witness_skipped_no_type_annotation() -> None:
+    prefix = """\
+fn foo(input: &str) {
+    let n = match input.trim().parse::<usize>() {
+        Ok(num) => {
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    assert "render_patch:match_arm_type_witness" not in result.notes
+
+
+def test_type_witness_skipped_err_pattern() -> None:
+    prefix = """\
+fn foo(input: &str) {
+    let n: usize = match input.trim().parse() {
+        Err(e) => {
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    assert "render_patch:match_arm_type_witness" not in result.notes
+
+
+def test_type_witness_skipped_turbofish() -> None:
+    prefix = """\
+fn foo(input: &str) {
+    let n: usize = match input.trim().parse::<usize>() {
+        Ok(num) => {
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    assert "render_patch:match_arm_type_witness" not in result.notes
+
+
+def test_type_witness_skipped_complex_type() -> None:
+    prefix = """\
+fn foo(input: &str) {
+    let n: Vec<usize> = match input.trim().parse() {
+        Ok(num) => {
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    assert "render_patch:match_arm_type_witness" not in result.notes
+
+
+def test_match_arm_tail_err_statement_compiles() -> None:
+    prefix = """\
+fn foo(input: &str) {
+    let n: usize = match input.trim().parse() {
+        Ok(num) => { num }
+        Err(_) => {
+            println!("error");
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    assert "render_patch:match_arm_tail" in result.notes
+    assert result.artifact.code == """\
+fn foo(input: &str) {
+    let n: usize = match input.trim().parse() {
+        Ok(num) => { num }
+        Err(_) => {
+            println!("error");
+
+todo!()}
+, _ => todo!()}
+;}"""
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_match_arm_tail_skipped_return() -> None:
+    prefix = """\
+fn foo(input: &str) {
+    let n: usize = match input.trim().parse() {
+        Ok(num) => { num }
+        Err(_) => {
+            return;
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    assert "render_patch:match_arm_tail" not in result.notes
+
+
+def test_match_arm_tail_let_tail_compiles() -> None:
+    prefix = """\
+fn foo(a: i32) -> i32 {
+    let x = match a {
+        0 => { 1 }
+        _ => {
+            let y = a + 1;
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    assert "render_patch:match_arm_tail" in result.notes
+    assert result.artifact.code == """\
+fn foo(a: i32) -> i32 {
+    let x = match a {
+        0 => { 1 }
+        _ => {
+            let y = a + 1;
+
+todo!()}}
+;
+todo!()}"""
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
