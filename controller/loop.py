@@ -145,6 +145,12 @@ def _remaining_tokens(budget: Budget) -> int:
     return max(0, budget.gen_tokens_budget - budget.gen_tokens_used)
 
 
+def _truncate(s: str, max_chars: int) -> str:
+    if len(s) <= max_chars:
+        return s
+    return s[:max_chars] + f"...<truncated {len(s) - max_chars} chars>"
+
+
 def _build_repair_feedback(feedback_state: FeedbackState, bad_snippet: str) -> str:
     diagnostics = feedback_state.encode().strip()
     if not diagnostics:
@@ -374,6 +380,22 @@ def _handle_verify(
                     output.verdict,
                     len(output.diagnostics),
                 )
+                if output.verdict == Verdict.FAIL and output.diagnostics:
+                    max_items = 6
+                    max_chars = 800
+                    for diag in output.diagnostics[:max_items]:
+                        logger.info(
+                            "oracle_diag: oracle=%s error_code=%s message=%s",
+                            output.oracle_name,
+                            diag.error_code,
+                            _truncate(diag.message, max_chars),
+                        )
+                    if len(output.diagnostics) > max_items:
+                        logger.info(
+                            "oracle_diag: oracle=%s message=%s",
+                            output.oracle_name,
+                            f"...<omitted {len(output.diagnostics) - max_items} diagnostics>",
+                        )
             feedback_state.update(outputs)
         else:
             notes = notes or "no oracles selected"

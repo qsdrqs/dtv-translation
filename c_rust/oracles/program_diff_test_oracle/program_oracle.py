@@ -249,11 +249,66 @@ def _mismatches_to_diagnostics(mismatches: list[Mismatch]) -> tuple[Diagnostic, 
     diagnostics = []
 
     for mismatch in mismatches:
+        message = mismatch.message
+        if (
+            "stdout mismatch" in mismatch.message
+            and isinstance(mismatch.c_value, str)
+            and isinstance(mismatch.rust_value, str)
+        ):
+            message = _augment_stdout_mismatch_message(
+                mismatch.message,
+                mismatch.c_value,
+                mismatch.rust_value,
+            )
         diag = Diagnostic(
-            message=mismatch.message,
+            message=message,
             error_code="OUTPUT_MISMATCH",
             hint_scope=mismatch.suggested_scope,
         )
         diagnostics.append(diag)
 
     return tuple(diagnostics)
+
+
+def _first_diff_index(a: str, b: str) -> int:
+    n = min(len(a), len(b))
+    for i in range(n):
+        if a[i] != b[i]:
+            return i
+    return n
+
+
+def _truncate(s: str, max_chars: int) -> str:
+    if len(s) <= max_chars:
+        return s
+    return s[:max_chars] + f"...<truncated {len(s) - max_chars} chars>"
+
+
+def _augment_stdout_mismatch_message(base: str, c_stdout: str, rust_stdout: str) -> str:
+    # Keep the message informative but bounded; it is used for both debugging and prompt feedback.
+    max_full_chars = 400
+    context_chars = 120
+    max_total_chars = 1400
+
+    c_len = len(c_stdout)
+    rust_len = len(rust_stdout)
+    first_diff = _first_diff_index(c_stdout, rust_stdout)
+
+    if c_len <= max_full_chars and rust_len <= max_full_chars:
+        details = (
+            f"c_stdout={ascii(c_stdout)} "
+            f"rust_stdout={ascii(rust_stdout)}"
+        )
+    else:
+        start = max(0, first_diff - context_chars)
+        end_c = min(c_len, first_diff + context_chars)
+        end_r = min(rust_len, first_diff + context_chars)
+        c_ctx = c_stdout[start:end_c]
+        r_ctx = rust_stdout[start:end_r]
+        details = (
+            f"c_ctx@{start}:{end_c}={ascii(c_ctx)} "
+            f"rust_ctx@{start}:{end_r}={ascii(r_ctx)}"
+        )
+
+    message = f"{base} (c_len={c_len}, rust_len={rust_len}, first_diff={first_diff}) {details}"
+    return _truncate(message, max_total_chars)

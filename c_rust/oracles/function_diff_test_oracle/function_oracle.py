@@ -124,7 +124,7 @@ class FunctionOracle(Oracle):
                 realized_cost=0,
             )
 
-        prepared = _prepare_sources(
+        prepared, prepare_err = _prepare_sources(
             artifact,
             sample,
             c_function_name,
@@ -133,8 +133,9 @@ class FunctionOracle(Oracle):
             c_info.signature,
             rust_sig,
         )
-        if isinstance(prepared, OracleOutput):
-            return prepared
+        if prepare_err is not None:
+            return prepare_err
+        assert prepared is not None
 
         with tempfile.TemporaryDirectory(prefix="dtv-c-") as c_workdir, \
              tempfile.TemporaryDirectory(prefix="dtv-rust-") as rust_workdir:
@@ -142,7 +143,7 @@ class FunctionOracle(Oracle):
             c_dir = Path(c_workdir)
             rust_dir = Path(rust_workdir)
 
-            compiled = _compile_binaries(
+            compiled, compile_err = _compile_binaries(
                 prepared,
                 c_dir,
                 rust_dir,
@@ -152,8 +153,9 @@ class FunctionOracle(Oracle):
                 oracle_name=self.name,
                 function_name=c_function_name,
             )
-            if isinstance(compiled, OracleOutput):
-                return compiled
+            if compile_err is not None:
+                return compile_err
+            assert compiled is not None
 
             c_binary, cdylib_path = compiled
             return _run_tests_and_compare(
@@ -243,7 +245,7 @@ def _prepare_sources(
     oracle_name: str,
     c_signature: FunctionSignature,
     rust_signature: RustSignature,
-) -> PreparedSources | OracleOutput:
+) -> tuple[PreparedSources | None, OracleOutput | None]:
     instrumented_c = instrument_c_functions(sample.source_code, target_function=c_function_name)
     instrumented_rust = instrument_rust_functions(artifact.code, target_function=rust_function_name)
 
@@ -254,7 +256,7 @@ def _prepare_sources(
         rust_signature,
     )
     if wrapper_result.code is None:
-        return OracleOutput(
+        return None, OracleOutput(
             oracle_name=oracle_name,
             verdict=Verdict.NOT_APPLICABLE,
             diagnostics=(Diagnostic(message=wrapper_result.reason or "extern wrapper not applicable"),),
@@ -264,7 +266,7 @@ def _prepare_sources(
     # FFI discovery uses the original sources to avoid trace wrappers skewing call/def detection.
     missing = find_missing_functions(artifact.code, sample.source_code)
     if missing.missing is None:
-        return OracleOutput(
+        return None, OracleOutput(
             oracle_name=oracle_name,
             verdict=Verdict.NOT_APPLICABLE,
             diagnostics=(Diagnostic(message=missing.reason or "FFI not applicable"),),
@@ -275,7 +277,7 @@ def _prepare_sources(
     if missing.missing:
         bridge = generate_ffi_bridge(artifact.code, sample.source_code)
         if bridge.code is None:
-            return OracleOutput(
+            return None, OracleOutput(
                 oracle_name=oracle_name,
                 verdict=Verdict.NOT_APPLICABLE,
                 diagnostics=(Diagnostic(message=bridge.reason or "FFI not applicable"),),
@@ -291,7 +293,7 @@ def _prepare_sources(
     return PreparedSources(
         c_source=instrumented_c,
         rust_source=instrumented_rust,
-    )
+    ), None
 
 
 def _compile_binaries(
@@ -303,7 +305,7 @@ def _compile_binaries(
     timeout_s: float | None,
     oracle_name: str,
     function_name: str,
-) -> tuple[Path, Path] | OracleOutput:
+) -> tuple[tuple[Path, Path] | None, OracleOutput | None]:
     """Compile C executable (baseline) and Rust cdylib (LD_PRELOAD override).
 
     Returns (c_binary_path, cdylib_path) on success.
@@ -315,14 +317,14 @@ def _compile_binaries(
         timeout_s=timeout_s,
     )
     if c_compile_result.timed_out:
-        return OracleOutput(
+        return None, OracleOutput(
             oracle_name=oracle_name,
             verdict=Verdict.FAIL,
             diagnostics=(Diagnostic(message="C compilation timeout", error_code="C_COMPILE_TIMEOUT"),),
             realized_cost=1,
         )
     if c_compile_result.compilation_failed:
-        return OracleOutput(
+        return None, OracleOutput(
             oracle_name=oracle_name,
             verdict=Verdict.FAIL,
             diagnostics=(
@@ -340,14 +342,14 @@ def _compile_binaries(
         function_name=function_name,
     )
     if cdylib_compile_result.timed_out:
-        return OracleOutput(
+        return None, OracleOutput(
             oracle_name=oracle_name,
             verdict=Verdict.FAIL,
             diagnostics=(Diagnostic(message="Rust cdylib compilation timeout", error_code="RUST_CDYLIB_TIMEOUT"),),
             realized_cost=1,
         )
     if cdylib_compile_result.compilation_failed:
-        return OracleOutput(
+        return None, OracleOutput(
             oracle_name=oracle_name,
             verdict=Verdict.FAIL,
             diagnostics=(
@@ -357,7 +359,7 @@ def _compile_binaries(
             realized_cost=1,
         )
 
-    return c_dir / "program", cdylib_path
+    return (c_dir / "program", cdylib_path), None
 
 
 def _run_tests_and_compare(

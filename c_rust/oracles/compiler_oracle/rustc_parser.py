@@ -8,7 +8,6 @@ from c_rust.oracles.compiler_oracle.rustc_driver import RustcResult
 
 
 _ERROR_LEVELS = {"error", "fatal"}
-_NON_DIAGNOSTIC_JSON = object()
 
 
 def parse_rustc_diagnostics(result: RustcResult) -> tuple[Diagnostic, ...]:
@@ -20,13 +19,12 @@ def parse_rustc_diagnostics(result: RustcResult) -> tuple[Diagnostic, ...]:
             stripped = line.strip()
             if not stripped:
                 continue
-            diagnostic = _parse_json_line(stripped)
-            if diagnostic is _NON_DIAGNOSTIC_JSON:
+            diagnostic, consumed = _parse_json_line(stripped)
+            if consumed:
+                if diagnostic is not None:
+                    diagnostics.append(diagnostic)
                 continue
-            if diagnostic is not None and isinstance(diagnostic, Diagnostic):
-                diagnostics.append(diagnostic)
-            else:
-                fallback_lines.append(stripped)
+            fallback_lines.append(stripped)
 
     if not diagnostics and fallback_lines:
         severity = "error" if result.exit_code != 0 else "warning"
@@ -39,30 +37,33 @@ def has_errors(diagnostics: tuple[Diagnostic, ...]) -> bool:
     return any(diag.severity in _ERROR_LEVELS for diag in diagnostics)
 
 
-def _parse_json_line(line: str) -> Diagnostic | object | None:
+def _parse_json_line(line: str) -> tuple[Diagnostic | None, bool]:
     try:
         payload = json.loads(line)
     except json.JSONDecodeError:
-        return None
+        return None, False
 
     if not isinstance(payload, dict):
-        return _NON_DIAGNOSTIC_JSON
+        return None, True
     if payload.get("$message_type") != "diagnostic":
-        return _NON_DIAGNOSTIC_JSON
+        return None, True
 
     message = payload.get("message", "")
     if not message:
-        return None
+        return None, True
 
     severity = payload.get("level", "error")
     error_code = _extract_error_code(payload)
     span = _extract_span(payload)
 
-    return Diagnostic(
-        message=message,
-        severity=severity,
-        span=span,
-        error_code=error_code,
+    return (
+        Diagnostic(
+            message=message,
+            severity=severity,
+            span=span,
+            error_code=error_code,
+        ),
+        True,
     )
 
 
