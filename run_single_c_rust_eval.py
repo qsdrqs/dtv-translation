@@ -12,7 +12,8 @@ from controller.policy import DefaultPolicy, DefaultPolicyConfig
 from controller.stop_criteria import DTVStoppingCriteria, RUST_PROFILE
 from core.llm_output import FenceParser
 from core.budget import Budget
-from core.types import OracleOutput, TestCase, TranslationSample
+from core.types import TestCase, TranslationSample
+from feedback.formatter import RepairFeedbackFormatConfig
 from feedback.feedback import FeedbackState
 from rollback.manager import RollbackManager
 
@@ -21,14 +22,6 @@ MODEL_NAME = "Qwen/Qwen3-4B-Instruct-2507"
 TOKEN_BUDGET = 20480
 MAX_NEW_LENGTH = 1024
 PROMPT_PREFIX = "Translated the following C code into Rust:"
-
-
-class DisabledFeedbackState(FeedbackState):
-    def update(self, outputs: list[OracleOutput]) -> None:
-        return None
-
-    def encode(self) -> str:
-        return ""
 
 
 def _load_tests(path: Path) -> list[TestCase]:
@@ -155,9 +148,9 @@ fn main() {
     renderer = CRustRenderer(sample=sample)
     oracles = [RustcOracle(), FunctionOracle(), ProgramOracle()]
     budget = Budget(gen_tokens_budget=TOKEN_BUDGET)
-    feedback_state = DisabledFeedbackState()
+    feedback_state = FeedbackState()
     rollback_manager = RollbackManager()
-    policy = DefaultPolicy(DefaultPolicyConfig(enable_feedback=False))
+    policy = DefaultPolicy(DefaultPolicyConfig(enable_feedback=True))
 
     final_prefix, trace = run_dtv_loop(
         generator=generator,
@@ -167,6 +160,7 @@ fn main() {
         feedback_state=feedback_state,
         rollback_manager=rollback_manager,
         policy=policy,
+        repair_feedback_format_config=RepairFeedbackFormatConfig(include_failed_snippet=False),
         max_steps=500,
         max_new_length=MAX_NEW_LENGTH,
         prompt_prefix=prompt,

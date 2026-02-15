@@ -11,7 +11,7 @@ def _frames(kinds: tuple[Granularity, ...]) -> tuple[GroupStackFrame, ...]:
 
 def _commit(m: RollbackManager, prefix: str, group_stack: tuple[Granularity, ...]) -> None:
     m.sync_groups(_frames(group_stack))
-    m.add_stmt_checkpoint(prefix, AssistantContent.empty())
+    m.add_stmt_checkpoint(prefix, AssistantContent.empty(), None)
 
 
 def test_sync_groups_opens_block_at_first_commit_inside_block() -> None:

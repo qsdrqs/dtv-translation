@@ -13,6 +13,7 @@ fn trap(height: &[i32]) -> i32 {
 
     while left < right {
         if height[left] < height[right] {
+            // Left side is the bottleneck
             if height[left] >= left_max {
                 left_max = height[left];
             } else {
@@ -20,6 +21,7 @@ fn trap(height: &[i32]) -> i32 {
             }
             left += 1;
         } else {
+            // Right side is the bottleneck
             if height[right] >= right_max {
                 right_max = height[right];
             } else {
@@ -34,38 +36,39 @@ fn trap(height: &[i32]) -> i32 {
 
 fn main() {
     let mut input = String::new();
-    std::io::stdin().read_line(&mut input).unwrap();
+    io::stdin().read_line(&mut input).expect("Failed to read input");
 
     let n: i32 = input
         .trim()
         .parse()
-        .expect("Invalid input: expected a valid integer for n");
+        .expect("Invalid input: expected a non-negative integer");
 
     if n < 0 {
         println!("1");
         return;
     }
 
-    let mut height: Vec<i32> = Vec::new();
-
-    if n > 0 {
-        let mut input_line = String::new();
-        std::io::stdin().read_line(&mut input_line).unwrap();
-
-        let values: Vec<i32> = input_line
-            .trim()
-            .split_whitespace()
-            .map(|s| s.parse::<i32>().unwrap())
-            .collect();
-
-        if values.len() != n as usize {
-            println!("1");
-            return;
-        }
-
-        height = values;
+    if n == 0 {
+        println!("0");
+        return;
     }
 
-    let result = trap(&height);
+    let mut height: Vec<i32> = Vec::with_capacity(n as usize);
+
+    let mut input_line = String::new();
+    io::stdin().read_line(&mut input_line).expect("Failed to read input");
+
+    let values: Vec<i32> = input_line
+        .trim()
+        .split_whitespace()
+        .map(|s| s.parse::<i32>().expect("Invalid integer"))
+        .collect();
+
+    if values.len() != n as usize {
+        println!("1");
+        return;
+    }
+
+    let result = trap(&values);
     println!("{}", result);
 }

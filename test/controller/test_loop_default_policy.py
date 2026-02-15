@@ -2,13 +2,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import pytest
+
 from controller.loop import run_dtv_loop
 from controller.policy import DefaultPolicy, DefaultPolicyConfig
 from core.budget import Budget
-from core.llm_output import FenceState
+from core.llm_output import FenceParserSnapshot, FenceState, OutputExtractorState
 from core.types import (
     Action,
     Artifact,
+    Diagnostic,
     GenerateContext,
     GenerateResult,
     Granularity,
@@ -35,6 +38,13 @@ class _SequenceGenerator:
     def __init__(self, steps: list[_Step]) -> None:
         self.steps = steps
         self.idx = 0
+        snapshot = FenceParserSnapshot(state=FenceState.OUTSIDE, saw_fence=False)
+        self._extractor_state = OutputExtractorState(
+            segment=snapshot,
+            extract=snapshot,
+            shared=snapshot,
+            warning_emitted=False,
+        )
 
     def generate_step(self, context: GenerateContext) -> GenerateResult:
         _ = context
@@ -56,7 +66,13 @@ class _SequenceGenerator:
         return None
 
     def get_output_extractor_state(self) -> FenceState:
-        return FenceState.OUTSIDE
+        return self._extractor_state.extract.state
+
+    def capture_output_extractor_state(self) -> OutputExtractorState:
+        return self._extractor_state
+
+    def restore_output_extractor_state(self, state: OutputExtractorState) -> None:
+        self._extractor_state = state
 
 
 class _OkRenderer:
@@ -117,10 +133,13 @@ class _SequenceOracle:
         else:
             verdict = self.verdicts[min(self.idx, len(self.verdicts) - 1)]
         self.idx += 1
+        diagnostics = ()
+        if verdict == Verdict.FAIL:
+            diagnostics = (Diagnostic(message="Test failed"),)
         return OracleOutput(
             oracle_name=self.name,
             verdict=verdict,
-            diagnostics=(),
+            diagnostics=diagnostics,
             realized_cost=1,
         )
 
@@ -156,7 +175,7 @@ def test_default_policy_pass_commits() -> None:
     assert final_prefix == "let x = 1;"
 
 
-def test_default_policy_retry_after_fail() -> None:
+def test_default_policy_retry_after_fail_raises_when_feedback_exists() -> None:
     generator = _SequenceGenerator([
         _Step("bad;", StopReason(kind="boundary")),
         _Step("good;", StopReason(kind="boundary")),
@@ -165,18 +184,8 @@ def test_default_policy_retry_after_fail() -> None:
     oracles = [_SequenceOracle([Verdict.FAIL, Verdict.PASS])]
     policy = DefaultPolicy(DefaultPolicyConfig(enable_feedback=False))
 
-    final_prefix, trace = _run_loop(generator, renderer, oracles, policy, max_steps=6)
-
-    actions = [event.action for event in trace]
-    assert actions == [
-        Action.GENERATE,
-        Action.VERIFY,
-        Action.ROLLBACK,
-        Action.GENERATE,
-        Action.VERIFY,
-        Action.COMMIT,
-    ]
-    assert final_prefix == "good;"
+    with pytest.raises(RuntimeError, match="Action.GENERATE cannot include feedback payload"):
+        _run_loop(generator, renderer, oracles, policy, max_steps=6)
 
 
 def test_default_policy_no_oracles_continue_then_generate() -> None:

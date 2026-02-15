@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Sequence
 
-from core.llm_output import AssistantContent
+from core.llm_output import AssistantContent, OutputExtractorState
 from core.types import Granularity, GroupEvent, GroupEventAction, GroupStackFrame, RollbackScope
 
 
@@ -12,6 +12,7 @@ class Checkpoint:
     """Snapshot of the prefix after a committed statement."""
     code_prefix: str
     assistant_prefix: AssistantContent
+    extractor_state: OutputExtractorState | None = None
 
 
 @dataclass(frozen=True)
@@ -30,10 +31,33 @@ class RollbackManager:
     retry_counters: dict[str, int] = field(default_factory=dict)  # Per-key retry counts.
     max_stmt_retries: int = 3
     max_block_retries: int = 2
+    fence_anchor: Checkpoint | None = None
 
-    def add_stmt_checkpoint(self, code_prefix: str, assistant_prefix: AssistantContent) -> None:
+    def add_stmt_checkpoint(
+        self,
+        code_prefix: str,
+        assistant_prefix: AssistantContent,
+        extractor_state: OutputExtractorState | None,
+    ) -> None:
         self.stmt_checkpoints.append(
-            Checkpoint(code_prefix=code_prefix, assistant_prefix=assistant_prefix)
+            Checkpoint(
+                code_prefix=code_prefix,
+                assistant_prefix=assistant_prefix,
+                extractor_state=extractor_state,
+            )
+        )
+
+    def set_fence_anchor(
+        self,
+        assistant_prefix: AssistantContent,
+        extractor_state: OutputExtractorState | None,
+    ) -> None:
+        if self.fence_anchor is not None:
+            return
+        self.fence_anchor = Checkpoint(
+            code_prefix="",
+            assistant_prefix=assistant_prefix,
+            extractor_state=extractor_state,
         )
 
     def open_group(self, kind: Granularity) -> None:
@@ -80,13 +104,28 @@ class RollbackManager:
             del self.stmt_checkpoints[keep_count:]
         self.group_stack = [g for g in self.group_stack if g.start_stmt < keep_count]
         if keep_count == 0:
-            return Checkpoint(code_prefix="", assistant_prefix=AssistantContent.empty())
+            return Checkpoint(
+                code_prefix="",
+                assistant_prefix=AssistantContent.empty(),
+                extractor_state=None,
+            )
         return self.stmt_checkpoints[keep_count - 1]
 
     def _last_checkpoint(self) -> Checkpoint:
         if not self.stmt_checkpoints:
-            return Checkpoint(code_prefix="", assistant_prefix=AssistantContent.empty())
+            return Checkpoint(
+                code_prefix="",
+                assistant_prefix=AssistantContent.empty(),
+                extractor_state=None,
+            )
         return self.stmt_checkpoints[-1]
+
+    def _apply_fence_anchor_floor(self, checkpoint: Checkpoint) -> Checkpoint:
+        if self.fence_anchor is None:
+            return checkpoint
+        if len(checkpoint.code_prefix) > len(self.fence_anchor.code_prefix):
+            return checkpoint
+        return self.fence_anchor
 
     def _target_start_for_scope(self, scope: RollbackScope) -> int | None:
         if scope == RollbackScope.BLOCK:
@@ -105,13 +144,15 @@ class RollbackManager:
         if scope == RollbackScope.PROGRAM:
             self.stmt_checkpoints.clear()
             self.group_stack.clear()
-            return Checkpoint(code_prefix="", assistant_prefix=AssistantContent.empty())
+            return self._apply_fence_anchor_floor(
+                Checkpoint(code_prefix="", assistant_prefix=AssistantContent.empty(), extractor_state=None)
+            )
         if scope == RollbackScope.STMT:
-            return self._last_checkpoint()
+            return self._apply_fence_anchor_floor(self._last_checkpoint())
         target_start = self._target_start_for_scope(scope)
         if target_start is None:
-            return self._last_checkpoint()
-        return self._truncate_to(target_start)
+            return self._apply_fence_anchor_floor(self._last_checkpoint())
+        return self._apply_fence_anchor_floor(self._truncate_to(target_start))
 
     def record_retry(self, key: str) -> int:
         self.retry_counters[key] = self.retry_counters.get(key, 0) + 1

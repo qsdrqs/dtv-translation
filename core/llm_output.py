@@ -11,6 +11,39 @@ class FenceState(str, Enum):
 
 
 @dataclass(frozen=True)
+class FenceParserSnapshot:
+    state: FenceState
+    saw_fence: bool
+    buffer: str = ""
+    inside_parts: tuple[str, ...] = ()
+
+    def force_inside(self) -> "FenceParserSnapshot":
+        return FenceParserSnapshot(
+            state=FenceState.INSIDE,
+            saw_fence=True,
+            buffer="",
+            inside_parts=(),
+        )
+
+
+@dataclass(frozen=True)
+class OutputExtractorState:
+    segment: FenceParserSnapshot
+    extract: FenceParserSnapshot
+    shared: FenceParserSnapshot | None
+    warning_emitted: bool = False
+
+    def force_inside(self) -> "OutputExtractorState":
+        shared = self.shared.force_inside() if self.shared is not None else None
+        return OutputExtractorState(
+            segment=self.segment.force_inside(),
+            extract=self.extract.force_inside(),
+            shared=shared,
+            warning_emitted=self.warning_emitted,
+        )
+
+
+@dataclass(frozen=True)
 class AssistantContent:
     pre_fence: str = ""
     fence_lang: str = ""
@@ -162,6 +195,21 @@ class FenceParser:
         output = "".join(self._inside_parts)
         self._inside_parts.clear()
         return output
+
+    def capture(self) -> FenceParserSnapshot:
+        return FenceParserSnapshot(
+            state=self.state,
+            saw_fence=self._saw_fence,
+            buffer=self._buffer,
+            inside_parts=tuple(self._inside_parts),
+        )
+
+    def restore(self, snapshot: FenceParserSnapshot) -> None:
+        self.state = snapshot.state
+        self._saw_fence = snapshot.saw_fence
+        self._buffer = snapshot.buffer
+        self._inside_parts = list(snapshot.inside_parts)
+        self._epoch += 1
 
 def _extract_fence_lang(line: str, allowed_langs: tuple[str, ...]) -> str | None:
     """Return the language tag if *line* is an opening fence for an allowed language, else None."""

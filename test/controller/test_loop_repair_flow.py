@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import pytest
 
 from controller.loop import ControllerOp, run_dtv_loop, select_oracles_by_granularity
 from core.budget import Budget
-from core.llm_output import FenceState
+from core.llm_output import FenceParserSnapshot, FenceState, OutputExtractorState
 from core.types import (
     Action,
     Artifact,
@@ -17,26 +17,26 @@ from core.types import (
     StopReason,
     Verdict,
 )
+from feedback.formatter import RepairFeedbackFormatConfig
 from feedback.feedback import FeedbackState
 from rollback.manager import RollbackManager
 
 
-@dataclass(frozen=True)
 class _OracleFail:
-    name: str = "oracle"
-    required_granularity: Granularity = Granularity.STMT
-    rollback_scope: RollbackScope = RollbackScope.STMT
+    name = "oracle"
+    required_granularity = Granularity.STMT
+    rollback_scope = RollbackScope.STMT
 
     def run(self, state, artifact, context):
         _ = state
         _ = artifact
         _ = context
-        from core.types import OracleOutput
+        from core.types import Diagnostic, OracleOutput
 
         return OracleOutput(
             oracle_name=self.name,
             verdict=Verdict.FAIL,
-            diagnostics=(),
+            diagnostics=(Diagnostic(message="test failure"),),
             realized_cost=1,
         )
 
@@ -45,6 +45,13 @@ class _SequenceGenerator:
     def __init__(self, steps: list[str]) -> None:
         self.steps = steps
         self.idx = 0
+        snapshot = FenceParserSnapshot(state=FenceState.OUTSIDE, saw_fence=False)
+        self._extractor_state = OutputExtractorState(
+            segment=snapshot,
+            extract=snapshot,
+            shared=snapshot,
+            warning_emitted=False,
+        )
 
     def generate_step(self, context: GenerateContext) -> GenerateResult:
         _ = context
@@ -66,7 +73,31 @@ class _SequenceGenerator:
         return None
 
     def get_output_extractor_state(self) -> FenceState:
-        return FenceState.OUTSIDE
+        return self._extractor_state.extract.state
+
+    def capture_output_extractor_state(self) -> OutputExtractorState:
+        return self._extractor_state
+
+    def restore_output_extractor_state(self, state: OutputExtractorState) -> None:
+        self._extractor_state = state
+
+
+def _last_assistant_text(context: GenerateContext) -> str:
+    for message in reversed(context.messages):
+        if getattr(message, "role", "") != "assistant":
+            continue
+        return str(getattr(message, "content", ""))
+    return ""
+
+
+class _TrackingSequenceGenerator(_SequenceGenerator):
+    def __init__(self, steps: list[str]) -> None:
+        super().__init__(steps)
+        self.seen_assistant_messages: list[str] = []
+
+    def generate_step(self, context: GenerateContext) -> GenerateResult:
+        self.seen_assistant_messages.append(_last_assistant_text(context))
+        return super().generate_step(context)
 
 
 class _ToggleRenderer:
@@ -220,7 +251,7 @@ def test_failed_context_survives_inconclusive_verify() -> None:
     assert any(event.action == Action.FEEDBACK for event in trace)
 
 
-def test_continue_then_generate_keeps_failed_context() -> None:
+def test_continue_then_generate_raises_when_feedback_payload_exists() -> None:
     generator = _SequenceGenerator(["bad stmt\n", "fix\n"])
     renderer = _OkRenderer()
     oracles = [_OracleFail()]
@@ -229,18 +260,17 @@ def test_continue_then_generate_keeps_failed_context() -> None:
     rollback_manager = RollbackManager()
     policy = _ContinueGeneratePolicy()
 
-    _, trace = run_dtv_loop(
-        generator=generator,
-        renderer=renderer,
-        oracles=oracles,
-        budget=budget,
-        feedback_state=feedback_state,
-        rollback_manager=rollback_manager,
-        policy=policy,
-        max_steps=7,
-    )
-
-    assert any(event.action == Action.FEEDBACK for event in trace)
+    with pytest.raises(RuntimeError, match="Action.GENERATE cannot include feedback payload"):
+        run_dtv_loop(
+            generator=generator,
+            renderer=renderer,
+            oracles=oracles,
+            budget=budget,
+            feedback_state=feedback_state,
+            rollback_manager=rollback_manager,
+            policy=policy,
+            max_steps=7,
+        )
 
 
 def test_failed_context_survives_no_oracle_verify() -> None:
@@ -264,3 +294,31 @@ def test_failed_context_survives_no_oracle_verify() -> None:
     )
 
     assert any(event.action == Action.FEEDBACK for event in trace)
+
+
+def test_feedback_prompt_can_omit_failed_snippet() -> None:
+    generator = _TrackingSequenceGenerator(["bad stmt\n", "fix\n"])
+    renderer = _ToggleRenderer()
+    oracles = [_OracleFail()]
+    budget = Budget(gen_tokens_budget=8)
+    feedback_state = FeedbackState()
+    rollback_manager = RollbackManager()
+    policy = _RepairFlowPolicy()
+
+    _, trace = run_dtv_loop(
+        generator=generator,
+        renderer=renderer,
+        oracles=oracles,
+        budget=budget,
+        feedback_state=feedback_state,
+        rollback_manager=rollback_manager,
+        policy=policy,
+        repair_feedback_format_config=RepairFeedbackFormatConfig(include_failed_snippet=False),
+        max_steps=6,
+    )
+
+    assert any(event.action == Action.FEEDBACK for event in trace)
+    assert generator.seen_assistant_messages
+    feedback_prompt = generator.seen_assistant_messages[-1]
+    assert "diagnostics:" in feedback_prompt
+    assert "failed snippet:" not in feedback_prompt

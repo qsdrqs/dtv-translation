@@ -20,7 +20,6 @@ class FeedbackStrategy(Protocol):
 @dataclass(frozen=True)
 class AppendToLastAssistant:
     """Appends feedback to the last assistant message."""
-    header: str = "# Feedback"  # Optional heading before feedback lines.
 
     def apply(
         self,
@@ -53,10 +52,7 @@ class AppendToLastAssistant:
 
         content = prefix.render() if isinstance(prefix, AssistantContent) else prefix
         if feedback:
-            if self.header:
-                content = f"{content}\n\n{self.header}\n{feedback}"
-            else:
-                content = f"{content}\n\n{feedback}"
+            content = f"{content}\n\n{feedback}"
 
         stop = False
         if assistant_index is None:

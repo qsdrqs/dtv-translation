@@ -15,6 +15,7 @@ class Diagnostic:
     span: tuple[int, int] | None = None
     error_code: str | None = None
     hint_scope: RollbackScope | None = None
+    hints: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

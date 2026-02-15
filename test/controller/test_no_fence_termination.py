@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from controller.loop import ControllerOp, run_dtv_loop
 from core.budget import Budget
-from core.llm_output import FenceState
+from core.llm_output import FenceParserSnapshot, FenceState, OutputExtractorState
 from core.types import (
     Action,
     Artifact,
@@ -17,6 +17,15 @@ from rollback.manager import RollbackManager
 
 
 class _NoFenceGenerator:
+    def __init__(self) -> None:
+        snapshot = FenceParserSnapshot(state=FenceState.OUTSIDE, saw_fence=False)
+        self._extractor_state = OutputExtractorState(
+            segment=snapshot,
+            extract=snapshot,
+            shared=snapshot,
+            warning_emitted=False,
+        )
+
     def generate_step(self, context: GenerateContext) -> GenerateResult:
         _ = context
         return GenerateResult(
@@ -29,7 +38,13 @@ class _NoFenceGenerator:
         return None
 
     def get_output_extractor_state(self) -> FenceState:
-        return FenceState.OUTSIDE
+        return self._extractor_state.extract.state
+
+    def capture_output_extractor_state(self) -> OutputExtractorState:
+        return self._extractor_state
+
+    def restore_output_extractor_state(self, state: OutputExtractorState) -> None:
+        self._extractor_state = state
 
 
 class _DummyRenderer:

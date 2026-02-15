@@ -6,7 +6,12 @@ from typing import Protocol
 
 from core.budget import Budget
 from core.interfaces import Generator, Oracle, OracleRunner, Renderer
-from core.llm_output import AssistantContent, FenceState, merge_assistant_content
+from core.llm_output import (
+    AssistantContent,
+    FenceState,
+    OutputExtractorState,
+    merge_assistant_content,
+)
 from core.logger import get_logger
 from core.types import (
     Action,
@@ -25,8 +30,9 @@ from core.types import (
     TraceEvent,
     Verdict,
 )
-from feedback.strategies import AppendToLastAssistant, FeedbackStrategy
+from feedback.formatter import RepairFeedbackFormatConfig, build_repair_feedback
 from feedback.feedback import FeedbackState
+from feedback.strategies import AppendToLastAssistant, FeedbackStrategy
 from rollback.manager import RollbackManager
 
 logger = get_logger(__name__)
@@ -66,11 +72,14 @@ class ControllerRuntime:
     last_group_stack: tuple[GroupStackFrame, ...] | None = None
     last_closed_stack: tuple[GroupStackFrame, ...] = ()
     assistant_prefix: AssistantContent = field(default_factory=AssistantContent.empty)
+    extractor_state: OutputExtractorState | None = None
     failed_prefix: str | None = None
     failed_assistant_prefix: AssistantContent | None = None
+    failed_extractor_state: OutputExtractorState | None = None
     pending_patch: str | None = None
     repair_base_prefix: str | None = None
     repair_base_assistant_prefix: AssistantContent | None = None
+    repair_base_extractor_state: OutputExtractorState | None = None
 
 
 class Policy(Protocol):
@@ -151,27 +160,6 @@ def _truncate(s: str, max_chars: int) -> str:
     return s[:max_chars] + f"...<truncated {len(s) - max_chars} chars>"
 
 
-def _build_repair_feedback(feedback_state: FeedbackState, bad_snippet: str) -> str:
-    diagnostics = feedback_state.encode().strip()
-    if not diagnostics:
-        diagnostics = "(no diagnostics)"
-    if not bad_snippet:
-        bad_snippet = "(empty)"
-    return "\n".join(
-        [
-            "# Repair Request",
-            "Replace the failed snippet with a corrected version.",
-            "Output only the replacement code.",
-            "",
-            "## Diagnostics",
-            diagnostics,
-            "",
-            "## Failed Snippet",
-            bad_snippet,
-        ]
-    )
-
-
 def _failed_snippet(base_prefix: str, failed_prefix: str) -> str:
     if failed_prefix.startswith(base_prefix):
         return failed_prefix[len(base_prefix) :]
@@ -181,9 +169,45 @@ def _failed_snippet(base_prefix: str, failed_prefix: str) -> str:
 def _clear_repair_context(runtime: ControllerRuntime) -> None:
     runtime.failed_prefix = None
     runtime.failed_assistant_prefix = None
+    runtime.failed_extractor_state = None
     runtime.pending_patch = None
     runtime.repair_base_prefix = None
     runtime.repair_base_assistant_prefix = None
+    runtime.repair_base_extractor_state = None
+
+
+def _fence_start_only(content: AssistantContent | None) -> AssistantContent:
+    if content is None or not content.fence_lang:
+        return AssistantContent.empty()
+    return AssistantContent(
+        pre_fence=content.pre_fence,
+        fence_lang=content.fence_lang,
+        code="",
+        post_fence="",
+        pending_text="",
+        fence_state=FenceState.INSIDE,
+    )
+
+
+def _restore_inside_from_anchor(anchor: AssistantContent, code_prefix: str) -> AssistantContent:
+    return AssistantContent(
+        pre_fence=anchor.pre_fence,
+        fence_lang=anchor.fence_lang,
+        code=code_prefix,
+        post_fence="",
+        pending_text="",
+        fence_state=FenceState.INSIDE,
+    )
+
+
+def _assert_extractor_consistency(runtime: ControllerRuntime) -> None:
+    if runtime.extractor_state is None:
+        return
+    if runtime.extractor_state.segment.state != runtime.assistant_prefix.fence_state:
+        raise RuntimeError(
+            "assistant fence state diverged from segment parser state "
+            f"({runtime.assistant_prefix.fence_state} vs {runtime.extractor_state.segment.state})"
+        )
 
 
 def _closed_stack_diff(
@@ -264,28 +288,28 @@ def _handle_generate(
     generator: Generator,
     budget: Budget,
     feedback_state: FeedbackState,
-    feedback_strategy: FeedbackStrategy,
+    rollback_manager: RollbackManager,
     trace: list[TraceEvent],
 ) -> None:
-    # Main generation expects fenced Rust output; extract only fenced code.
     context.extract_fence = True
-    if runtime.last_action == Action.ROLLBACK and not runtime.state.prefix:
-        # Rollback to empty prefix implies we must restart fence tracking from scratch.
-        reset_extractor = getattr(generator, "reset_output_extractor", None)
-        if reset_extractor is None:
-            raise TypeError(
-                f"Generator {type(generator).__name__} missing reset_output_extractor()"
-            )
-        if not callable(reset_extractor):
-            raise TypeError("reset_output_extractor is not callable on generator")
-        reset_extractor()
-    update_last_assistant(base_messages, runtime.assistant_prefix)
     feedback = feedback_state.encode()
-    context.messages = feedback_strategy.apply(base_messages, feedback, runtime.assistant_prefix)
+    if feedback:
+        raise RuntimeError("Action.GENERATE cannot include feedback payload; use Action.FEEDBACK")
+    if runtime.extractor_state is None:
+        runtime.extractor_state = generator.capture_output_extractor_state()
+    _assert_extractor_consistency(runtime)
+    generator.restore_output_extractor_state(runtime.extractor_state)
+    update_last_assistant(base_messages, runtime.assistant_prefix)
+    context.messages = list(base_messages)
     result = generator.generate_step(context)
     runtime.state.prefix += result.delta_text
     assistant_delta = result.assistant_delta or AssistantContent.from_unfenced(result.delta_text)
     runtime.assistant_prefix = merge_assistant_content(runtime.assistant_prefix, assistant_delta)
+    runtime.extractor_state = generator.capture_output_extractor_state()
+    if rollback_manager.fence_anchor is None and runtime.assistant_prefix.fence_lang:
+        anchor_assistant = _fence_start_only(runtime.assistant_prefix)
+        anchor_state = runtime.extractor_state.force_inside() if runtime.extractor_state else None
+        rollback_manager.set_fence_anchor(anchor_assistant, anchor_state)
     budget.add_tokens(result.delta_tokens)
     runtime.last_stop_reason = result.stop_reason
     runtime.last_render_status = None
@@ -409,6 +433,7 @@ def _handle_verify(
         if any(out.verdict == Verdict.FAIL for out in outputs):
             runtime.failed_prefix = runtime.state.prefix
             runtime.failed_assistant_prefix = runtime.assistant_prefix
+            runtime.failed_extractor_state = runtime.extractor_state
         elif all(out.verdict == Verdict.PASS for out in outputs):
             _clear_repair_context(runtime)
     runtime.last_action = Action.VERIFY
@@ -438,7 +463,11 @@ def _handle_commit(
         rollback_manager.sync_groups(runtime.last_artifact.group_stack)
     else:
         rollback_manager.apply_group_events(runtime.last_artifact.group_events)
-    rollback_manager.add_stmt_checkpoint(runtime.state.prefix, runtime.assistant_prefix)
+    rollback_manager.add_stmt_checkpoint(
+        runtime.state.prefix,
+        runtime.assistant_prefix,
+        runtime.extractor_state,
+    )
     _clear_repair_context(runtime)
     runtime.last_action = Action.COMMIT
     logger.info(
@@ -461,7 +490,9 @@ def _handle_commit(
 def _handle_rollback(
     runtime: ControllerRuntime,
     op: ControllerOp,
+    generator: Generator,
     rollback_manager: RollbackManager,
+    feedback_state: FeedbackState,
     budget: Budget,
     trace: list[TraceEvent],
 ) -> None:
@@ -470,9 +501,25 @@ def _handle_rollback(
     snapshot = rollback_manager.rollback(op.rollback_scope)
     runtime.state.prefix = snapshot.code_prefix
     runtime.assistant_prefix = snapshot.assistant_prefix
+    runtime.extractor_state = snapshot.extractor_state
+    if rollback_manager.fence_anchor is not None:
+        runtime.assistant_prefix = _restore_inside_from_anchor(
+            rollback_manager.fence_anchor.assistant_prefix,
+            runtime.state.prefix,
+        )
+        if runtime.extractor_state is None:
+            runtime.extractor_state = rollback_manager.fence_anchor.extractor_state
+        if runtime.extractor_state is None:
+            runtime.extractor_state = generator.capture_output_extractor_state()
+        runtime.extractor_state = runtime.extractor_state.force_inside()
+    elif runtime.extractor_state is None:
+        runtime.extractor_state = generator.capture_output_extractor_state()
+    generator.restore_output_extractor_state(runtime.extractor_state)
+    feedback_state.update(list(runtime.last_outputs), selected_scope=op.rollback_scope)
     runtime.pending_patch = None
     runtime.repair_base_prefix = runtime.state.prefix
     runtime.repair_base_assistant_prefix = runtime.assistant_prefix
+    runtime.repair_base_extractor_state = runtime.extractor_state
     runtime.last_render_status = None
     runtime.last_artifact = None
     runtime.last_outputs = ()
@@ -507,32 +554,31 @@ def _handle_feedback(
     budget: Budget,
     feedback_state: FeedbackState,
     feedback_strategy: FeedbackStrategy,
+    repair_feedback_format_config: RepairFeedbackFormatConfig | None,
     trace: list[TraceEvent],
 ) -> None:
     if (
         runtime.failed_prefix is None
         or runtime.repair_base_prefix is None
         or runtime.repair_base_assistant_prefix is None
+        or runtime.repair_base_extractor_state is None
     ):
         raise RuntimeError("FEEDBACK requires failed_prefix and repair base prefix.")
     feedback_gen = generator
     if op.feedback_mode == FeedbackMode.FENCED:
-        # Fenced feedback uses a dedicated generator to avoid polluting the main stream.
         if feedback_generator is None:
             raise RuntimeError("feedback_generator is required for fenced feedback mode")
         feedback_gen = feedback_generator
-        reset_extractor = getattr(feedback_gen, "reset_output_extractor", None)
-        if reset_extractor is None:
-            raise TypeError(
-                f"Generator {type(feedback_gen).__name__} missing reset_output_extractor()"
-            )
-        if not callable(reset_extractor):
-            raise TypeError("reset_output_extractor is not callable on feedback generator")
-        reset_extractor()
-    # Feedback output is also fenced; keep extraction on for both modes.
+        feedback_gen.reset_output_extractor()
+    else:
+        feedback_gen.restore_output_extractor_state(runtime.repair_base_extractor_state)
     context.extract_fence = True
     bad_snippet = _failed_snippet(runtime.repair_base_prefix, runtime.failed_prefix)
-    repair_feedback = _build_repair_feedback(feedback_state, bad_snippet)
+    repair_feedback = build_repair_feedback(
+        feedback_state,
+        bad_snippet,
+        format_config=repair_feedback_format_config,
+    )
     update_last_assistant(base_messages, runtime.repair_base_assistant_prefix)
     context.messages = feedback_strategy.apply(
         base_messages,
@@ -540,6 +586,8 @@ def _handle_feedback(
         runtime.repair_base_assistant_prefix,
     )
     result = feedback_gen.generate_step(context)
+    if feedback_gen is generator:
+        generator.restore_output_extractor_state(runtime.repair_base_extractor_state)
     runtime.pending_patch = result.delta_text
     budget.add_tokens(result.delta_tokens)
     runtime.last_stop_reason = result.stop_reason
@@ -570,11 +618,13 @@ def _handle_apply_patch(
         runtime.pending_patch is None
         or runtime.repair_base_prefix is None
         or runtime.repair_base_assistant_prefix is None
+        or runtime.repair_base_extractor_state is None
     ):
         raise RuntimeError("APPLY_PATCH requires pending_patch and repair base prefix.")
     patch_len = len(runtime.pending_patch)
     runtime.state.prefix = f"{runtime.repair_base_prefix}{runtime.pending_patch}"
     runtime.assistant_prefix = runtime.repair_base_assistant_prefix.with_code(runtime.state.prefix)
+    runtime.extractor_state = runtime.repair_base_extractor_state
     _clear_repair_context(runtime)
     runtime.last_render_status = None
     runtime.last_artifact = None
@@ -643,6 +693,7 @@ def run_dtv_loop(
     policy: Policy,
     feedback_generator: Generator | None = None,
     feedback_strategy: FeedbackStrategy | None = None,
+    repair_feedback_format_config: RepairFeedbackFormatConfig | None = None,
     max_steps: int = 100,
     max_new_length: int = 1024,
     prompt_prefix: str = "",
@@ -664,6 +715,7 @@ def run_dtv_loop(
     oracle_runner_impl: OracleRunner = oracle_runner
 
     runtime = ControllerRuntime(state=ControllerState(prefix=""))
+    runtime.extractor_state = generator.capture_output_extractor_state()
     trace: list[TraceEvent] = []
 
     base_messages: list[GenerateMessage] = []
@@ -714,7 +766,7 @@ def run_dtv_loop(
                 generator,
                 budget,
                 feedback_state,
-                feedback_strategy,
+                rollback_manager,
                 trace,
             )
             runtime.state.step += 1
@@ -747,17 +799,7 @@ def run_dtv_loop(
             continue
 
         if op.action == Action.ROLLBACK:
-            state_getter = getattr(generator, "get_output_extractor_state", None)
-            if state_getter is None:
-                raise TypeError(
-                    f"Generator {type(generator).__name__} missing get_output_extractor_state()"
-                )
-            if not callable(state_getter):
-                raise TypeError("get_output_extractor_state is not callable on generator")
-            extractor_state = state_getter()
-            # Invariant: rollback never happens after the fenced block is closed.
-            assert extractor_state != FenceState.DONE, "rollback after fence closed is unsupported"
-            _handle_rollback(runtime, op, rollback_manager, budget, trace)
+            _handle_rollback(runtime, op, generator, rollback_manager, feedback_state, budget, trace)
             runtime.state.step += 1
             continue
 
@@ -772,6 +814,7 @@ def run_dtv_loop(
                 budget,
                 feedback_state,
                 feedback_strategy,
+                repair_feedback_format_config,
                 trace,
             )
             runtime.state.step += 1

@@ -8,7 +8,9 @@ from core.generator_backend import GeneratorBackend
 from core.llm_output import (
     AssistantContent,
     FenceParser,
+    FenceParserSnapshot,
     FenceState,
+    OutputExtractorState,
     merge_assistant_content,
 )
 from core.logger import get_logger
@@ -52,6 +54,30 @@ class GeneratorAdapter(Generator):
 
     def get_output_extractor_state(self) -> FenceState:
         return self._extract_parser.state
+
+    def capture_output_extractor_state(self) -> OutputExtractorState:
+        shared_snapshot = self._fence_parser.capture() if self._fence_parser is not None else None
+        return OutputExtractorState(
+            segment=self._segment_parser.capture(),
+            extract=self._extract_parser.capture(),
+            shared=shared_snapshot,
+            warning_emitted=self._warning_emitted,
+        )
+
+    def restore_output_extractor_state(self, state: OutputExtractorState) -> None:
+        self._segment_parser.restore(state.segment)
+        self._extract_parser.restore(state.extract)
+        if self._fence_parser is not None:
+            shared_state = state.shared
+            if shared_state is None:
+                shared_state = FenceParserSnapshot(
+                    state=state.extract.state,
+                    saw_fence=state.extract.saw_fence,
+                    buffer=state.extract.buffer,
+                    inside_parts=state.extract.inside_parts,
+                )
+            self._fence_parser.restore(shared_state)
+        self._warning_emitted = state.warning_emitted
 
     def generate_step(self, context: GenerateContext) -> GenerateResult:
         logger.info(

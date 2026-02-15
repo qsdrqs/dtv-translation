@@ -55,6 +55,7 @@ def _parse_json_line(line: str) -> tuple[Diagnostic | None, bool]:
     severity = payload.get("level", "error")
     error_code = _extract_error_code(payload)
     span = _extract_span(payload)
+    hints = _extract_hints(payload)
 
     return (
         Diagnostic(
@@ -62,6 +63,7 @@ def _parse_json_line(line: str) -> tuple[Diagnostic | None, bool]:
             severity=severity,
             span=span,
             error_code=error_code,
+            hints=hints,
         ),
         True,
     )
@@ -94,3 +96,26 @@ def _extract_span(payload: dict[str, Any]) -> tuple[int, int] | None:
     if isinstance(byte_start, int) and isinstance(byte_end, int):
         return (byte_start, byte_end)
     return None
+
+
+def _extract_hints(payload: dict[str, Any]) -> tuple[str, ...]:
+    hints: list[str] = []
+    children = payload.get("children")
+    _collect_help_messages(children, hints)
+    return tuple(hints)
+
+
+def _collect_help_messages(children: Any, hints: list[str]) -> None:
+    if not isinstance(children, list):
+        return
+    for child in children:
+        if not isinstance(child, dict):
+            continue
+        level = child.get("level")
+        message = child.get("message")
+        if level == "help" and isinstance(message, str):
+            text = message.strip()
+            if text:
+                hints.append(text)
+        nested_children = child.get("children")
+        _collect_help_messages(nested_children, hints)

@@ -2,15 +2,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from c_rust.oracles import RustcOracle
-from core.llm_output import FenceState
+import pytest
+
+from core.llm_output import AssistantContent, FenceParserSnapshot, FenceState, OutputExtractorState
 from core.types import TestCase, TranslationSample
-from c_rust.render import CRustRenderer
 from controller.loop import ControllerOp, run_dtv_loop, select_oracles_by_granularity
 from core.budget import Budget
 from core.types import (
     Action,
     Artifact,
+    Diagnostic,
     GenerateContext,
     GenerateResult,
     Granularity,
@@ -26,7 +27,6 @@ from core.types import (
 )
 from feedback.feedback import FeedbackState
 from rollback.manager import RollbackManager
-from test.c_rust.utils import _rustc_path
 
 
 @dataclass(frozen=True)
@@ -45,6 +45,18 @@ class _FakeGenerator:
 
     def get_output_extractor_state(self) -> FenceState:
         return FenceState.OUTSIDE
+
+    def capture_output_extractor_state(self) -> OutputExtractorState:
+        snapshot = FenceParserSnapshot(state=FenceState.OUTSIDE, saw_fence=False)
+        return OutputExtractorState(
+            segment=snapshot,
+            extract=snapshot,
+            shared=snapshot,
+            warning_emitted=False,
+        )
+
+    def restore_output_extractor_state(self, state: OutputExtractorState) -> None:
+        _ = state
 
 
 class _DummyRenderer:
@@ -90,6 +102,13 @@ class _SequenceGenerator:
     def __init__(self, steps: list[str]) -> None:
         self.steps = steps
         self.idx = 0
+        snapshot = FenceParserSnapshot(state=FenceState.OUTSIDE, saw_fence=False)
+        self._extractor_state = OutputExtractorState(
+            segment=snapshot,
+            extract=snapshot,
+            shared=snapshot,
+            warning_emitted=False,
+        )
 
     def generate_step(self, context: GenerateContext) -> GenerateResult:
         if self.idx >= len(self.steps):
@@ -110,7 +129,175 @@ class _SequenceGenerator:
         return None
 
     def get_output_extractor_state(self) -> FenceState:
-        return FenceState.OUTSIDE
+        return self._extractor_state.extract.state
+
+    def capture_output_extractor_state(self) -> OutputExtractorState:
+        return self._extractor_state
+
+    def restore_output_extractor_state(self, state: OutputExtractorState) -> None:
+        self._extractor_state = state
+
+
+def _last_assistant_text(context: GenerateContext) -> str:
+    for message in reversed(context.messages):
+        role = getattr(message, "role", "")
+        if role != "assistant":
+            continue
+        content = getattr(message, "content", "")
+        if isinstance(content, AssistantContent):
+            return content.render()
+        return str(content)
+    return ""
+
+
+class _TrackingGenerator:
+    def __init__(self, results: list[GenerateResult]) -> None:
+        self.results = results
+        self.idx = 0
+        self.reset_calls = 0
+        self.seen_assistant_messages: list[str] = []
+        self.restored_states: list[OutputExtractorState] = []
+        snapshot = FenceParserSnapshot(state=FenceState.OUTSIDE, saw_fence=False)
+        self._extractor_state = OutputExtractorState(
+            segment=snapshot,
+            extract=snapshot,
+            shared=snapshot,
+            warning_emitted=False,
+        )
+
+    def generate_step(self, context: GenerateContext) -> GenerateResult:
+        self.seen_assistant_messages.append(_last_assistant_text(context))
+        if self.idx >= len(self.results):
+            return GenerateResult(
+                delta_text="",
+                delta_tokens=0,
+                stop_reason=StopReason(kind="empty"),
+            )
+        result = self.results[self.idx]
+        self.idx += 1
+        assistant_delta = result.assistant_delta
+        if assistant_delta is not None:
+            snapshot = FenceParserSnapshot(
+                state=assistant_delta.fence_state,
+                saw_fence=bool(assistant_delta.fence_lang) or self._extractor_state.extract.saw_fence,
+            )
+            self._extractor_state = OutputExtractorState(
+                segment=snapshot,
+                extract=snapshot,
+                shared=snapshot,
+                warning_emitted=self._extractor_state.warning_emitted,
+            )
+        return result
+
+    def reset_output_extractor(self) -> None:
+        self.reset_calls += 1
+
+    def get_output_extractor_state(self) -> FenceState:
+        return self._extractor_state.extract.state
+
+    def capture_output_extractor_state(self) -> OutputExtractorState:
+        return self._extractor_state
+
+    def restore_output_extractor_state(self, state: OutputExtractorState) -> None:
+        self.restored_states.append(state)
+        self._extractor_state = state
+
+
+class _ScopeFailOracle:
+    required_granularity = Granularity.STMT
+
+    def __init__(self, scope: RollbackScope) -> None:
+        self.name = f"fail_{scope.value}"
+        self.rollback_scope = scope
+
+    def run(self, state, artifact, context) -> OracleOutput:
+        _ = state
+        _ = artifact
+        _ = context
+        return OracleOutput(
+            oracle_name=self.name,
+            verdict=Verdict.FAIL,
+            diagnostics=(Diagnostic(message="scope mismatch"),),
+            realized_cost=1,
+            rollback_scope=self.rollback_scope,
+        )
+
+
+class _RollbackScopePolicy:
+    def __init__(self, scope: RollbackScope) -> None:
+        self.scope = scope
+        self.stage = 0
+
+    def next_action(self, ctx) -> ControllerOp:
+        _ = ctx
+        if self.stage == 0:
+            self.stage = 1
+            return ControllerOp(Action.GENERATE)
+        if self.stage == 1:
+            self.stage = 2
+            return ControllerOp(Action.VERIFY, verification_granularity=Granularity.PROGRAM)
+        if self.stage == 2:
+            self.stage = 3
+            return ControllerOp(Action.ROLLBACK, rollback_scope=self.scope)
+        return ControllerOp(Action.TERMINATE)
+
+    def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
+        if selection_granularity is None:
+            raise ValueError("selection_granularity is required")
+        return select_oracles_by_granularity(
+            artifact,
+            budget,
+            available,
+            selection_granularity=selection_granularity,
+        )
+
+
+class _ProgramFailOracle:
+    name = "program_diff"
+    required_granularity = Granularity.PROGRAM
+    rollback_scope = RollbackScope.PROGRAM
+
+    def run(self, state, artifact, context) -> OracleOutput:
+        _ = state
+        _ = artifact
+        _ = context
+        return OracleOutput(
+            oracle_name=self.name,
+            verdict=Verdict.FAIL,
+            diagnostics=(Diagnostic(message="program mismatch"),),
+            realized_cost=1,
+        )
+
+
+class _ProgramRollbackThenGeneratePolicy:
+    def __init__(self) -> None:
+        self.stage = 0
+
+    def next_action(self, ctx) -> ControllerOp:
+        _ = ctx
+        if self.stage == 0:
+            self.stage = 1
+            return ControllerOp(Action.GENERATE)
+        if self.stage == 1:
+            self.stage = 2
+            return ControllerOp(Action.VERIFY, verification_granularity=Granularity.PROGRAM)
+        if self.stage == 2:
+            self.stage = 3
+            return ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.PROGRAM)
+        if self.stage == 3:
+            self.stage = 4
+            return ControllerOp(Action.GENERATE)
+        return ControllerOp(Action.TERMINATE)
+
+    def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
+        if selection_granularity is None:
+            raise ValueError("selection_granularity is required")
+        return select_oracles_by_granularity(
+            artifact,
+            budget,
+            available,
+            selection_granularity=selection_granularity,
+        )
 
 
 class _SingleStepPolicy:
@@ -128,37 +315,6 @@ class _SingleStepPolicy:
         if ctx.last_action in {Action.COMMIT, Action.ROLLBACK}:
             return ControllerOp(Action.TERMINATE)
         return ControllerOp(Action.GENERATE)
-
-    def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
-        if selection_granularity is None:
-            raise ValueError("selection_granularity is required")
-        return select_oracles_by_granularity(
-            artifact,
-            budget,
-            available,
-            selection_granularity=selection_granularity,
-        )
-
-
-class _TwoStepPolicy:
-    def __init__(self) -> None:
-        self.phase = 0
-
-    def next_action(self, ctx) -> ControllerOp:
-        if ctx.last_action is None:
-            return ControllerOp(Action.GENERATE)
-        if ctx.last_action == Action.GENERATE:
-            return ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT)
-        if ctx.last_action == Action.VERIFY:
-            if self.phase == 0:
-                self.phase += 1
-                return ControllerOp(Action.COMMIT)
-            return ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.STMT)
-        if ctx.last_action == Action.COMMIT:
-            return ControllerOp(Action.GENERATE)
-        if ctx.last_action == Action.ROLLBACK:
-            return ControllerOp(Action.TERMINATE)
-        return ControllerOp(Action.TERMINATE)
 
     def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
         if selection_granularity is None:
@@ -259,70 +415,6 @@ def test_function_oracle_receives_closed_function_name() -> None:
     )
 
 
-def test_loop_commits_with_rustc_oracle() -> None:
-    _rustc_path()
-    code = "fn foo() -> i32 { 1 }\n"
-    generator = _FakeGenerator(code=code)
-    renderer = _DummyRenderer()
-    oracles = [RustcOracle(timeout_s=5.0)]
-    budget = Budget(gen_tokens_budget=4)
-    feedback_state = FeedbackState()
-    rollback_manager = RollbackManager()
-    policy = _SingleStepPolicy()
-
-    _, trace = run_dtv_loop(
-        generator=generator,
-        renderer=renderer,
-        oracles=oracles,
-        budget=budget,
-        feedback_state=feedback_state,
-        rollback_manager=rollback_manager,
-        policy=policy,
-        max_steps=4,
-    )
-
-    assert trace
-    assert trace[-2].action == Action.COMMIT
-    assert any(
-        output.oracle_name == "rustc" and output.verdict == Verdict.PASS
-        for output in trace[-2].oracle_outputs
-    )
-    assert budget.oracle_calls.get("rustc") == 1
-    assert len(rollback_manager.stmt_checkpoints) == 1
-
-
-def test_loop_rolls_back_when_rustc_fail() -> None:
-    _rustc_path()
-    code = "fn foo() { let x = ; }\n"
-    generator = _FakeGenerator(code=code)
-    renderer = _DummyRenderer()
-    oracles = [RustcOracle(timeout_s=5.0)]
-    budget = Budget(gen_tokens_budget=4)
-    feedback_state = FeedbackState()
-    rollback_manager = RollbackManager()
-    policy = _SingleStepPolicy()
-
-    final_prefix, trace = run_dtv_loop(
-        generator=generator,
-        renderer=renderer,
-        oracles=oracles,
-        budget=budget,
-        feedback_state=feedback_state,
-        rollback_manager=rollback_manager,
-        policy=policy,
-        max_steps=4,
-    )
-
-    assert trace
-    assert trace[-2].action == Action.ROLLBACK
-    assert any(
-        output.oracle_name == "rustc" and output.verdict == Verdict.FAIL
-        for output in trace[-3].oracle_outputs
-    )
-    assert final_prefix == ""
-
-
-
 def test_commit_prefers_group_stack_over_events() -> None:
     generator = _FakeGenerator(code="let x = 1;\n")
     renderer = _GroupStackRenderer()
@@ -348,27 +440,39 @@ def test_commit_prefers_group_stack_over_events() -> None:
     assert [(f.kind, f.start_stmt) for f in rollback_manager.group_stack] == [(Granularity.FUNC, 0)]
 
 
-
-def test_loop_rolls_back_to_previous_checkpoint() -> None:
-    _rustc_path()
-    step1 = """\
-fn foo() -> i32 {
-  let a = 1;
-  if a == 0 {
-    let b = 2;
-"""
-    step2 = """\
-    return "str here";
-"""
-    generator = _SequenceGenerator([step1, step2])
-    renderer = CRustRenderer()
-    oracles = [RustcOracle(timeout_s=5.0)]
-    budget = Budget(gen_tokens_budget=4)
+@pytest.mark.parametrize(
+    "scope",
+    [
+        RollbackScope.STMT,
+        RollbackScope.BLOCK,
+        RollbackScope.FUNC,
+        RollbackScope.PROGRAM,
+    ],
+)
+def test_rollback_restores_inside_parser_state_for_all_scopes(scope: RollbackScope) -> None:
+    generator = _TrackingGenerator(
+        [
+            GenerateResult(
+                delta_text="bad\n",
+                delta_tokens=1,
+                stop_reason=StopReason(kind="boundary"),
+                assistant_delta=AssistantContent(
+                    pre_fence="Rust translation follows:\n",
+                    fence_lang="rust",
+                    code="bad\n",
+                    fence_state=FenceState.INSIDE,
+                ),
+            ),
+        ]
+    )
+    renderer = _DummyRenderer()
+    oracles = [_ScopeFailOracle(scope)]
+    budget = Budget(gen_tokens_budget=8)
     feedback_state = FeedbackState()
     rollback_manager = RollbackManager()
-    policy = _TwoStepPolicy()
+    policy = _RollbackScopePolicy(scope)
 
-    final_prefix, trace = run_dtv_loop(
+    run_dtv_loop(
         generator=generator,
         renderer=renderer,
         oracles=oracles,
@@ -376,11 +480,65 @@ fn foo() -> i32 {
         feedback_state=feedback_state,
         rollback_manager=rollback_manager,
         policy=policy,
-        max_steps=6,
+        max_steps=5,
     )
 
-    assert trace
-    assert any(event.action == Action.COMMIT for event in trace)
-    assert any(event.action == Action.ROLLBACK for event in trace)
-    assert final_prefix == step1
-    assert len(rollback_manager.stmt_checkpoints) == 1
+    assert rollback_manager.fence_anchor is not None
+    assert rollback_manager.fence_anchor.assistant_prefix.pre_fence == "Rust translation follows:\n"
+    assert generator.restored_states
+    restored = generator.restored_states[-1]
+    assert restored.extract.state == FenceState.INSIDE
+    assert restored.extract.saw_fence
+
+
+def test_program_rollback_then_generate_raises_with_feedback_payload() -> None:
+    generator = _TrackingGenerator(
+        [
+            GenerateResult(
+                delta_text="bad\n",
+                delta_tokens=1,
+                stop_reason=StopReason(kind="boundary"),
+                assistant_delta=AssistantContent(
+                    pre_fence="Here is the Rust translation:\n",
+                    fence_lang="rust",
+                    code="bad\n",
+                    fence_state=FenceState.INSIDE,
+                ),
+            ),
+            GenerateResult(
+                delta_text="good\n",
+                delta_tokens=1,
+                stop_reason=StopReason(kind="boundary"),
+                assistant_delta=AssistantContent(
+                    pre_fence="Here is the Rust translation:\n",
+                    fence_lang="rust",
+                    code="good\n",
+                    fence_state=FenceState.INSIDE,
+                ),
+            ),
+        ]
+    )
+    renderer = _DummyRenderer()
+    oracles = [_ProgramFailOracle()]
+    budget = Budget(gen_tokens_budget=8)
+    feedback_state = FeedbackState()
+    rollback_manager = RollbackManager()
+    policy = _ProgramRollbackThenGeneratePolicy()
+
+    with pytest.raises(RuntimeError, match="Action.GENERATE cannot include feedback payload"):
+        run_dtv_loop(
+            generator=generator,
+            renderer=renderer,
+            oracles=oracles,
+            budget=budget,
+            feedback_state=feedback_state,
+            rollback_manager=rollback_manager,
+            policy=policy,
+            max_steps=6,
+        )
+
+    assert rollback_manager.fence_anchor is not None
+    assert rollback_manager.fence_anchor.assistant_prefix.pre_fence == "Here is the Rust translation:\n"
+    assert generator.reset_calls == 0
+    assert generator.restored_states
+    assert generator.restored_states[-1].extract.state == FenceState.INSIDE
