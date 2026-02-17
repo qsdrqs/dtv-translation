@@ -43,6 +43,18 @@ class MockLLMBackend(GeneratorBackend):
         criteria = self.stop_criteria_factory(_CharTokenizer())
         return list(criteria) if criteria is not None else []
 
+    def _set_prompt_token_count(self) -> None:
+        prompt_token_count = len(self._token_ids)
+        for criterion in self._stop_criteria:
+            setter = getattr(criterion, "set_prompt_token_count", None)
+            if setter is None:
+                raise TypeError(
+                    "StoppingCriteria must implement set_prompt_token_count(prompt_token_count)"
+                )
+            if not callable(setter):
+                raise TypeError("set_prompt_token_count is not callable on StoppingCriteria")
+            setter(prompt_token_count)
+
     def generate_step(self, context: GenerateContext) -> GenerateResult:
         if self._cursor >= len(self._content):
             return GenerateResult(
@@ -57,6 +69,9 @@ class MockLLMBackend(GeneratorBackend):
                 delta_tokens=0,
                 stop_reason=StopReason(kind="max_length", detail=str(context.max_new_length)),
             )
+
+        if self._stop_criteria:
+            self._set_prompt_token_count()
 
         pieces: list[str] = []
         total_tokens = 0

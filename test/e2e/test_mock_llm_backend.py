@@ -123,6 +123,40 @@ def test_stop_criteria_block_comment_ignores_brace(tmp_path: Path) -> None:
 
     assert boundaries == [text.rfind("}")]
 
+
+def test_stop_criteria_tracks_prompt_after_parser_restore(tmp_path: Path) -> None:
+    text = (
+        "Here is the translated Rust code for the provided C code snippet:\n\n"
+        "```rust\n"
+        "use std::io::{self, Read};\n"
+        "fn main() {\n"
+        "    let value = 1;\n"
+        "    println!(\"{value}\");\n"
+        "}\n"
+        "```\n"
+    )
+    source_path = tmp_path / "template.md"
+    _write(source_path, text)
+
+    MockLLMBackend.configure(source_path=source_path, chunk_size=1)
+    fence_parser = FenceParser(allowed_langs=("rust", "rs"))
+    backend = MockLLMBackend(
+        model_name="mock",
+        stop_criteria_factory=lambda tok: [
+            DTVStoppingCriteria(tok, RUST_PROFILE, fence_parser=fence_parser)
+        ],
+    )
+    context = GenerateContext(messages=(), steps=0, max_new_length=1024, extract_fence=False)
+
+    first = backend.generate_step(context)
+    snapshot = fence_parser.capture()
+    fence_parser.restore(snapshot)
+    second = backend.generate_step(context)
+
+    assert first.stop_reason.kind == "boundary"
+    assert first.delta_text
+    assert second.delta_text
+
 def test_c_to_rust_translate_trap() -> None:
     base_dir = Path(__file__).resolve().parent / "c2rust" / "trap"
     c_source_path = base_dir / "trap_c_source.c"

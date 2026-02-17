@@ -424,8 +424,8 @@ def test_feedback_prompt_can_omit_failed_snippet() -> None:
     )
 
     assert any(event.action == Action.FEEDBACK for event in trace)
-    assert generator.seen_user_messages
-    feedback_prompt = generator.seen_user_messages[-1]
+    assert generator.seen_assistant_messages
+    feedback_prompt = generator.seen_assistant_messages[-1]
     assert "diagnostics:" in feedback_prompt
     assert "failed snippet:" not in feedback_prompt
 
@@ -498,6 +498,7 @@ second;
     feedback_events = [event for event in trace if event.action == Action.FEEDBACK]
     assert len(feedback_events) == 2
     assert all(event.notes == "feedback_mechanism=b" for event in feedback_events)
+    assert "The previous generated next code snippet was:" in generator.seen_user_messages[1]
     assert generator.seen_user_messages[-1].count("Previous parse error:") == 1
     assert "multiple fenced code blocks found" in generator.seen_user_messages[-1]
 

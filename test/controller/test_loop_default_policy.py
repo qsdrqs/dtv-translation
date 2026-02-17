@@ -175,7 +175,7 @@ def test_default_policy_pass_commits() -> None:
     assert final_prefix == "let x = 1;"
 
 
-def test_default_policy_retry_after_fail_raises_when_feedback_exists() -> None:
+def test_default_policy_retry_after_fail_without_feedback_retries_generate() -> None:
     generator = _SequenceGenerator([
         _Step("bad;", StopReason(kind="boundary")),
         _Step("good;", StopReason(kind="boundary")),
@@ -184,8 +184,18 @@ def test_default_policy_retry_after_fail_raises_when_feedback_exists() -> None:
     oracles = [_SequenceOracle([Verdict.FAIL, Verdict.PASS])]
     policy = DefaultPolicy(DefaultPolicyConfig(enable_feedback=False))
 
-    with pytest.raises(RuntimeError, match="Action.GENERATE cannot include feedback payload"):
-        _run_loop(generator, renderer, oracles, policy, max_steps=6)
+    final_prefix, trace = _run_loop(generator, renderer, oracles, policy, max_steps=6)
+
+    actions = [event.action for event in trace]
+    assert actions == [
+        Action.GENERATE,
+        Action.VERIFY,
+        Action.ROLLBACK,
+        Action.GENERATE,
+        Action.VERIFY,
+        Action.COMMIT,
+    ]
+    assert final_prefix == "good;"
 
 
 def test_default_policy_no_oracles_continue_then_generate() -> None:

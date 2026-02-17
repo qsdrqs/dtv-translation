@@ -233,7 +233,7 @@ fn main() {
         any(output.oracle_name == "rustc" and output.verdict == Verdict.PASS for output in event.oracle_outputs)
         for event in verify_events
     )
-    feedback_message = _FeedbackBackend.seen_user_messages[0]
+    feedback_message = _FeedbackBackend.seen_assistant_messages[0]
     assert "/* repair feedback:" in feedback_message
     assert "oracle=rustc" in feedback_message
     assert "failed snippet:" in feedback_message
@@ -306,7 +306,7 @@ fn main() {
         any(output.oracle_name == "program_diff" and output.verdict == Verdict.PASS for output in event.oracle_outputs)
         for event in verify_events
     )
-    feedback_message = _FeedbackBackend.seen_user_messages[0]
+    feedback_message = _FeedbackBackend.seen_assistant_messages[0]
     assert "/* repair feedback:" in feedback_message
     assert "oracle=program_diff" in feedback_message
     assert "stdout mismatch" in feedback_message

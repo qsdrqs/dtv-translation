@@ -36,7 +36,7 @@ from feedback.feedback import FeedbackState
 from feedback.output_parser import parse_feedback_output, validate_patch_scope
 from feedback.plan import render_feedback_prompt
 from feedback.repair_context import RepairContext
-from feedback.strategies import FeedbackStrategy, UserRoundRepair
+from feedback.strategies import AssistantInlineRepair, FeedbackStrategy, UserRoundRepair
 from rollback.manager import RollbackManager
 
 logger = get_logger(__name__)
@@ -167,6 +167,13 @@ def _policy_feedback_enabled(policy: Policy) -> bool:
     if config is not None and hasattr(config, "enable_feedback"):
         return bool(getattr(config, "enable_feedback"))
     return True
+
+
+def _feedback_strategy_for_mechanism(mechanism: FeedbackMechanism) -> FeedbackStrategy:
+    if mechanism == FeedbackMechanism.B:
+        return UserRoundRepair()
+    # Default to A
+    return AssistantInlineRepair()
 
 
 def _truncate(s: str, max_chars: int) -> str:
@@ -586,7 +593,6 @@ def _handle_feedback(
     feedback_generator: Generator | None,
     budget: Budget,
     feedback_state: FeedbackState,
-    feedback_strategy: FeedbackStrategy,
     repair_feedback_format_config: RepairFeedbackFormatConfig | None,
     trace: list[TraceEvent],
 ) -> None:
@@ -607,6 +613,7 @@ def _handle_feedback(
         feedback_gen.restore_output_extractor_state(runtime.repair_base_extractor_state)
     context.extract_fence = True
     mechanism = op.feedback_mechanism or FeedbackMechanism.A
+    feedback_strategy = _feedback_strategy_for_mechanism(mechanism)
     bad_snippet = _failed_snippet(runtime.repair_base_prefix, runtime.failed_prefix)
     repair_context = RepairContext.from_feedback_state(
         feedback_state,
@@ -748,7 +755,6 @@ def run_dtv_loop(
     rollback_manager: RollbackManager,
     policy: Policy,
     feedback_generator: Generator | None = None,
-    feedback_strategy: FeedbackStrategy | None = None,
     repair_feedback_format_config: RepairFeedbackFormatConfig | None = None,
     max_steps: int = 100,
     max_new_length: int = 1024,
@@ -764,8 +770,6 @@ def run_dtv_loop(
     - VERIFY performs render + oracle runs; render CONTINUE/FAIL yields no oracle outputs.
     - FEEDBACK requires a prior failed_prefix and a repair base from ROLLBACK.
     """
-    if feedback_strategy is None:
-        feedback_strategy = UserRoundRepair()
     if oracle_runner is None:
         oracle_runner = DummyOracleRunner()
     oracle_runner_impl: OracleRunner = oracle_runner
@@ -882,7 +886,6 @@ def run_dtv_loop(
                 feedback_generator,
                 budget,
                 feedback_state,
-                feedback_strategy,
                 repair_feedback_format_config,
                 trace,
             )

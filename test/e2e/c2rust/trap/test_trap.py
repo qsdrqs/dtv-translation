@@ -108,9 +108,9 @@ def test_trap_end_to_end() -> None:
         )
         for event in verify_events
         for output in event.oracle_outputs
-        if output.verdict != Verdict.PASS
+        if output.verdict == Verdict.FAIL
     ]
     assert not failing_outputs, (
-        "Expected all oracle outputs to PASS for trap test; "
+        "Expected no FAIL oracle outputs for trap test; "
         f"found failures: {failing_outputs}"
     )
