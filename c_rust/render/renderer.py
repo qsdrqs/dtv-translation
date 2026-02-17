@@ -62,9 +62,14 @@ class CRustRenderer:
         if not suffix.ok:
             return RenderResult(status=RenderStatus.CONTINUE, notes=suffix.notes)
 
-        code = prefix + suffix.suffix
+        code = prefix + suffix.content
         end_byte = len(prefix.rstrip().encode("utf-8"))
         tree = parse_rust(code)
+        if _cursor_needs_continuation(tree, prefix_end_byte=end_byte):
+            return RenderResult(
+                status=RenderStatus.CONTINUE,
+                notes=_with_note(suffix.notes, "render_continue:cursor_incomplete"),
+            )
         group_stack = rust_group_stack(
             tree,
             prefix_end_byte=end_byte,
@@ -79,3 +84,28 @@ class CRustRenderer:
             group_stack=group_stack,
         )
         return RenderResult(status=RenderStatus.OK, artifact=artifact, notes=suffix.notes)
+
+
+def _cursor_needs_continuation(tree, *, prefix_end_byte: int) -> bool:
+    for node in _walk_nodes(tree.root_node):
+        if node.is_missing and node.start_byte == prefix_end_byte:
+            return True
+        if node.type == "ERROR" and node.start_byte <= prefix_end_byte <= node.end_byte:
+            return True
+    return False
+
+
+def _walk_nodes(root):
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        yield node
+        children = node.children
+        if children:
+            stack.extend(reversed(children))
+
+
+def _with_note(notes: str, extra: str) -> str:
+    if notes:
+        return f"{notes},{extra}"
+    return extra

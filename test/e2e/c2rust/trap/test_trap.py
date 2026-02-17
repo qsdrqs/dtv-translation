@@ -11,7 +11,7 @@ from controller.policy import DefaultPolicy, DefaultPolicyConfig
 from controller.stop_criteria import DTVStoppingCriteria, RUST_PROFILE
 from core.budget import Budget
 from core.llm_output import FenceParser
-from core.types import TestCase, TranslationSample
+from core.types import Action, TestCase, TranslationSample, Verdict
 from feedback.feedback import FeedbackState
 from rollback.manager import RollbackManager
 from test.e2e.mock_llm_backend import MockLLMBackend
@@ -97,3 +97,20 @@ def test_trap_end_to_end() -> None:
     expected_rust = expected_rust_path.read_text(encoding="utf-8")
     assert final_prefix == expected_rust
     assert trace
+    verify_events = [event for event in trace if event.action == Action.VERIFY]
+    assert verify_events, "Expected at least one VERIFY event"
+    failing_outputs = [
+        (
+            event.step,
+            output.oracle_name,
+            output.verdict.value,
+            tuple(diag.message for diag in output.diagnostics),
+        )
+        for event in verify_events
+        for output in event.oracle_outputs
+        if output.verdict != Verdict.PASS
+    ]
+    assert not failing_outputs, (
+        "Expected all oracle outputs to PASS for trap test; "
+        f"found failures: {failing_outputs}"
+    )

@@ -14,6 +14,7 @@ from .diff_testing import (
 )
 from .enums import (
     Action,
+    FeedbackMechanism,
     FeedbackMode,
     Granularity,
     GroupEventAction,
@@ -30,6 +31,7 @@ __all__ = [
     "ComparisonResult",
     "ControllerState",
     "Diagnostic",
+    "FeedbackMechanism",
     "FeedbackMode",
     "ExecutionResult",
     "ExecutionTraceEvent",

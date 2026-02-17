@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from core.types import Diagnostic, RollbackScope
 from feedback.feedback import FeedbackState
+from feedback.repair_context import RepairContext
 
 
 @dataclass(frozen=True)
@@ -17,15 +18,22 @@ def build_repair_feedback(
     bad_snippet: str,
     format_config: RepairFeedbackFormatConfig | None = None,
 ) -> str:
+    repair_context = RepairContext.from_feedback_state(feedback_state, bad_snippet)
+    return render_repair_feedback(repair_context, format_config=format_config)
+
+
+def render_repair_feedback(
+    repair_context: RepairContext,
+    format_config: RepairFeedbackFormatConfig | None = None,
+) -> str:
     config = format_config or RepairFeedbackFormatConfig()
-    diagnostic_blocks = tuple(_iter_diagnostic_blocks(feedback_state))
+    diagnostic_blocks = tuple(_iter_diagnostic_blocks(repair_context))
     diagnostics_text = "\n".join(diagnostic_blocks) if diagnostic_blocks else "(no diagnostics)"
     sections: list[str] = []
     if config.include_failed_snippet:
-        snippet = bad_snippet.strip() or "(empty)"
         sections.append(
             f"""failed snippet:
-{snippet}"""
+{repair_context.failed_snippet}"""
         )
     sections.append(
         f"""diagnostics:
@@ -37,8 +45,8 @@ def build_repair_feedback(
 */"""
 
 
-def _iter_diagnostic_blocks(feedback_state: FeedbackState) -> Iterable[str]:
-    for output in feedback_state.recent_outputs:
+def _iter_diagnostic_blocks(repair_context: RepairContext) -> Iterable[str]:
+    for output in repair_context.outputs:
         for diag in output.diagnostics:
             header = _build_header(output.oracle_name, diag)
             hints = tuple(hint.strip() for hint in diag.hints if hint.strip())

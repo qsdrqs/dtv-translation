@@ -160,6 +160,25 @@ class _TwoStepPolicy:
         )
 
 
+class _GenerateVerifyTerminatePolicy:
+    def next_action(self, ctx) -> ControllerOp:
+        if ctx.last_action is None:
+            return ControllerOp(Action.GENERATE)
+        if ctx.last_action == Action.GENERATE:
+            return ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT)
+        return ControllerOp(Action.TERMINATE)
+
+    def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
+        if selection_granularity is None:
+            raise ValueError("selection_granularity is required")
+        return select_oracles_by_granularity(
+            artifact,
+            budget,
+            available,
+            selection_granularity=selection_granularity,
+        )
+
+
 def test_loop_commits_with_rustc_oracle() -> None:
     _rustc_path()
     code = "fn foo() -> i32 { 1 }\n"
@@ -258,3 +277,32 @@ fn foo() -> i32 {
     assert any(event.action == Action.ROLLBACK for event in trace)
     assert final_prefix == step1
     assert len(rollback_manager.stmt_checkpoints) == 1
+
+
+def test_loop_incomplete_use_item_returns_continue_without_oracle_runs() -> None:
+    _rustc_path()
+    generator = _FakeGenerator(code="use std::io::{self, Read}")
+    renderer = CRustRenderer()
+    oracles = [RustcOracle(timeout_s=5.0)]
+    budget = Budget(gen_tokens_budget=4)
+    feedback_state = FeedbackState()
+    rollback_manager = RollbackManager()
+    policy = _GenerateVerifyTerminatePolicy()
+
+    _, trace = run_dtv_loop(
+        generator=generator,
+        renderer=renderer,
+        oracles=oracles,
+        budget=budget,
+        feedback_state=feedback_state,
+        rollback_manager=rollback_manager,
+        policy=policy,
+        max_steps=3,
+    )
+
+    verify_events = [event for event in trace if event.action == Action.VERIFY]
+    assert len(verify_events) == 1
+    verify_event = verify_events[0]
+    assert verify_event.render_status == RenderStatus.CONTINUE
+    assert verify_event.oracle_outputs == ()
+    assert "render_continue:cursor_incomplete" in verify_event.notes

@@ -84,6 +84,38 @@ fn foo() {
     result = _render(prefix)
     assert result.status == RenderStatus.CONTINUE
 
+
+def test_top_level_use_without_semicolon_continues() -> None:
+    prefix = "use std::io::{self, Read}"
+    result = _render(prefix)
+
+    assert result.status == RenderStatus.CONTINUE
+    assert "render_continue:cursor_incomplete" in result.notes
+
+
+def test_top_level_use_with_semicolon_compiles() -> None:
+    prefix = "use std::io::{self, Read};"
+    result = _render(prefix)
+
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_non_cursor_syntax_error_remains_ok_for_oracle_detection() -> None:
+    prefix = """\
+fn foo() {
+    let x = ;
+    let y = 1;
+"""
+    result = _render(prefix)
+
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = compile_rust(result.artifact.code)
+    assert not compile.ok
+
 def test_expression_if_missing_else_after_consequence_closed_compiles() -> None:
     # The `if` is in a value context (return), but its consequence block is already
     # closed in the prefix. Renderer should append the `else` as a head insertion

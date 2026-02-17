@@ -32,11 +32,13 @@ from rollback.manager import RollbackManager
 class _ScriptedBackend(GeneratorBackend):
     scripts: ClassVar[tuple[str, ...]] = ()
     seen_assistant_messages: ClassVar[list[str]] = []
+    seen_user_messages: ClassVar[list[str]] = []
 
     @classmethod
     def configure(cls, scripts: tuple[str, ...]) -> None:
         cls.scripts = scripts
         cls.seen_assistant_messages = []
+        cls.seen_user_messages = []
 
     def __init__(self, model_name: str, stop_criteria_factory=None) -> None:
         super().__init__(model_name=model_name, stop_criteria_factory=stop_criteria_factory)
@@ -44,6 +46,7 @@ class _ScriptedBackend(GeneratorBackend):
 
     def generate_step(self, context: GenerateContext) -> GenerateResult:
         self.__class__.seen_assistant_messages.append(_last_assistant_message(context))
+        self.__class__.seen_user_messages.append(_last_user_message(context))
         if self._index >= len(self.__class__.scripts):
             return GenerateResult(
                 delta_text="",
@@ -84,6 +87,15 @@ def _last_assistant_message(context: GenerateContext) -> str:
         if isinstance(content, AssistantContent):
             return content.render()
         return str(content)
+    return ""
+
+
+def _last_user_message(context: GenerateContext) -> str:
+    for message in reversed(context.messages):
+        role = getattr(message, "role", None)
+        if role != "user":
+            continue
+        return str(getattr(message, "content", ""))
     return ""
 
 
@@ -221,7 +233,7 @@ fn main() {
         any(output.oracle_name == "rustc" and output.verdict == Verdict.PASS for output in event.oracle_outputs)
         for event in verify_events
     )
-    feedback_message = _FeedbackBackend.seen_assistant_messages[0]
+    feedback_message = _FeedbackBackend.seen_user_messages[0]
     assert "/* repair feedback:" in feedback_message
     assert "oracle=rustc" in feedback_message
     assert "failed snippet:" in feedback_message
@@ -294,7 +306,7 @@ fn main() {
         any(output.oracle_name == "program_diff" and output.verdict == Verdict.PASS for output in event.oracle_outputs)
         for event in verify_events
     )
-    feedback_message = _FeedbackBackend.seen_assistant_messages[0]
+    feedback_message = _FeedbackBackend.seen_user_messages[0]
     assert "/* repair feedback:" in feedback_message
     assert "oracle=program_diff" in feedback_message
     assert "stdout mismatch" in feedback_message

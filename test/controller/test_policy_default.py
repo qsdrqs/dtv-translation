@@ -7,6 +7,8 @@ from core.types import (
     Action,
     Artifact,
     ControllerState,
+    Diagnostic,
+    FeedbackMechanism,
     Granularity,
     OracleOutput,
     RenderStatus,
@@ -26,6 +28,9 @@ def _ctx(
     last_outputs: tuple[OracleOutput, ...] = (),
     last_artifact: Artifact | None = None,
     budget: Budget | None = None,
+    failed_prefix: str | None = None,
+    pending_patch: str | None = None,
+    repair_base_prefix: str | None = None,
 ) -> PolicyContext:
     return PolicyContext(
         state=ControllerState(prefix=prefix),
@@ -36,9 +41,9 @@ def _ctx(
         last_render_status=last_render_status,
         last_artifact=last_artifact,
         last_outputs=last_outputs,
-        failed_prefix=None,
-        pending_patch=None,
-        repair_base_prefix=None,
+        failed_prefix=failed_prefix,
+        pending_patch=pending_patch,
+        repair_base_prefix=repair_base_prefix,
     )
 
 
@@ -46,6 +51,17 @@ def _outputs(*verdicts: Verdict) -> tuple[OracleOutput, ...]:
     return tuple(
         OracleOutput(oracle_name=f"oracle_{idx}", verdict=verdict)
         for idx, verdict in enumerate(verdicts)
+    )
+
+
+def _fail_outputs(*, scope: RollbackScope = RollbackScope.STMT) -> tuple[OracleOutput, ...]:
+    return (
+        OracleOutput(
+            oracle_name="oracle_0",
+            verdict=Verdict.FAIL,
+            diagnostics=(Diagnostic(message="type mismatch", severity="error"),),
+            rollback_scope=scope,
+        ),
     )
 
 
@@ -171,3 +187,76 @@ def test_default_policy_eos_no_oracles_commits_then_terminates() -> None:
     )
     op = policy.next_action(ctx_commit)
     assert op.action == Action.TERMINATE
+
+
+def test_default_policy_feedback_starts_with_mechanism_a() -> None:
+    policy = DefaultPolicy()
+    ctx = _ctx(
+        prefix="bad;",
+        last_action=Action.ROLLBACK,
+        failed_prefix="bad;",
+        repair_base_prefix="",
+    )
+
+    op = policy.next_action(ctx)
+
+    assert op.action == Action.FEEDBACK
+    assert op.feedback_mechanism == FeedbackMechanism.A
+
+
+def test_default_policy_feedback_escalates_to_mechanism_b_after_no_progress() -> None:
+    policy = DefaultPolicy(DefaultPolicyConfig(max_repair_rounds=4))
+
+    initial_verify_fail_ctx = _ctx(
+        prefix="bad;",
+        last_action=Action.VERIFY,
+        last_render_status=RenderStatus.OK,
+        last_outputs=_fail_outputs(scope=RollbackScope.STMT),
+    )
+    initial_rollback_op = policy.next_action(initial_verify_fail_ctx)
+    assert initial_rollback_op.action == Action.ROLLBACK
+
+    first_feedback_ctx = _ctx(
+        prefix="bad;",
+        last_action=Action.ROLLBACK,
+        failed_prefix="bad;",
+        repair_base_prefix="",
+    )
+    first_op = policy.next_action(first_feedback_ctx)
+    assert first_op.action == Action.FEEDBACK
+    assert first_op.feedback_mechanism == FeedbackMechanism.A
+
+    retry_verify_fail_ctx = _ctx(
+        prefix="bad;",
+        last_action=Action.VERIFY,
+        last_render_status=RenderStatus.OK,
+        last_outputs=_fail_outputs(scope=RollbackScope.STMT),
+    )
+    rollback_op = policy.next_action(retry_verify_fail_ctx)
+    assert rollback_op.action == Action.ROLLBACK
+
+    second_feedback_ctx = _ctx(
+        prefix="",
+        last_action=Action.ROLLBACK,
+        failed_prefix="bad;",
+        repair_base_prefix="",
+    )
+    second_op = policy.next_action(second_feedback_ctx)
+
+    assert second_op.action == Action.FEEDBACK
+    assert second_op.feedback_mechanism == FeedbackMechanism.B
+
+
+def test_default_policy_feedback_force_mechanism_b() -> None:
+    policy = DefaultPolicy(DefaultPolicyConfig(feedback_force_mechanism=FeedbackMechanism.B))
+    ctx = _ctx(
+        prefix="bad;",
+        last_action=Action.ROLLBACK,
+        failed_prefix="bad;",
+        repair_base_prefix="",
+    )
+
+    op = policy.next_action(ctx)
+
+    assert op.action == Action.FEEDBACK
+    assert op.feedback_mechanism == FeedbackMechanism.B

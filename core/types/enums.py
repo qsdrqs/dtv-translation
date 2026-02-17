@@ -74,4 +74,9 @@ class FeedbackMode(str, Enum):
     FENCED = "fenced"
 
 
+class FeedbackMechanism(str, Enum):
+    A = "a"
+    B = "b"
+
+
 RollbackScope = Granularity

@@ -17,6 +17,7 @@ from core.types import (
     Action,
     Artifact,
     ControllerState,
+    FeedbackMechanism,
     FeedbackMode,
     GenerateContext,
     GenerateMessage,
@@ -30,9 +31,12 @@ from core.types import (
     TraceEvent,
     Verdict,
 )
-from feedback.formatter import RepairFeedbackFormatConfig, build_repair_feedback
+from feedback.formatter import RepairFeedbackFormatConfig, render_repair_feedback
 from feedback.feedback import FeedbackState
-from feedback.strategies import AppendToLastAssistant, FeedbackStrategy
+from feedback.output_parser import parse_feedback_output, validate_patch_scope
+from feedback.plan import render_feedback_prompt
+from feedback.repair_context import RepairContext
+from feedback.strategies import FeedbackStrategy, UserRoundRepair
 from rollback.manager import RollbackManager
 
 logger = get_logger(__name__)
@@ -43,6 +47,7 @@ class ControllerOp:
     verification_granularity: Granularity | None = None
     rollback_scope: RollbackScope | None = None
     feedback_mode: FeedbackMode | None = None
+    feedback_mechanism: FeedbackMechanism | None = None
 
 
 @dataclass(frozen=True)
@@ -80,6 +85,9 @@ class ControllerRuntime:
     repair_base_prefix: str | None = None
     repair_base_assistant_prefix: AssistantContent | None = None
     repair_base_extractor_state: OutputExtractorState | None = None
+    repair_scope: RollbackScope | None = None
+    feedback_parser_error: str | None = None
+    last_feedback_mechanism: FeedbackMechanism | None = None
 
 
 class Policy(Protocol):
@@ -154,6 +162,13 @@ def _remaining_tokens(budget: Budget) -> int:
     return max(0, budget.gen_tokens_budget - budget.gen_tokens_used)
 
 
+def _policy_feedback_enabled(policy: Policy) -> bool:
+    config = getattr(policy, "config", None)
+    if config is not None and hasattr(config, "enable_feedback"):
+        return bool(getattr(config, "enable_feedback"))
+    return True
+
+
 def _truncate(s: str, max_chars: int) -> str:
     if len(s) <= max_chars:
         return s
@@ -174,6 +189,8 @@ def _clear_repair_context(runtime: ControllerRuntime) -> None:
     runtime.repair_base_prefix = None
     runtime.repair_base_assistant_prefix = None
     runtime.repair_base_extractor_state = None
+    runtime.repair_scope = None
+    runtime.feedback_parser_error = None
 
 
 def _fence_start_only(content: AssistantContent | None) -> AssistantContent:
@@ -288,12 +305,18 @@ def _handle_generate(
     generator: Generator,
     budget: Budget,
     feedback_state: FeedbackState,
+    feedback_enabled: bool,
     rollback_manager: RollbackManager,
     trace: list[TraceEvent],
 ) -> None:
     context.extract_fence = True
     feedback = feedback_state.encode()
-    if feedback:
+    if (
+        feedback_enabled
+        and feedback
+        and runtime.failed_prefix is not None
+        and runtime.repair_base_prefix is not None
+    ):
         raise RuntimeError("Action.GENERATE cannot include feedback payload; use Action.FEEDBACK")
     if runtime.extractor_state is None:
         runtime.extractor_state = generator.capture_output_extractor_state()
@@ -344,6 +367,7 @@ def _handle_verify(
     oracle_runner: OracleRunner,
     budget: Budget,
     feedback_state: FeedbackState,
+    feedback_enabled: bool,
     trace: list[TraceEvent],
 ) -> None:
     if op.verification_granularity is None:
@@ -420,7 +444,8 @@ def _handle_verify(
                             output.oracle_name,
                             f"...<omitted {len(output.diagnostics) - max_items} diagnostics>",
                         )
-            feedback_state.update(outputs)
+            if feedback_enabled:
+                feedback_state.update(outputs)
         else:
             notes = notes or "no oracles selected"
     else:
@@ -429,13 +454,16 @@ def _handle_verify(
     runtime.last_verification_granularity = effective_granularity
 
     # Handle repair context based on oracle verdicts
-    if outputs:
-        if any(out.verdict == Verdict.FAIL for out in outputs):
-            runtime.failed_prefix = runtime.state.prefix
-            runtime.failed_assistant_prefix = runtime.assistant_prefix
-            runtime.failed_extractor_state = runtime.extractor_state
-        elif all(out.verdict == Verdict.PASS for out in outputs):
-            _clear_repair_context(runtime)
+    if feedback_enabled:
+        if outputs:
+            if any(out.verdict == Verdict.FAIL for out in outputs):
+                runtime.failed_prefix = runtime.state.prefix
+                runtime.failed_assistant_prefix = runtime.assistant_prefix
+                runtime.failed_extractor_state = runtime.extractor_state
+            elif all(out.verdict == Verdict.PASS for out in outputs):
+                _clear_repair_context(runtime)
+    else:
+        _clear_repair_context(runtime)
     runtime.last_action = Action.VERIFY
 
     _append_trace(
@@ -493,6 +521,7 @@ def _handle_rollback(
     generator: Generator,
     rollback_manager: RollbackManager,
     feedback_state: FeedbackState,
+    feedback_enabled: bool,
     budget: Budget,
     trace: list[TraceEvent],
 ) -> None:
@@ -515,11 +544,15 @@ def _handle_rollback(
     elif runtime.extractor_state is None:
         runtime.extractor_state = generator.capture_output_extractor_state()
     generator.restore_output_extractor_state(runtime.extractor_state)
-    feedback_state.update(list(runtime.last_outputs), selected_scope=op.rollback_scope)
-    runtime.pending_patch = None
-    runtime.repair_base_prefix = runtime.state.prefix
-    runtime.repair_base_assistant_prefix = runtime.assistant_prefix
-    runtime.repair_base_extractor_state = runtime.extractor_state
+    if feedback_enabled:
+        feedback_state.update(list(runtime.last_outputs), selected_scope=op.rollback_scope)
+        runtime.pending_patch = None
+        runtime.repair_base_prefix = runtime.state.prefix
+        runtime.repair_base_assistant_prefix = runtime.assistant_prefix
+        runtime.repair_base_extractor_state = runtime.extractor_state
+        runtime.repair_scope = op.rollback_scope
+    else:
+        _clear_repair_context(runtime)
     runtime.last_render_status = None
     runtime.last_artifact = None
     runtime.last_outputs = ()
@@ -573,12 +606,18 @@ def _handle_feedback(
     else:
         feedback_gen.restore_output_extractor_state(runtime.repair_base_extractor_state)
     context.extract_fence = True
+    mechanism = op.feedback_mechanism or FeedbackMechanism.A
     bad_snippet = _failed_snippet(runtime.repair_base_prefix, runtime.failed_prefix)
-    repair_feedback = build_repair_feedback(
+    repair_context = RepairContext.from_feedback_state(
         feedback_state,
         bad_snippet,
-        format_config=repair_feedback_format_config,
+        repair_scope=runtime.repair_scope or RollbackScope.STMT,
+        parser_error_context=runtime.feedback_parser_error,
     )
+    if mechanism == FeedbackMechanism.A:
+        repair_feedback = render_repair_feedback(repair_context, format_config=repair_feedback_format_config)
+    else:
+        repair_feedback = render_feedback_prompt(repair_context)
     update_last_assistant(base_messages, runtime.repair_base_assistant_prefix)
     context.messages = feedback_strategy.apply(
         base_messages,
@@ -588,16 +627,32 @@ def _handle_feedback(
     result = feedback_gen.generate_step(context)
     if feedback_gen is generator:
         generator.restore_output_extractor_state(runtime.repair_base_extractor_state)
-    runtime.pending_patch = result.delta_text
+    if mechanism == FeedbackMechanism.B:
+        parse_result = parse_feedback_output(result.delta_text)
+        scope = runtime.repair_scope or RollbackScope.STMT
+        scope_error = None
+        if parse_result.patch is not None:
+            scope_error = validate_patch_scope(parse_result.patch, scope)
+        runtime.pending_patch = parse_result.patch
+        runtime.feedback_parser_error = parse_result.error or scope_error
+        if runtime.feedback_parser_error is not None:
+            runtime.pending_patch = None
+    else:
+        runtime.pending_patch = result.delta_text
+        runtime.feedback_parser_error = None
+    runtime.last_feedback_mechanism = mechanism
     budget.add_tokens(result.delta_tokens)
     runtime.last_stop_reason = result.stop_reason
     runtime.last_action = Action.FEEDBACK
+    patch_len = len(runtime.pending_patch) if runtime.pending_patch is not None else 0
     logger.info(
-        "feedback: step=%s delta_tokens=%s stop_reason=%s patch_len=%s",
+        "feedback: step=%s mechanism=%s delta_tokens=%s stop_reason=%s patch_len=%s parse_error=%s",
         runtime.state.step,
+        mechanism,
         result.delta_tokens,
         result.stop_reason.kind,
-        len(runtime.pending_patch),
+        patch_len,
+        runtime.feedback_parser_error,
     )
     _append_trace(
         trace,
@@ -606,6 +661,7 @@ def _handle_feedback(
         action=Action.FEEDBACK,
         verification_granularity=None,
         budget=budget,
+        notes=f"feedback_mechanism={mechanism.value}",
     )
 
 
@@ -709,10 +765,11 @@ def run_dtv_loop(
     - FEEDBACK requires a prior failed_prefix and a repair base from ROLLBACK.
     """
     if feedback_strategy is None:
-        feedback_strategy = AppendToLastAssistant()
+        feedback_strategy = UserRoundRepair()
     if oracle_runner is None:
         oracle_runner = DummyOracleRunner()
     oracle_runner_impl: OracleRunner = oracle_runner
+    feedback_enabled = _policy_feedback_enabled(policy)
 
     runtime = ControllerRuntime(state=ControllerState(prefix=""))
     runtime.extractor_state = generator.capture_output_extractor_state()
@@ -742,12 +799,13 @@ def run_dtv_loop(
         )
         op = policy.next_action(ctx)
         logger.info(
-            "policy: step=%s action=%s verification_granularity=%s rollback_scope=%s feedback_mode=%s tokens_used=%s tokens_left=%s",
+            "policy: step=%s action=%s verification_granularity=%s rollback_scope=%s feedback_mode=%s feedback_mechanism=%s tokens_used=%s tokens_left=%s",
             runtime.state.step,
             op.action,
             op.verification_granularity,
             op.rollback_scope,
             op.feedback_mode,
+            op.feedback_mechanism,
             budget.gen_tokens_used,
             _remaining_tokens(budget),
         )
@@ -766,6 +824,7 @@ def run_dtv_loop(
                 generator,
                 budget,
                 feedback_state,
+                feedback_enabled,
                 rollback_manager,
                 trace,
             )
@@ -788,6 +847,7 @@ def run_dtv_loop(
                 oracle_runner_impl,
                 budget,
                 feedback_state,
+                feedback_enabled,
                 trace,
             )
             runtime.state.step += 1
@@ -799,7 +859,16 @@ def run_dtv_loop(
             continue
 
         if op.action == Action.ROLLBACK:
-            _handle_rollback(runtime, op, generator, rollback_manager, feedback_state, budget, trace)
+            _handle_rollback(
+                runtime,
+                op,
+                generator,
+                rollback_manager,
+                feedback_state,
+                feedback_enabled,
+                budget,
+                trace,
+            )
             runtime.state.step += 1
             continue
 

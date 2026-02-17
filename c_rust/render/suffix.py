@@ -10,7 +10,7 @@ from c_rust.render.scan import ClosePlan
 class SuffixResult:
     """Rendered suffix for closing a prefix."""
     ok: bool
-    suffix: str = ""  # Text to append to the prefix.
+    content: str = ""  # Text to append to the prefix.
     notes: str = ""  # Reason for failure if ok is False.
 
 
@@ -32,4 +32,4 @@ def create_plan(prefix: str, close_plan: ClosePlan) -> PatchPlan:
 
 
 def plan_to_suffix(plan: PatchPlan) -> SuffixResult:
-    return SuffixResult(ok=True, suffix=plan.render(), notes=",".join(plan.notes))
+    return SuffixResult(ok=True, content=plan.render(), notes=",".join(plan.notes))
