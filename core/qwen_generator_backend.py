@@ -30,7 +30,7 @@ class QwenGeneratorBackend(GeneratorBackend):
         model_kwargs: dict[str, object] = {}
         if use_cuda:
             model_kwargs["device_map"] = "auto"
-            model_kwargs["torch_dtype"] = (
+            model_kwargs["dtype"] = (
                 torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
             )
         self.tokenizer = transformers.AutoTokenizer.from_pretrained(model_name)
@@ -106,6 +106,7 @@ class QwenGeneratorBackend(GeneratorBackend):
             setter(prompt_token_count)
         outputs = self.model.generate(
             inputs.input_ids,
+            attention_mask=inputs.attention_mask,
             max_new_tokens=context.max_new_length,
             stopping_criteria=self.stop_criteria,
         )
