@@ -123,10 +123,29 @@ def select_oracles_by_granularity(
     selected: list[Oracle] = []
     for oracle in available:
         if actual_granularity < oracle.required_granularity:
+            logger.info(
+                "oracle skipped: name=%s reason=boundary_too_shallow actual=%s required=%s",
+                oracle.name,
+                actual_granularity,
+                oracle.required_granularity,
+            )
             continue
         if min_granularity is not None and oracle.required_granularity < min_granularity:
+            logger.info(
+                "oracle skipped: name=%s reason=below_policy_min required=%s min=%s",
+                oracle.name,
+                oracle.required_granularity,
+                min_granularity,
+            )
             continue
         selected.append(oracle)
+        logger.info(
+            "oracle selected: name=%s actual=%s required=%s min=%s",
+            oracle.name,
+            actual_granularity,
+            oracle.required_granularity,
+            min_granularity,
+        )
     return selected
 
 
@@ -479,6 +498,12 @@ def _handle_verify(
                             output.oracle_name,
                             f"...<omitted {len(output.diagnostics) - max_items} diagnostics>",
                         )
+                if output.verdict == Verdict.NOT_APPLICABLE and output.diagnostics:
+                    logger.info(
+                        "oracle_not_applicable: oracle=%s reason=%s",
+                        output.oracle_name,
+                        _truncate(output.diagnostics[0].message, 800),
+                    )
             if feedback_enabled:
                 feedback_state.update(outputs)
         else:

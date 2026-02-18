@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from core.interfaces import Oracle
+from core.logger import get_logger
 from core.toolchain import env_with_pinned_rustup_toolchain
 from core.types import (
     Artifact,
@@ -48,6 +49,9 @@ from core.types import ExecutionResult, ExecutionTraceEvent, TraceEventKind, Tra
 from c_rust.oracles.program_diff_test_oracle.execution_driver import run_binary
 
 
+logger = get_logger(__name__)
+
+
 class FunctionOracle(Oracle):
     """
     Function-level differential oracle with trace-based comparison.
@@ -73,8 +77,20 @@ class FunctionOracle(Oracle):
         """Run differential tests against the C reference with trace comparison."""
         sample = _extract_sample(artifact)
         requested_name = context.closed_function_name
+        logger.info(
+            "function_diff start: requested_function=%s closed_stack=%s has_sample=%s test_cases=%s",
+            requested_name,
+            len(context.closed_stack),
+            sample is not None,
+            len(sample.test_cases) if sample is not None else 0,
+        )
         validation = _validate_sample(sample, requested_name, self.name)
         if validation is not None:
+            logger.info(
+                "function_diff early return: verdict=%s reason=%s",
+                validation.verdict,
+                _first_diagnostic_message(validation),
+            )
             return validation
         assert sample is not None
         assert requested_name is not None
@@ -82,6 +98,12 @@ class FunctionOracle(Oracle):
         c_candidates = list_c_function_names(sample.source_code)
         c_function_name, c_reason = _resolve_function_name(requested_name, c_candidates, "C")
         if c_function_name is None:
+            logger.info(
+                "function_diff not applicable: requested=%s c_candidates=%s reason=%s",
+                requested_name,
+                len(c_candidates),
+                c_reason,
+            )
             return OracleOutput(
                 oracle_name=self.name,
                 verdict=Verdict.NOT_APPLICABLE,
@@ -92,6 +114,12 @@ class FunctionOracle(Oracle):
         rust_candidates = list_rust_function_names(artifact.code)
         rust_function_name, rust_reason = _resolve_function_name(requested_name, rust_candidates, "Rust")
         if rust_function_name is None:
+            logger.info(
+                "function_diff not applicable: requested=%s rust_candidates=%s reason=%s",
+                requested_name,
+                len(rust_candidates),
+                rust_reason,
+            )
             return OracleOutput(
                 oracle_name=self.name,
                 verdict=Verdict.NOT_APPLICABLE,
@@ -101,6 +129,10 @@ class FunctionOracle(Oracle):
 
         c_info = find_c_function_info(sample.source_code, c_function_name)
         if c_info is None or c_info.signature is None:
+            logger.info(
+                "function_diff not applicable: C signature missing for function=%s",
+                c_function_name,
+            )
             return OracleOutput(
                 oracle_name=self.name,
                 verdict=Verdict.NOT_APPLICABLE,
@@ -108,6 +140,10 @@ class FunctionOracle(Oracle):
                 realized_cost=0,
             )
         if c_info.is_static:
+            logger.info(
+                "function_diff not applicable: C function is static (%s)",
+                c_function_name,
+            )
             return OracleOutput(
                 oracle_name=self.name,
                 verdict=Verdict.NOT_APPLICABLE,
@@ -117,6 +153,10 @@ class FunctionOracle(Oracle):
 
         rust_sig = extract_rust_signature(artifact.code, rust_function_name)
         if rust_sig is None:
+            logger.info(
+                "function_diff not applicable: Rust signature missing for function=%s",
+                rust_function_name,
+            )
             return OracleOutput(
                 oracle_name=self.name,
                 verdict=Verdict.NOT_APPLICABLE,
@@ -134,6 +174,11 @@ class FunctionOracle(Oracle):
             rust_sig,
         )
         if prepare_err is not None:
+            logger.info(
+                "function_diff preparation return: verdict=%s reason=%s",
+                prepare_err.verdict,
+                _first_diagnostic_message(prepare_err),
+            )
             return prepare_err
         assert prepared is not None
 
@@ -154,11 +199,16 @@ class FunctionOracle(Oracle):
                 function_name=c_function_name,
             )
             if compile_err is not None:
+                logger.info(
+                    "function_diff compile return: verdict=%s reason=%s",
+                    compile_err.verdict,
+                    _first_diagnostic_message(compile_err),
+                )
                 return compile_err
             assert compiled is not None
 
             c_binary, cdylib_path = compiled
-            return _run_tests_and_compare(
+            output = _run_tests_and_compare(
                 oracle_name=self.name,
                 sample=sample,
                 c_function_name=c_function_name,
@@ -167,6 +217,20 @@ class FunctionOracle(Oracle):
                 cdylib_path=cdylib_path,
                 run_timeout_s=self.run_timeout_s,
             )
+            logger.info(
+                "function_diff finish: verdict=%s diagnostics=%s first=%s cost=%s",
+                output.verdict,
+                len(output.diagnostics),
+                _first_diagnostic_message(output),
+                output.realized_cost,
+            )
+            return output
+
+
+def _first_diagnostic_message(output: OracleOutput) -> str:
+    if not output.diagnostics:
+        return ""
+    return output.diagnostics[0].message
 
 
 @dataclass(frozen=True)

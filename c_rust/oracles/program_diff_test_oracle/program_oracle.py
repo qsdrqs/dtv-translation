@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 
 from core.interfaces import Oracle
+from core.logger import get_logger
 from core.types import (
     Artifact,
     ControllerState,
@@ -18,6 +19,9 @@ from core.types import (
 )
 from core.types import Mismatch, TestCase, TranslationSample
 from c_rust.oracles.program_diff_test_oracle.execution_driver import compile_and_run
+
+
+logger = get_logger(__name__)
 
 
 class ProgramOracle(Oracle):
@@ -45,7 +49,14 @@ class ProgramOracle(Oracle):
         """Run differential tests against the C reference."""
         _ = context
         sample = _extract_sample(artifact)
+        logger.info(
+            "program_diff start: has_sample=%s test_cases=%s code_len=%s",
+            sample is not None,
+            len(sample.test_cases) if sample is not None else 0,
+            len(artifact.code),
+        )
         if sample is None:
+            logger.info("program_diff not applicable: no sample data")
             return OracleOutput(
                 oracle_name=self.name,
                 verdict=Verdict.NOT_APPLICABLE,
@@ -54,6 +65,7 @@ class ProgramOracle(Oracle):
             )
 
         if not sample.test_cases:
+            logger.info("program_diff not applicable: no test cases")
             return OracleOutput(
                 oracle_name=self.name,
                 verdict=Verdict.NOT_APPLICABLE,
@@ -78,6 +90,7 @@ class ProgramOracle(Oracle):
             )
 
             if c_compile_result.timed_out:
+                logger.info("program_diff fail: C compile timeout")
                 return OracleOutput(
                     oracle_name=self.name,
                     verdict=Verdict.FAIL,
@@ -91,6 +104,7 @@ class ProgramOracle(Oracle):
                 )
 
             if c_compile_result.compilation_failed:
+                logger.info("program_diff fail: C compile failed")
                 return OracleOutput(
                     oracle_name=self.name,
                     verdict=Verdict.FAIL,
@@ -115,6 +129,7 @@ class ProgramOracle(Oracle):
             )
 
             if rust_compile_result.timed_out:
+                logger.info("program_diff fail: Rust compile timeout")
                 return OracleOutput(
                     oracle_name=self.name,
                     verdict=Verdict.FAIL,
@@ -128,6 +143,7 @@ class ProgramOracle(Oracle):
                 )
 
             if rust_compile_result.compilation_failed:
+                logger.info("program_diff fail: Rust compile failed")
                 return OracleOutput(
                     oracle_name=self.name,
                     verdict=Verdict.FAIL,
@@ -150,6 +166,11 @@ class ProgramOracle(Oracle):
             cost = 1 + len(sample.test_cases) * 2  # Rust compile + 2 executions per test.
 
             if mismatches:
+                logger.info(
+                    "program_diff fail: mismatches=%s first=%s",
+                    len(mismatches),
+                    mismatches[0].message,
+                )
                 diagnostics = _mismatches_to_diagnostics(mismatches)
                 return OracleOutput(
                     oracle_name=self.name,
@@ -158,6 +179,11 @@ class ProgramOracle(Oracle):
                     realized_cost=cost,
                 )
 
+            logger.info(
+                "program_diff pass: tests=%s realized_cost=%s",
+                len(sample.test_cases),
+                cost,
+            )
             return OracleOutput(
                 oracle_name=self.name,
                 verdict=Verdict.PASS,
