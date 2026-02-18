@@ -57,6 +57,7 @@ class _RepairScheduleState:
     last_fail_signature: str | None = None
     last_fail_scope: RollbackScope | None = None
     last_error_count: int = 0
+    locked_mechanism: FeedbackMechanism | None = None
 
 
 @dataclass(frozen=True)
@@ -207,7 +208,11 @@ class DefaultPolicy(Policy):
         schedule_state: _RepairScheduleState,
         tokens_left: int,
     ) -> FeedbackMechanism | None:
-        if self.config.feedback_force_mechanism is not None:
+        allow_fallback = True
+        if schedule_state.locked_mechanism is not None:
+            preferred = schedule_state.locked_mechanism
+            allow_fallback = False
+        elif self.config.feedback_force_mechanism is not None:
             preferred = self.config.feedback_force_mechanism
         elif schedule_state.a_rounds == 0 and schedule_state.b_rounds == 0:
             preferred = self.config.feedback_default_mechanism
@@ -216,7 +221,7 @@ class DefaultPolicy(Policy):
         else:
             preferred = FeedbackMechanism.A
 
-        order = (preferred, _other_feedback_mechanism(preferred))
+        order = (preferred, _other_feedback_mechanism(preferred)) if allow_fallback else (preferred,)
         for mechanism in order:
             if self._mechanism_available(schedule_state, mechanism, tokens_left):
                 return mechanism
@@ -245,6 +250,7 @@ class DefaultPolicy(Policy):
             schedule_state.a_rounds += 1
         else:
             schedule_state.b_rounds += 1
+            schedule_state.locked_mechanism = FeedbackMechanism.B
 
     def select_oracles(
         self,

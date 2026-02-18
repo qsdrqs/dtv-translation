@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
+from core.types import FeedbackMechanism, FeedbackMode, GenerationChannel
+from feedback.formatter import RepairFeedbackFormatConfig, render_repair_feedback
 from core.types import RollbackScope
 from feedback.repair_context import RepairContext
 
@@ -10,6 +14,37 @@ _CONSTRAINTS = (
     "Return code only. Do not add prose.",
     "Prefer the smallest valid edit.",
 )
+
+
+@dataclass(frozen=True)
+class FeedbackPlan:
+    mechanism: FeedbackMechanism
+    mode: FeedbackMode
+    channel: GenerationChannel
+    prompt: str
+
+
+def build_feedback_plan(
+    *,
+    mechanism: FeedbackMechanism,
+    requested_mode: FeedbackMode | None,
+    repair_context: RepairContext,
+    repair_feedback_format_config: RepairFeedbackFormatConfig | None,
+) -> FeedbackPlan:
+    if mechanism == FeedbackMechanism.B:
+        return FeedbackPlan(
+            mechanism=mechanism,
+            mode=FeedbackMode.FENCED,
+            channel=GenerationChannel.PATCH,
+            prompt=render_feedback_prompt(repair_context),
+        )
+    mode = requested_mode or FeedbackMode.INLINE
+    return FeedbackPlan(
+        mechanism=mechanism,
+        mode=mode,
+        channel=GenerationChannel.CONTINUATION,
+        prompt=render_repair_feedback(repair_context, format_config=repair_feedback_format_config),
+    )
 
 
 def render_feedback_prompt(repair_context: RepairContext) -> str:

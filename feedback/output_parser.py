@@ -9,6 +9,7 @@ from core.types import RollbackScope
 
 
 _FENCED_BLOCK_RE = re.compile(r"```(?P<lang>[^\n`]*)\n(?P<body>.*?)```", re.DOTALL)
+_ANY_COMPLETE_FENCE_RE = re.compile(r"```[^\n`]*\n.*?```", re.DOTALL)
 _RUST_LANGS = {"rust", "rs"}
 _RUST_PARSER = get_parser("rust")
 _TOP_LEVEL_ITEM_TYPES = {
@@ -33,6 +34,37 @@ class ParseResult:
     patch: str | None
     error: str | None
     used_fence: bool
+
+
+@dataclass
+class FeedbackFenceStreamParser:
+    _parts: list[str]
+    _complete: bool
+
+    def __init__(self) -> None:
+        self._parts = []
+        self._complete = False
+
+    def reset(self) -> None:
+        self._parts.clear()
+        self._complete = False
+
+    def feed(self, chunk: str) -> None:
+        if not chunk:
+            return
+        self._parts.append(chunk)
+        if self._complete:
+            return
+        joined = "".join(self._parts)
+        self._complete = _has_complete_fence(joined)
+
+    @property
+    def complete(self) -> bool:
+        return self._complete
+
+
+def _has_complete_fence(text: str) -> bool:
+    return _ANY_COMPLETE_FENCE_RE.search(text) is not None
 
 
 def parse_feedback_output(text: str) -> ParseResult:

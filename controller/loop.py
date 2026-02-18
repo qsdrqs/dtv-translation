@@ -21,6 +21,7 @@ from core.types import (
     FeedbackMode,
     GenerateContext,
     GenerateMessage,
+    GenerationChannel,
     Granularity,
     GroupStackFrame,
     OracleContext,
@@ -31,10 +32,10 @@ from core.types import (
     TraceEvent,
     Verdict,
 )
-from feedback.formatter import RepairFeedbackFormatConfig, render_repair_feedback
+from feedback.formatter import RepairFeedbackFormatConfig
 from feedback.feedback import FeedbackState
 from feedback.output_parser import parse_feedback_output, validate_patch_scope
-from feedback.plan import render_feedback_prompt
+from feedback.plan import FeedbackPlan, build_feedback_plan
 from feedback.repair_context import RepairContext
 from feedback.strategies import AssistantInlineRepair, FeedbackStrategy, UserRoundRepair
 from rollback.manager import RollbackManager
@@ -174,6 +175,32 @@ def _feedback_strategy_for_mechanism(mechanism: FeedbackMechanism) -> FeedbackSt
         return UserRoundRepair()
     # Default to A
     return AssistantInlineRepair()
+
+
+def _select_feedback_generator(
+    *,
+    generator: Generator,
+    feedback_generator: Generator | None,
+    feedback_plan: FeedbackPlan,
+) -> Generator:
+    if feedback_plan.mode != FeedbackMode.FENCED:
+        return generator
+    if feedback_generator is not None:
+        return feedback_generator
+    return generator
+
+
+def _prepare_feedback_extractor_state(
+    *,
+    feedback_gen: Generator,
+    feedback_plan: FeedbackPlan,
+    repair_base_extractor_state: OutputExtractorState,
+) -> None:
+    if feedback_plan.mode == FeedbackMode.FENCED:
+        feedback_gen.reset_output_extractor()
+        return
+    if feedback_plan.channel == GenerationChannel.CONTINUATION:
+        feedback_gen.restore_output_extractor_state(repair_base_extractor_state)
 
 
 def _truncate(s: str, max_chars: int) -> str:
@@ -317,6 +344,7 @@ def _handle_generate(
     trace: list[TraceEvent],
 ) -> None:
     context.extract_fence = True
+    context.channel = GenerationChannel.CONTINUATION
     feedback = feedback_state.encode()
     if (
         feedback_enabled
@@ -603,17 +631,7 @@ def _handle_feedback(
         or runtime.repair_base_extractor_state is None
     ):
         raise RuntimeError("FEEDBACK requires failed_prefix and repair base prefix.")
-    feedback_gen = generator
-    if op.feedback_mode == FeedbackMode.FENCED:
-        if feedback_generator is None:
-            raise RuntimeError("feedback_generator is required for fenced feedback mode")
-        feedback_gen = feedback_generator
-        feedback_gen.reset_output_extractor()
-    else:
-        feedback_gen.restore_output_extractor_state(runtime.repair_base_extractor_state)
-    context.extract_fence = True
     mechanism = op.feedback_mechanism or FeedbackMechanism.A
-    feedback_strategy = _feedback_strategy_for_mechanism(mechanism)
     bad_snippet = _failed_snippet(runtime.repair_base_prefix, runtime.failed_prefix)
     repair_context = RepairContext.from_feedback_state(
         feedback_state,
@@ -621,20 +639,35 @@ def _handle_feedback(
         repair_scope=runtime.repair_scope or RollbackScope.STMT,
         parser_error_context=runtime.feedback_parser_error,
     )
-    if mechanism == FeedbackMechanism.A:
-        repair_feedback = render_repair_feedback(repair_context, format_config=repair_feedback_format_config)
-    else:
-        repair_feedback = render_feedback_prompt(repair_context)
+    feedback_plan = build_feedback_plan(
+        mechanism=mechanism,
+        requested_mode=op.feedback_mode,
+        repair_context=repair_context,
+        repair_feedback_format_config=repair_feedback_format_config,
+    )
+    feedback_strategy = _feedback_strategy_for_mechanism(feedback_plan.mechanism)
+    feedback_gen = _select_feedback_generator(
+        generator=generator,
+        feedback_generator=feedback_generator,
+        feedback_plan=feedback_plan,
+    )
+    _prepare_feedback_extractor_state(
+        feedback_gen=feedback_gen,
+        feedback_plan=feedback_plan,
+        repair_base_extractor_state=runtime.repair_base_extractor_state,
+    )
+    context.extract_fence = feedback_plan.channel == GenerationChannel.CONTINUATION
+    context.channel = feedback_plan.channel
     update_last_assistant(base_messages, runtime.repair_base_assistant_prefix)
     context.messages = feedback_strategy.apply(
         base_messages,
-        repair_feedback,
+        feedback_plan.prompt,
         runtime.repair_base_assistant_prefix,
     )
     result = feedback_gen.generate_step(context)
     if feedback_gen is generator:
         generator.restore_output_extractor_state(runtime.repair_base_extractor_state)
-    if mechanism == FeedbackMechanism.B:
+    if feedback_plan.channel == GenerationChannel.PATCH:
         parse_result = parse_feedback_output(result.delta_text)
         scope = runtime.repair_scope or RollbackScope.STMT
         scope_error = None
@@ -647,7 +680,7 @@ def _handle_feedback(
     else:
         runtime.pending_patch = result.delta_text
         runtime.feedback_parser_error = None
-    runtime.last_feedback_mechanism = mechanism
+    runtime.last_feedback_mechanism = feedback_plan.mechanism
     budget.add_tokens(result.delta_tokens)
     runtime.last_stop_reason = result.stop_reason
     runtime.last_action = Action.FEEDBACK
@@ -655,7 +688,7 @@ def _handle_feedback(
     logger.info(
         "feedback: step=%s mechanism=%s delta_tokens=%s stop_reason=%s patch_len=%s parse_error=%s",
         runtime.state.step,
-        mechanism,
+        feedback_plan.mechanism,
         result.delta_tokens,
         result.stop_reason.kind,
         patch_len,
@@ -668,7 +701,7 @@ def _handle_feedback(
         action=Action.FEEDBACK,
         verification_granularity=None,
         budget=budget,
-        notes=f"feedback_mechanism={mechanism.value}",
+        notes=f"feedback_mechanism={feedback_plan.mechanism.value}",
     )
 
 

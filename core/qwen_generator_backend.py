@@ -9,7 +9,7 @@ from transformers import StoppingCriteria, StoppingCriteriaList
 from core.generator_backend import GeneratorBackend, infer_stop_reason
 from core.llm_output import AssistantContent
 from core.logger import get_logger
-from core.types import GenerateContext, GenerateResult
+from core.types import GenerateContext, GenerateResult, GenerationChannel
 
 logger = get_logger(__name__)
 
@@ -39,6 +39,12 @@ class QwenGeneratorBackend(GeneratorBackend):
         self._use_cuda = use_cuda
         stop_criteria = stop_criteria_factory(self.tokenizer) if stop_criteria_factory is not None else []
         self.stop_criteria: StoppingCriteriaList = StoppingCriteriaList(list(stop_criteria))
+
+    def set_generation_channel(self, channel: GenerationChannel) -> None:
+        for criteria in self.stop_criteria:
+            setter = getattr(criteria, "set_generation_channel", None)
+            if callable(setter):
+                setter(channel)
 
     def _build_prompt(self, context: GenerateContext) -> str:
         if not context.messages:
@@ -88,6 +94,7 @@ class QwenGeneratorBackend(GeneratorBackend):
         if self._use_cuda:
             inputs = inputs.to(self.model.device)
         prompt_token_count = int(inputs.input_ids.shape[-1])
+        self.set_generation_channel(context.channel)
         for criteria in self.stop_criteria:
             setter = getattr(criteria, "set_prompt_token_count", None)
             if setter is None:

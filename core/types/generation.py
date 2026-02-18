@@ -5,6 +5,8 @@ from typing import Any, Sequence
 
 from core.llm_output import AssistantContent
 
+from .enums import GenerationChannel
+
 
 @dataclass(frozen=True)
 class StopReason:
@@ -25,6 +27,7 @@ class GenerateContext:
     steps: int = 0
     max_new_length: int = 1024
     extract_fence: bool = False
+    channel: GenerationChannel = GenerationChannel.CONTINUATION
 
 
 @dataclass(frozen=True)

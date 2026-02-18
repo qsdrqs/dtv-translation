@@ -92,6 +92,7 @@ class GeneratorAdapter(Generator):
             self._segment_parser.reset()
             self._extract_parser.reset()
             self._warning_emitted = False
+        self.backend.set_generation_channel(context.channel)
         result = self.backend.generate_step(context)
         if not context.extract_fence:
             assistant_delta = AssistantContent.from_unfenced(result.delta_text)

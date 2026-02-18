@@ -7,6 +7,8 @@ from transformers import StoppingCriteria
 
 from core.llm_output import FenceParser, FenceState
 from core.logger import get_logger
+from core.types import GenerationChannel
+from feedback.output_parser import FeedbackFenceStreamParser
 import torch
 from torch import BoolTensor
 
@@ -128,6 +130,8 @@ class DTVStoppingCriteria(StoppingCriteria):
         self._code_text = ""
         self._last_boundary_len: int | None = None
         self._parser_epoch = fence_parser.epoch if fence_parser is not None else None
+        self._generation_channel = GenerationChannel.CONTINUATION
+        self._feedback_fence_parser = FeedbackFenceStreamParser()
 
     def _reset_stream_state(self) -> None:
         self._calls = 0
@@ -137,6 +141,7 @@ class DTVStoppingCriteria(StoppingCriteria):
         self._last_token_count = self._prompt_token_count or 0
         self._code_text = ""
         self._last_boundary_len = None
+        self._feedback_fence_parser.reset()
 
     def set_prompt_token_count(self, prompt_token_count: int) -> None:
         if prompt_token_count < 0:
@@ -144,6 +149,13 @@ class DTVStoppingCriteria(StoppingCriteria):
         self._prompt_token_count = prompt_token_count
         self._last_token_count = prompt_token_count
         self._calls = 0
+
+    def set_generation_channel(self, generation_channel: GenerationChannel | str) -> None:
+        next_channel = GenerationChannel(generation_channel)
+        if next_channel == self._generation_channel:
+            return
+        self._generation_channel = next_channel
+        self._reset_stream_state()
 
     def __call__(self, input_ids, scores, **kwargs) -> BoolTensor:
         TORCH_FALSE = cast(BoolTensor, torch.tensor([False], dtype=torch.bool, device=input_ids.device))
@@ -165,6 +177,13 @@ class DTVStoppingCriteria(StoppingCriteria):
             )
         self._last_token_count = token_count
         self._calls += 1
+
+        if self._generation_channel == GenerationChannel.PATCH:
+            if new_text:
+                self._feedback_fence_parser.feed(new_text)
+            if self._feedback_fence_parser.complete:
+                return TORCH_TRUE
+            return TORCH_FALSE
 
         if self.fence_parser is not None:
             if new_text:

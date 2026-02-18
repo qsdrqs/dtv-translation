@@ -5,7 +5,7 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from core.llm_output import AssistantContent
-from core.types import GenerateContext, GenerateResult, StopReason
+from core.types import GenerateContext, GenerateResult, GenerationChannel, StopReason
 
 
 def infer_stop_reason(
@@ -39,6 +39,9 @@ class GeneratorBackend(ABC):
         if isinstance(content, AssistantContent):
             return content.render()
         return content
+
+    def set_generation_channel(self, channel: GenerationChannel) -> None:
+        _ = channel
 
     @abstractmethod
     def generate_step(self, context: GenerateContext) -> GenerateResult:

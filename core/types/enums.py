@@ -79,4 +79,9 @@ class FeedbackMechanism(str, Enum):
     B = "b"
 
 
+class GenerationChannel(str, Enum):
+    CONTINUATION = "continuation"
+    PATCH = "patch"
+
+
 RollbackScope = Granularity
