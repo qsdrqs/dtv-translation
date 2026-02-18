@@ -1,8 +1,16 @@
 from __future__ import annotations
 
-from core.types import Diagnostic, OracleOutput, RollbackScope, Verdict
+from core.types import (
+    Diagnostic,
+    FeedbackMechanism,
+    FeedbackMode,
+    GenerationChannel,
+    OracleOutput,
+    RollbackScope,
+    Verdict,
+)
 from feedback.feedback import FeedbackState
-from feedback.plan import render_feedback_prompt
+from feedback.plan import build_feedback_plan, render_feedback_prompt
 from feedback.repair_context import RepairContext
 
 
@@ -102,3 +110,61 @@ Return exactly one Rust code block:
 <Your patch here>
 ```
 """
+
+
+def test_build_feedback_plan_maps_mechanism_a_to_continuation() -> None:
+    state = FeedbackState()
+    state.update(
+        [
+            OracleOutput(
+                oracle_name="rustc",
+                verdict=Verdict.FAIL,
+                diagnostics=(
+                    Diagnostic(message="expected `i32`, found `&str`", severity="error"),
+                ),
+                rollback_scope=RollbackScope.STMT,
+            )
+        ],
+        selected_scope=RollbackScope.STMT,
+    )
+    repair_context = RepairContext.from_feedback_state(state, bad_snippet='let x: i32 = "1";')
+
+    plan = build_feedback_plan(
+        mechanism=FeedbackMechanism.A,
+        requested_mode=FeedbackMode.INLINE,
+        repair_context=repair_context,
+        repair_feedback_format_config=None,
+    )
+
+    assert plan.mode == FeedbackMode.INLINE
+    assert plan.channel == GenerationChannel.CONTINUATION
+    assert "/* repair feedback:" in plan.prompt
+
+
+def test_build_feedback_plan_maps_mechanism_b_to_patch_fenced() -> None:
+    state = FeedbackState()
+    state.update(
+        [
+            OracleOutput(
+                oracle_name="rustc",
+                verdict=Verdict.FAIL,
+                diagnostics=(
+                    Diagnostic(message="expected `i32`, found `&str`", severity="error"),
+                ),
+                rollback_scope=RollbackScope.STMT,
+            )
+        ],
+        selected_scope=RollbackScope.STMT,
+    )
+    repair_context = RepairContext.from_feedback_state(state, bad_snippet='let x: i32 = "1";')
+
+    plan = build_feedback_plan(
+        mechanism=FeedbackMechanism.B,
+        requested_mode=FeedbackMode.INLINE,
+        repair_context=repair_context,
+        repair_feedback_format_config=None,
+    )
+
+    assert plan.mode == FeedbackMode.FENCED
+    assert plan.channel == GenerationChannel.PATCH
+    assert "Return exactly one Rust code block:" in plan.prompt

@@ -13,6 +13,7 @@ from controller.stop_criteria import (
     _scan_string_comment_state,
 )
 from core.llm_output import FenceParser, FenceReopenError, FenceState
+from core.types import GenerationChannel
 
 
 class _FakeTokenizer:
@@ -178,6 +179,46 @@ def test_stop_criteria_raises_on_fence_reopen() -> None:
     tokens.append(3)
     with pytest.raises(FenceReopenError):
         _call(criteria, tokens)
+
+
+def test_stop_criteria_resets_stream_on_parser_epoch_change() -> None:
+    mapping = {
+        1: "let x = 1;\n",
+    }
+    parser = FenceParser(allowed_langs=("rust", "rs"))
+    parser.feed("```rust\n")
+    criteria = DTVStoppingCriteria(_FakeTokenizer(mapping), RUST_PROFILE, fence_parser=parser)
+
+    tokens: list[int] = [1]
+    assert _call(criteria, tokens)
+
+
+def test_stop_criteria_patch_channel_uses_feedback_fence_stream() -> None:
+    mapping = {
+        1: "```rust\n",
+        2: "let x = 1;\n",
+        3: "```",
+    }
+    parser = FenceParser(allowed_langs=("rust", "rs"))
+    parser.feed("```rust\n")
+    criteria = DTVStoppingCriteria(_FakeTokenizer(mapping), RUST_PROFILE, fence_parser=parser)
+    criteria.set_generation_channel(GenerationChannel.PATCH)
+
+    tokens: list[int] = [1]
+    assert not _call(criteria, tokens)
+    assert parser.state == FenceState.INSIDE
+
+    tokens.append(2)
+    assert not _call(criteria, tokens)
+
+    tokens.append(3)
+    assert _call(criteria, tokens)
+    assert parser.state == FenceState.INSIDE
+
+    snapshot = parser.capture()
+    parser.restore(snapshot)
+
+    assert _call(criteria, tokens)
 
 
 def test_stop_criteria_dedupes_same_boundary_across_calls() -> None:

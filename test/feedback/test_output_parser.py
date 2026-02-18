@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from core.types import RollbackScope
-from feedback.output_parser import parse_feedback_output, validate_patch_scope
+from feedback.output_parser import (
+    FeedbackFenceStreamParser,
+    parse_feedback_output,
+    validate_patch_scope,
+)
 
 
 def test_parse_feedback_output_single_fence_success() -> None:
@@ -95,3 +99,23 @@ def test_validate_patch_scope_program_allows_function_wrapper() -> None:
     )
 
     assert error is None
+
+
+def test_feedback_fence_stream_parser_detects_complete_fence() -> None:
+    parser = FeedbackFenceStreamParser()
+
+    parser.feed("```rust\nlet x = 1;\n")
+    assert parser.complete is False
+
+    parser.feed("```")
+    assert parser.complete is True
+
+
+def test_feedback_fence_stream_parser_reset_clears_state() -> None:
+    parser = FeedbackFenceStreamParser()
+
+    parser.feed("```rust\nlet x = 1;\n```")
+    assert parser.complete is True
+
+    parser.reset()
+    assert parser.complete is False

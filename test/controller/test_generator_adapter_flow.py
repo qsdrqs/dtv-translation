@@ -67,6 +67,16 @@ class _StopCriteriaBackend(GeneratorBackend):
         )
 
 
+class _TrackingStoppingCriteria(DTVStoppingCriteria):
+    def __init__(self, tokenizer, language_profile, fence_parser=None) -> None:
+        super().__init__(tokenizer, language_profile, fence_parser=fence_parser)
+        self.stream_resets = 0
+
+    def _reset_stream_state(self) -> None:
+        self.stream_resets += 1
+        super()._reset_stream_state()
+
+
 def _context(*, extract_fence: bool, steps: int = 0) -> GenerateContext:
     return GenerateContext(
         messages=(),
@@ -177,3 +187,58 @@ def test_adapter_keeps_fence_parser_state_from_stop_criteria() -> None:
     result = adapter.generate_step(_context(extract_fence=True))
 
     assert result.stop_reason.kind == "eos"
+
+
+def test_adapter_restore_round_trip_replays_extraction_with_shared_parser() -> None:
+    parser = FenceParser(allowed_langs=("rust", "rs"))
+
+    def _criteria_factory(tokenizer):
+        return [DTVStoppingCriteria(tokenizer, RUST_PROFILE, fence_parser=parser)]
+
+    adapter = GeneratorAdapter(
+        model_name="stub",
+        backend_cls=_StopCriteriaBackend,
+        stop_criteria_factory=_criteria_factory,
+        fence_parser=parser,
+    )
+    initial_state = adapter.capture_output_extractor_state()
+
+    first = adapter.generate_step(_context(extract_fence=True))
+
+    adapter.restore_output_extractor_state(initial_state)
+    second = adapter.generate_step(_context(extract_fence=True, steps=1))
+
+    assert first.delta_text == "let x = 1;\n"
+    assert second.delta_text == "let x = 1;\n"
+    assert first.stop_reason.kind == "eos"
+    assert second.stop_reason.kind == "eos"
+
+
+def test_adapter_restore_triggers_stop_criteria_epoch_sync_with_shared_parser() -> None:
+    parser = FenceParser(allowed_langs=("rust", "rs"))
+    criteria_refs: list[_TrackingStoppingCriteria] = []
+
+    def _criteria_factory(tokenizer):
+        criteria = _TrackingStoppingCriteria(tokenizer, RUST_PROFILE, fence_parser=parser)
+        criteria_refs.append(criteria)
+        return [criteria]
+
+    adapter = GeneratorAdapter(
+        model_name="stub",
+        backend_cls=_StopCriteriaBackend,
+        stop_criteria_factory=_criteria_factory,
+        fence_parser=parser,
+    )
+    initial_state = adapter.capture_output_extractor_state()
+
+    first = adapter.generate_step(_context(extract_fence=True))
+    criteria = criteria_refs[0]
+    resets_after_first = criteria.stream_resets
+
+    adapter.restore_output_extractor_state(initial_state)
+    second = adapter.generate_step(_context(extract_fence=True, steps=1))
+
+    assert first.delta_text == "let x = 1;\n"
+    assert second.delta_text == "let x = 1;\n"
+    assert criteria.stream_resets == resets_after_first + 1
+    assert criteria._calls == 1

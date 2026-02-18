@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from core.generator_backend import GeneratorBackend, infer_stop_reason
-from core.types import GenerateContext, GenerateResult, StopReason
+from core.types import GenerateContext, GenerateResult, GenerationChannel, StopReason
 
 
 class _CharTokenizer:
@@ -31,6 +31,7 @@ class MockLLMBackend(GeneratorBackend):
         self._cursor = 0
         self._token_ids: list[int] = []
         self._stop_criteria = self._build_stop_criteria()
+        self._generation_channel = GenerationChannel.CONTINUATION
 
     @classmethod
     def configure(cls, *, source_path: Path, chunk_size: int = 1) -> None:
@@ -46,6 +47,9 @@ class MockLLMBackend(GeneratorBackend):
     def _set_prompt_token_count(self) -> None:
         prompt_token_count = len(self._token_ids)
         for criterion in self._stop_criteria:
+            channel_setter = getattr(criterion, "set_generation_channel", None)
+            if callable(channel_setter):
+                channel_setter(self._generation_channel)
             setter = getattr(criterion, "set_prompt_token_count", None)
             if setter is None:
                 raise TypeError(
@@ -56,6 +60,7 @@ class MockLLMBackend(GeneratorBackend):
             setter(prompt_token_count)
 
     def generate_step(self, context: GenerateContext) -> GenerateResult:
+        self._generation_channel = context.channel
         if self._cursor >= len(self._content):
             return GenerateResult(
                 delta_text="",

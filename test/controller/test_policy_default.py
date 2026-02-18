@@ -1,21 +1,26 @@
 from __future__ import annotations
 
-from controller.loop import PolicyContext
+from controller.loop import PolicyContext, run_dtv_loop
 from controller.policy import DefaultPolicy, DefaultPolicyConfig
 from core.budget import Budget
+from core.llm_output import AssistantContent, FenceParser, FenceState, OutputExtractorState
 from core.types import (
     Action,
     Artifact,
     ControllerState,
     Diagnostic,
     FeedbackMechanism,
+    GenerateContext,
+    GenerateResult,
     Granularity,
     OracleOutput,
+    RenderResult,
     RenderStatus,
     RollbackScope,
     StopReason,
     Verdict,
 )
+from feedback.feedback import FeedbackState
 from rollback.manager import RollbackManager
 
 
@@ -63,6 +68,123 @@ def _fail_outputs(*, scope: RollbackScope = RollbackScope.STMT) -> tuple[OracleO
             rollback_scope=scope,
         ),
     )
+
+
+class _AlwaysOkRenderer:
+    def try_render(self, prefix: str) -> RenderResult:
+        return RenderResult(status=RenderStatus.OK, artifact=Artifact(code=prefix))
+
+
+class _AlwaysFailOracle:
+    name = "oracle"
+    required_granularity = Granularity.STMT
+    rollback_scope = RollbackScope.STMT
+
+    def run(self, state, artifact, context) -> OracleOutput:
+        _ = state
+        _ = artifact
+        _ = context
+        # Intentionally fail forever: these tests validate policy scheduling, not patch correctness.
+        return OracleOutput(
+            oracle_name=self.name,
+            verdict=Verdict.FAIL,
+            diagnostics=(Diagnostic(message="type mismatch", severity="error"),),
+            rollback_scope=self.rollback_scope,
+            realized_cost=1,
+        )
+
+
+class _EscalationFenceReopenGenerator:
+    def __init__(self) -> None:
+        self._parser = FenceParser(allowed_langs=("rust", "rs"))
+        self._did_generate = False
+        self.feedback_mechanisms: list[FeedbackMechanism] = []
+
+    def reset_output_extractor(self) -> None:
+        self._parser.reset()
+
+    def get_output_extractor_state(self) -> FenceState:
+        return self._parser.state
+
+    def capture_output_extractor_state(self) -> OutputExtractorState:
+        snapshot = self._parser.capture()
+        return OutputExtractorState(
+            segment=snapshot,
+            extract=snapshot,
+            shared=snapshot,
+            warning_emitted=False,
+        )
+
+    def restore_output_extractor_state(self, state: OutputExtractorState) -> None:
+        self._parser.restore(state.extract)
+
+    def generate_step(self, context: GenerateContext) -> GenerateResult:
+        mechanism = self._feedback_mechanism(context)
+        if mechanism is not None:
+            self.feedback_mechanisms.append(mechanism)
+            if mechanism == FeedbackMechanism.A:
+                self._parser.feed("bad;")
+                return GenerateResult(
+                    delta_text="bad;",
+                    delta_tokens=1,
+                    stop_reason=StopReason(kind="boundary"),
+                )
+            self._parser.feed("```rust\n")
+            return GenerateResult(
+                delta_text="bad;",
+                delta_tokens=1,
+                stop_reason=StopReason(kind="boundary"),
+            )
+
+        if not self._did_generate:
+            self._did_generate = True
+            return GenerateResult(
+                delta_text="bad;",
+                delta_tokens=1,
+                stop_reason=StopReason(kind="boundary"),
+                assistant_delta=AssistantContent(
+                    fence_lang="rust",
+                    code="bad;",
+                    fence_state=FenceState.INSIDE,
+                ),
+            )
+
+        return GenerateResult(
+            delta_text="",
+            delta_tokens=0,
+            stop_reason=StopReason(kind="empty"),
+        )
+
+    def _feedback_mechanism(self, context: GenerateContext) -> FeedbackMechanism | None:
+        for message in reversed(context.messages):
+            if self._message_role(message) != "user":
+                continue
+            text = self._message_text(message)
+            if "The previous generated next code snippet was:" in text:
+                return FeedbackMechanism.B
+        for message in reversed(context.messages):
+            if self._message_role(message) != "assistant":
+                continue
+            text = self._message_text(message)
+            if "/* repair feedback:" in text:
+                return FeedbackMechanism.A
+        return None
+
+    @staticmethod
+    def _message_role(message: object) -> str:
+        if isinstance(message, dict):
+            return str(message.get("role", ""))
+        return str(getattr(message, "role", ""))
+
+    @staticmethod
+    def _message_text(message: object) -> str:
+        if isinstance(message, dict):
+            content = message.get("content", "")
+        else:
+            content = getattr(message, "content", "")
+        if isinstance(content, AssistantContent):
+            return content.render()
+        return str(content)
 
 
 def test_default_policy_verify_inconclusive_returns_continue() -> None:
@@ -206,34 +328,53 @@ def test_default_policy_feedback_starts_with_mechanism_a() -> None:
 
 def test_default_policy_feedback_escalates_to_mechanism_b_after_no_progress() -> None:
     policy = DefaultPolicy(DefaultPolicyConfig(max_repair_rounds=4))
+    generator = _EscalationFenceReopenGenerator()
 
-    initial_verify_fail_ctx = _ctx(
+    # Scheduling-only test: with persistent failures, the first two feedback attempts should be A then B.
+    run_dtv_loop(
+        generator=generator,
+        renderer=_AlwaysOkRenderer(),
+        oracles=[_AlwaysFailOracle()],
+        budget=Budget(gen_tokens_budget=32),
+        feedback_state=FeedbackState(),
+        rollback_manager=RollbackManager(),
+        policy=policy,
+        max_steps=16,
+    )
+
+    assert generator.feedback_mechanisms == [FeedbackMechanism.A, FeedbackMechanism.B]
+
+
+def test_default_policy_feedback_once_b_no_downgrade_per_key() -> None:
+    policy = DefaultPolicy(DefaultPolicyConfig(max_repair_rounds=4))
+
+    first_verify_fail_ctx = _ctx(
         prefix="bad;",
         last_action=Action.VERIFY,
         last_render_status=RenderStatus.OK,
         last_outputs=_fail_outputs(scope=RollbackScope.STMT),
     )
-    initial_rollback_op = policy.next_action(initial_verify_fail_ctx)
-    assert initial_rollback_op.action == Action.ROLLBACK
+    first_rollback_op = policy.next_action(first_verify_fail_ctx)
+    assert first_rollback_op.action == Action.ROLLBACK
 
     first_feedback_ctx = _ctx(
-        prefix="bad;",
+        prefix="",
         last_action=Action.ROLLBACK,
         failed_prefix="bad;",
         repair_base_prefix="",
     )
-    first_op = policy.next_action(first_feedback_ctx)
-    assert first_op.action == Action.FEEDBACK
-    assert first_op.feedback_mechanism == FeedbackMechanism.A
+    first_feedback_op = policy.next_action(first_feedback_ctx)
+    assert first_feedback_op.action == Action.FEEDBACK
+    assert first_feedback_op.feedback_mechanism == FeedbackMechanism.A
 
-    retry_verify_fail_ctx = _ctx(
+    second_verify_fail_ctx = _ctx(
         prefix="bad;",
         last_action=Action.VERIFY,
         last_render_status=RenderStatus.OK,
         last_outputs=_fail_outputs(scope=RollbackScope.STMT),
     )
-    rollback_op = policy.next_action(retry_verify_fail_ctx)
-    assert rollback_op.action == Action.ROLLBACK
+    second_rollback_op = policy.next_action(second_verify_fail_ctx)
+    assert second_rollback_op.action == Action.ROLLBACK
 
     second_feedback_ctx = _ctx(
         prefix="",
@@ -241,10 +382,47 @@ def test_default_policy_feedback_escalates_to_mechanism_b_after_no_progress() ->
         failed_prefix="bad;",
         repair_base_prefix="",
     )
-    second_op = policy.next_action(second_feedback_ctx)
+    second_feedback_op = policy.next_action(second_feedback_ctx)
+    assert second_feedback_op.action == Action.FEEDBACK
+    assert second_feedback_op.feedback_mechanism == FeedbackMechanism.B
 
-    assert second_op.action == Action.FEEDBACK
-    assert second_op.feedback_mechanism == FeedbackMechanism.B
+    third_verify_fail_ctx = _ctx(
+        prefix="bad;",
+        last_action=Action.VERIFY,
+        last_render_status=RenderStatus.OK,
+        last_outputs=_fail_outputs(scope=RollbackScope.STMT),
+    )
+    third_rollback_op = policy.next_action(third_verify_fail_ctx)
+    assert third_rollback_op.action == Action.ROLLBACK
+
+    third_feedback_ctx = _ctx(
+        prefix="",
+        last_action=Action.ROLLBACK,
+        failed_prefix="bad;",
+        repair_base_prefix="",
+    )
+    third_feedback_op = policy.next_action(third_feedback_ctx)
+    assert third_feedback_op.action == Action.TERMINATE
+
+    new_key_verify_fail_ctx = _ctx(
+        prefix="bad2;",
+        last_action=Action.VERIFY,
+        last_render_status=RenderStatus.OK,
+        last_outputs=_fail_outputs(scope=RollbackScope.STMT),
+    )
+    new_key_rollback_op = policy.next_action(new_key_verify_fail_ctx)
+    assert new_key_rollback_op.action == Action.ROLLBACK
+
+    new_key_feedback_ctx = _ctx(
+        prefix="",
+        last_action=Action.ROLLBACK,
+        failed_prefix="bad2;",
+        repair_base_prefix="",
+    )
+    new_key_feedback_op = policy.next_action(new_key_feedback_ctx)
+    # Locking is per repair key. A new failed snippet starts from A again.
+    assert new_key_feedback_op.action == Action.FEEDBACK
+    assert new_key_feedback_op.feedback_mechanism == FeedbackMechanism.A
 
 
 def test_default_policy_feedback_force_mechanism_b() -> None:

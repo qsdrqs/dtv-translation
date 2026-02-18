@@ -7,11 +7,12 @@ import pytest
 from controller.loop import run_dtv_loop
 from controller.policy import DefaultPolicy, DefaultPolicyConfig
 from core.budget import Budget
-from core.llm_output import FenceParserSnapshot, FenceState, OutputExtractorState
+from core.llm_output import AssistantContent, FenceParserSnapshot, FenceState, OutputExtractorState
 from core.types import (
     Action,
     Artifact,
     Diagnostic,
+    FeedbackMechanism,
     GenerateContext,
     GenerateResult,
     Granularity,
@@ -73,6 +74,147 @@ class _SequenceGenerator:
 
     def restore_output_extractor_state(self, state: OutputExtractorState) -> None:
         self._extractor_state = state
+
+
+class _FeedbackRestoreOrderGenerator:
+    def __init__(self) -> None:
+        snapshot = FenceParserSnapshot(state=FenceState.OUTSIDE, saw_fence=False)
+        self._extractor_state = OutputExtractorState(
+            segment=snapshot,
+            extract=snapshot,
+            shared=snapshot,
+            warning_emitted=False,
+        )
+        self._generated_once = False
+        self.events: list[str] = []
+
+    def generate_step(self, context: GenerateContext) -> GenerateResult:
+        if self._is_feedback_context(context):
+            self.events.append(f"generate_feedback:{int(self._extractor_state.warning_emitted)}")
+            return GenerateResult(
+                delta_text="good;",
+                delta_tokens=1,
+                stop_reason=StopReason(kind="boundary"),
+            )
+        self.events.append(f"generate_regular:{int(self._extractor_state.warning_emitted)}")
+        if self._generated_once:
+            return GenerateResult(
+                delta_text="",
+                delta_tokens=0,
+                stop_reason=StopReason(kind="empty"),
+            )
+        self._generated_once = True
+        inside = FenceParserSnapshot(state=FenceState.INSIDE, saw_fence=True)
+        self._extractor_state = OutputExtractorState(
+            segment=inside,
+            extract=inside,
+            shared=inside,
+            warning_emitted=True,
+        )
+        return GenerateResult(
+            delta_text="bad;",
+            delta_tokens=1,
+            stop_reason=StopReason(kind="boundary"),
+            assistant_delta=AssistantContent(
+                fence_lang="rust",
+                code="bad;",
+                fence_state=FenceState.INSIDE,
+            ),
+        )
+
+    def reset_output_extractor(self) -> None:
+        self.events.append("reset")
+
+    def get_output_extractor_state(self) -> FenceState:
+        return self._extractor_state.extract.state
+
+    def capture_output_extractor_state(self) -> OutputExtractorState:
+        return self._extractor_state
+
+    def restore_output_extractor_state(self, state: OutputExtractorState) -> None:
+        self.events.append(f"restore:{int(state.warning_emitted)}")
+        self._extractor_state = state
+
+    @staticmethod
+    def _is_feedback_context(context: GenerateContext) -> bool:
+        for message in reversed(context.messages):
+            role = getattr(message, "role", "")
+            if role != "assistant":
+                continue
+            content = getattr(message, "content", "")
+            text = content.render() if isinstance(content, AssistantContent) else str(content)
+            if "/* repair feedback:" in text:
+                return True
+        return False
+
+
+class _MechanismBInsideGenerator:
+    def __init__(self) -> None:
+        snapshot = FenceParserSnapshot(state=FenceState.OUTSIDE, saw_fence=False)
+        self._extractor_state = OutputExtractorState(
+            segment=snapshot,
+            extract=snapshot,
+            shared=snapshot,
+            warning_emitted=False,
+        )
+        self._generated_once = False
+        self.feedback_states: list[FenceState] = []
+
+    def generate_step(self, context: GenerateContext) -> GenerateResult:
+        if self._is_mechanism_b_feedback_context(context):
+            self.feedback_states.append(self._extractor_state.extract.state)
+            return GenerateResult(
+                delta_text="```rust\ngood;\n```",
+                delta_tokens=1,
+                stop_reason=StopReason(kind="boundary"),
+            )
+        if self._generated_once:
+            return GenerateResult(
+                delta_text="",
+                delta_tokens=0,
+                stop_reason=StopReason(kind="empty"),
+            )
+        self._generated_once = True
+        inside = FenceParserSnapshot(state=FenceState.INSIDE, saw_fence=True)
+        self._extractor_state = OutputExtractorState(
+            segment=inside,
+            extract=inside,
+            shared=inside,
+            warning_emitted=False,
+        )
+        return GenerateResult(
+            delta_text="bad;",
+            delta_tokens=1,
+            stop_reason=StopReason(kind="boundary"),
+            assistant_delta=AssistantContent(
+                fence_lang="rust",
+                code="bad;",
+                fence_state=FenceState.INSIDE,
+            ),
+        )
+
+    def reset_output_extractor(self) -> None:
+        return None
+
+    def get_output_extractor_state(self) -> FenceState:
+        return self._extractor_state.extract.state
+
+    def capture_output_extractor_state(self) -> OutputExtractorState:
+        return self._extractor_state
+
+    def restore_output_extractor_state(self, state: OutputExtractorState) -> None:
+        self._extractor_state = state
+
+    @staticmethod
+    def _is_mechanism_b_feedback_context(context: GenerateContext) -> bool:
+        for message in reversed(context.messages):
+            role = getattr(message, "role", "")
+            if role != "user":
+                continue
+            text = str(getattr(message, "content", ""))
+            if "The previous generated next code snippet was:" in text:
+                return True
+        return False
 
 
 class _OkRenderer:
@@ -309,4 +451,51 @@ def test_default_policy_repair_flow_commits() -> None:
         Action.VERIFY,
         Action.COMMIT,
     ]
+    assert final_prefix == "good;"
+
+
+def test_default_policy_force_b_feedback_flows_through_loop() -> None:
+    generator = _MechanismBInsideGenerator()
+    renderer = _OkRenderer()
+    oracles = [_SequenceOracle([Verdict.FAIL, Verdict.PASS])]
+    policy = DefaultPolicy(
+        DefaultPolicyConfig(
+            feedback_force_mechanism=FeedbackMechanism.B,
+            max_repair_rounds=2,
+        )
+    )
+
+    final_prefix, trace = _run_loop(generator, renderer, oracles, policy, max_steps=7)
+
+    actions = [event.action for event in trace]
+    assert actions == [
+        Action.GENERATE,
+        Action.VERIFY,
+        Action.ROLLBACK,
+        Action.FEEDBACK,
+        Action.APPLY_PATCH,
+        Action.VERIFY,
+        Action.COMMIT,
+    ]
+    feedback_events = [event for event in trace if event.action == Action.FEEDBACK]
+    assert len(feedback_events) == 1
+    assert feedback_events[0].notes == "feedback_mechanism=b"
+    assert generator.feedback_states == [FenceState.INSIDE]
+    assert final_prefix == "good;"
+
+
+def test_default_policy_inline_feedback_restores_extractor_before_generation() -> None:
+    generator = _FeedbackRestoreOrderGenerator()
+    renderer = _OkRenderer()
+    oracles = [_SequenceOracle([Verdict.FAIL, Verdict.PASS])]
+    policy = DefaultPolicy(DefaultPolicyConfig(max_repair_rounds=2))
+
+    final_prefix, trace = _run_loop(generator, renderer, oracles, policy, max_steps=7)
+
+    feedback_events = [event for event in trace if event.action == Action.FEEDBACK]
+    assert len(feedback_events) == 1
+    assert feedback_events[0].notes == "feedback_mechanism=a"
+    feedback_idx = generator.events.index("generate_feedback:1")
+    assert generator.events[feedback_idx - 1] == "restore:1"
+    assert generator.events[feedback_idx + 1] == "restore:1"
     assert final_prefix == "good;"
