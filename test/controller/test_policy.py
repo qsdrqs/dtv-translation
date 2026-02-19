@@ -39,7 +39,7 @@ def test_select_oracles_respects_granularity_order() -> None:
         available=[stmt_oracle, block_oracle, func_oracle],
         selection_granularity=Granularity.BLOCK,
     )
-    assert [oracle.name for oracle in selected] == ["stmt", "block"]
+    assert [oracle.name for oracle in selected] == ["block"]
 
 
 def test_select_oracles_respects_min_granularity() -> None:
@@ -56,7 +56,7 @@ def test_select_oracles_respects_min_granularity() -> None:
         selection_granularity=Granularity.FUNC,
         min_granularity=Granularity.BLOCK,
     )
-    assert [oracle.name for oracle in selected] == ["block", "func"]
+    assert [oracle.name for oracle in selected] == ["func"]
 
 
 def test_effective_boundary_empty_closed_stack_is_stmt() -> None:

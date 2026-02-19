@@ -99,6 +99,43 @@ def test_trap_end_to_end() -> None:
     assert trace
     verify_events = [event for event in trace if event.action == Action.VERIFY]
     assert verify_events, "Expected at least one VERIFY event"
+    function_outputs = [
+        (
+            event.step,
+            output.verdict.value,
+            tuple(diag.message for diag in output.diagnostics),
+        )
+        for event in verify_events
+        for output in event.oracle_outputs
+        if output.oracle_name == "function_diff"
+    ]
+    assert function_outputs, "Expected function_diff to run at least once"
+    assert len(function_outputs) == 2, (
+        "Expected function_diff to run exactly twice for trap test; "
+        f"found {len(function_outputs)} calls: {function_outputs}"
+    )
+    not_applicable_outputs = [
+        (step, verdict, diagnostics)
+        for step, verdict, diagnostics in function_outputs
+        if verdict == Verdict.NOT_APPLICABLE.value
+    ]
+    assert len(not_applicable_outputs) == 1, (
+        "Expected exactly one NOT_APPLICABLE function_diff output for main signature mismatch; "
+        f"found: {not_applicable_outputs}"
+    )
+    assert not_applicable_outputs[0][2] == ("return_type_mismatch",), (
+        "Expected function_diff NOT_APPLICABLE reason to be return_type_mismatch; "
+        f"found: {not_applicable_outputs}"
+    )
+    pass_outputs = [
+        (step, verdict, diagnostics)
+        for step, verdict, diagnostics in function_outputs
+        if verdict == Verdict.PASS.value
+    ]
+    assert len(pass_outputs) == 1, (
+        "Expected exactly one PASS function_diff output for trap function; "
+        f"found: {pass_outputs}"
+    )
     failing_outputs = [
         (
             event.step,

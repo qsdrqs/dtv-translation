@@ -118,13 +118,13 @@ def select_oracles_by_granularity(
     # Terms used in granularity filtering:
     # - required_granularity: each oracle's declared scope (e.g., STMT/FUNC/PROGRAM).
     # - boundary_granularity (min_granularity): policy lower bound; skip oracles below it.
-    # - effective_boundary (selection_granularity): actual closed boundary upper bound for this verify.
+    # - effective_boundary (selection_granularity): actual closed boundary for this verify.
     actual_granularity = selection_granularity
     selected: list[Oracle] = []
     for oracle in available:
-        if actual_granularity < oracle.required_granularity:
+        if actual_granularity != oracle.required_granularity:
             logger.info(
-                "oracle skipped: name=%s reason=boundary_too_shallow actual=%s required=%s",
+                "oracle skipped: name=%s reason=boundary_mismatch actual=%s required=%s",
                 oracle.name,
                 actual_granularity,
                 oracle.required_granularity,

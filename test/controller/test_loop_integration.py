@@ -204,7 +204,7 @@ class _TrackingGenerator:
 
 
 class _ScopeFailOracle:
-    required_granularity = Granularity.STMT
+    required_granularity = Granularity.PROGRAM
 
     def __init__(self, scope: RollbackScope) -> None:
         self.name = f"fail_{scope.value}"
