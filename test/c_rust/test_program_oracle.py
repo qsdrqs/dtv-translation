@@ -70,6 +70,16 @@ fn main() {
 }
 """
 
+RUST_PANIC_ON_PARSE = """
+use std::io;
+
+fn main() {
+    let mut input = String::new();
+    io::stdin().read_line(&mut input).unwrap();
+    let _n: i32 = input.trim().parse().unwrap();
+}
+"""
+
 C_WRONG_OUTPUT = """
 #include <stdio.h>
 
@@ -205,6 +215,32 @@ def test_program_oracle_fail_output_mismatch():
     assert result.verdict == Verdict.FAIL
     assert len(result.diagnostics) > 0
     assert any("stdout mismatch" in d.message for d in result.diagnostics)
+
+
+def test_program_oracle_exit_code_mismatch_includes_stderr_hint():
+    gcc = _gcc_path()
+    rustc = _rustc_path()
+    oracle = ProgramOracle(gcc_path=gcc, rustc_path=rustc)
+
+    sample = TranslationSample(
+        source_code=C_HELLO_WORLD,
+        source_lang="c",
+        test_cases=[TestCase(stdin="", test_id="panic_case")],
+    )
+
+    artifact = Artifact(
+        code=RUST_PANIC_ON_PARSE,
+        sample=sample,
+    )
+
+    state = ControllerState(prefix="")
+    result = oracle.run(state, artifact, OracleContext())
+
+    assert result.verdict == Verdict.FAIL
+    assert any(
+        "Exit code mismatch" in d.message and "stderr(c=" in d.message
+        for d in result.diagnostics
+    )
 
 
 def test_program_oracle_not_applicable_no_sample():

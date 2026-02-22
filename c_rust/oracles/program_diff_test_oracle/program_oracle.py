@@ -249,11 +249,19 @@ def _compare_executions(
             continue
 
         if c_result.exit_code != rust_result.exit_code:
+            stderr_note = _format_exit_code_stderr_note(
+                c_stderr=c_result.stderr,
+                rust_stderr=rust_result.stderr,
+            )
             mismatches.append(Mismatch(
                 position=i,
                 c_value=c_result.exit_code,
                 rust_value=rust_result.exit_code,
-                message=f"{test_id}: Exit code mismatch (C={c_result.exit_code}, Rust={rust_result.exit_code})",
+                message=(
+                    f"{test_id}: Exit code mismatch "
+                    f"(C={c_result.exit_code}, Rust={rust_result.exit_code})"
+                    f"{stderr_note}"
+                ),
                 suggested_scope=RollbackScope.PROGRAM,
             ))
 
@@ -338,3 +346,26 @@ def _augment_stdout_mismatch_message(base: str, c_stdout: str, rust_stdout: str)
 
     message = f"{base} (c_len={c_len}, rust_len={rust_len}, first_diff={first_diff}) {details}"
     return _truncate(message, max_total_chars)
+
+
+def _format_exit_code_stderr_note(c_stderr: str, rust_stderr: str) -> str:
+    c_note = _stderr_preview(c_stderr)
+    rust_note = _stderr_preview(rust_stderr)
+    if c_note is None and rust_note is None:
+        return ""
+
+    c_repr = "<empty>" if c_note is None else ascii(c_note)
+    rust_repr = "<empty>" if rust_note is None else ascii(rust_note)
+    return f" stderr(c={c_repr}, rust={rust_repr})"
+
+
+def _stderr_preview(stderr: str) -> str | None:
+    if not stderr:
+        return None
+
+    stripped = stderr.strip()
+    if not stripped:
+        return None
+
+    first_line = stripped.splitlines()[0]
+    return _truncate(first_line, 160)
