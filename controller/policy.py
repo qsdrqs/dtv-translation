@@ -44,7 +44,7 @@ class DefaultPolicyConfig:
     feedback_error_escalation_threshold: int = 3
     feedback_no_progress_escalation_threshold: int = 1
     feedback_max_a_rounds_per_key: int = 2
-    feedback_max_b_rounds_per_key: int = 1
+    feedback_max_b_rounds_per_key: int | None = None
     feedback_budget_reserve_tokens: int = 0
     feedback_min_tokens_a: int = 0
     feedback_min_tokens_b: int = 0
@@ -241,10 +241,16 @@ class DefaultPolicy(Policy):
         tokens_left: int,
     ) -> bool:
         if mechanism == FeedbackMechanism.A:
-            if schedule_state.a_rounds >= self.config.feedback_max_a_rounds_per_key:
+            if _round_limit_reached(
+                schedule_state.a_rounds,
+                self.config.feedback_max_a_rounds_per_key,
+            ):
                 return False
         else:
-            if schedule_state.b_rounds >= self.config.feedback_max_b_rounds_per_key:
+            if _round_limit_reached(
+                schedule_state.b_rounds,
+                self.config.feedback_max_b_rounds_per_key,
+            ):
                 return False
         return tokens_left >= _feedback_required_tokens(self.config, mechanism)
 
@@ -463,6 +469,12 @@ def _feedback_required_tokens(
     if mechanism == FeedbackMechanism.B:
         floor = config.feedback_min_tokens_b
     return config.feedback_budget_reserve_tokens + floor
+
+
+def _round_limit_reached(rounds_used: int, limit: int | None) -> bool:
+    if limit is None:
+        return False
+    return rounds_used >= limit
 
 
 def _is_error_level(severity: str) -> bool:

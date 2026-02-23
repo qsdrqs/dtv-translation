@@ -446,7 +446,9 @@ def test_default_policy_feedback_escalates_to_mechanism_b_after_no_progress() ->
     policy = DefaultPolicy(DefaultPolicyConfig(max_repair_rounds=4))
     generator = _EscalationFenceReopenGenerator()
 
-    # Scheduling-only test: with persistent failures, the first two feedback attempts should be A then B.
+    # Given repeated failures in one repair key.
+    # When repair attempts make no progress.
+    # Then policy escalates from A to B.
     run_dtv_loop(
         generator=generator,
         renderer=_AlwaysOkRenderer(),
@@ -458,10 +460,10 @@ def test_default_policy_feedback_escalates_to_mechanism_b_after_no_progress() ->
         max_steps=16,
     )
 
-    assert generator.feedback_mechanisms == [FeedbackMechanism.A, FeedbackMechanism.B]
+    assert generator.feedback_mechanisms[:2] == [FeedbackMechanism.A, FeedbackMechanism.B]
 
 
-def test_default_policy_feedback_once_b_no_downgrade_per_key() -> None:
+def test_default_policy_feedback_stays_on_b_per_key_by_default() -> None:
     policy = DefaultPolicy(DefaultPolicyConfig(max_repair_rounds=4))
 
     first_verify_fail_ctx = _ctx(
@@ -521,7 +523,8 @@ def test_default_policy_feedback_once_b_no_downgrade_per_key() -> None:
         repair_scope=RollbackScope.STMT,
     )
     third_feedback_op = policy.next_action(third_feedback_ctx)
-    assert third_feedback_op.action == Action.TERMINATE
+    assert third_feedback_op.action == Action.FEEDBACK
+    assert third_feedback_op.feedback_mechanism == FeedbackMechanism.B
 
     new_key_verify_fail_ctx = _ctx(
         prefix="bad2;",
@@ -542,6 +545,74 @@ def test_default_policy_feedback_once_b_no_downgrade_per_key() -> None:
     new_key_feedback_op = policy.next_action(new_key_feedback_ctx)
     assert new_key_feedback_op.action == Action.FEEDBACK
     assert new_key_feedback_op.feedback_mechanism == FeedbackMechanism.A
+
+
+def test_default_policy_feedback_terminates_when_b_cap_is_reached() -> None:
+    policy = DefaultPolicy(
+        DefaultPolicyConfig(
+            max_repair_rounds=4,
+            feedback_max_b_rounds_per_key=1,
+        )
+    )
+
+    first_verify_fail_ctx = _ctx(
+        prefix="bad;",
+        last_action=Action.VERIFY,
+        last_render_status=RenderStatus.OK,
+        last_outputs=_fail_outputs(scope=RollbackScope.STMT),
+    )
+    first_rollback_op = policy.next_action(first_verify_fail_ctx)
+    assert first_rollback_op.action == Action.ROLLBACK
+
+    first_feedback_ctx = _ctx(
+        prefix="",
+        last_action=Action.ROLLBACK,
+        failed_prefix="bad;",
+        repair_base_prefix="",
+        repair_scope=RollbackScope.STMT,
+    )
+    first_feedback_op = policy.next_action(first_feedback_ctx)
+    assert first_feedback_op.action == Action.FEEDBACK
+    assert first_feedback_op.feedback_mechanism == FeedbackMechanism.A
+
+    second_verify_fail_ctx = _ctx(
+        prefix="bad;",
+        last_action=Action.VERIFY,
+        last_render_status=RenderStatus.OK,
+        last_outputs=_fail_outputs(scope=RollbackScope.STMT),
+    )
+    second_rollback_op = policy.next_action(second_verify_fail_ctx)
+    assert second_rollback_op.action == Action.ROLLBACK
+
+    second_feedback_ctx = _ctx(
+        prefix="",
+        last_action=Action.ROLLBACK,
+        failed_prefix="bad;",
+        repair_base_prefix="",
+        repair_scope=RollbackScope.STMT,
+    )
+    second_feedback_op = policy.next_action(second_feedback_ctx)
+    assert second_feedback_op.action == Action.FEEDBACK
+    assert second_feedback_op.feedback_mechanism == FeedbackMechanism.B
+
+    third_verify_fail_ctx = _ctx(
+        prefix="bad;",
+        last_action=Action.VERIFY,
+        last_render_status=RenderStatus.OK,
+        last_outputs=_fail_outputs(scope=RollbackScope.STMT),
+    )
+    third_rollback_op = policy.next_action(third_verify_fail_ctx)
+    assert third_rollback_op.action == Action.ROLLBACK
+
+    third_feedback_ctx = _ctx(
+        prefix="",
+        last_action=Action.ROLLBACK,
+        failed_prefix="bad;",
+        repair_base_prefix="",
+        repair_scope=RollbackScope.STMT,
+    )
+    third_feedback_op = policy.next_action(third_feedback_ctx)
+    assert third_feedback_op.action == Action.TERMINATE
 
 
 def test_default_policy_program_scope_escalates_to_b_even_when_failed_prefix_changes() -> None:

@@ -205,6 +205,47 @@ class _FencedTrackingGenerator:
         self._extractor_state = state
 
 
+class _TokenSequenceGenerator:
+    def __init__(self, steps: list[tuple[str, int]]) -> None:
+        self.steps = steps
+        self.idx = 0
+        snapshot = FenceParserSnapshot(state=FenceState.OUTSIDE, saw_fence=False)
+        self._extractor_state = OutputExtractorState(
+            segment=snapshot,
+            extract=snapshot,
+            shared=snapshot,
+            warning_emitted=False,
+        )
+
+    def generate_step(self, context: GenerateContext) -> GenerateResult:
+        _ = context
+        if self.idx >= len(self.steps):
+            return GenerateResult(
+                delta_text="",
+                delta_tokens=0,
+                stop_reason=StopReason(kind="empty"),
+            )
+        delta_text, delta_tokens = self.steps[self.idx]
+        self.idx += 1
+        return GenerateResult(
+            delta_text=delta_text,
+            delta_tokens=delta_tokens,
+            stop_reason=StopReason(kind="boundary"),
+        )
+
+    def reset_output_extractor(self) -> None:
+        return None
+
+    def get_output_extractor_state(self) -> FenceState:
+        return self._extractor_state.extract.state
+
+    def capture_output_extractor_state(self) -> OutputExtractorState:
+        return self._extractor_state
+
+    def restore_output_extractor_state(self, state: OutputExtractorState) -> None:
+        self._extractor_state = state
+
+
 class _ToggleRenderer:
     def __init__(self) -> None:
         self.calls = 0
@@ -249,6 +290,40 @@ class _RepairFlowPolicy:
         if self.stage == 4:
             self.stage = 5
             return ControllerOp(Action.FEEDBACK)
+        return ControllerOp(Action.TERMINATE)
+
+    def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
+        if selection_granularity is None:
+            raise ValueError("selection_granularity is required")
+        return select_oracles_by_granularity(
+            artifact,
+            budget,
+            available,
+            selection_granularity=selection_granularity,
+        )
+
+
+class _GenerateFeedbackApplyTerminatePolicy:
+    def __init__(self) -> None:
+        self.stage = 0
+
+    def next_action(self, ctx) -> ControllerOp:
+        _ = ctx
+        if self.stage == 0:
+            self.stage = 1
+            return ControllerOp(Action.GENERATE)
+        if self.stage == 1:
+            self.stage = 2
+            return ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT)
+        if self.stage == 2:
+            self.stage = 3
+            return ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.STMT)
+        if self.stage == 3:
+            self.stage = 4
+            return ControllerOp(Action.FEEDBACK, feedback_mechanism=FeedbackMechanism.A)
+        if self.stage == 4:
+            self.stage = 5
+            return ControllerOp(Action.APPLY_PATCH)
         return ControllerOp(Action.TERMINATE)
 
     def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
@@ -723,6 +798,47 @@ def test_failed_context_survives_inconclusive_verify() -> None:
     )
 
     assert any(event.action == Action.FEEDBACK for event in trace)
+
+
+def test_llm_token_accounting_counts_generate_and_feedback_only() -> None:
+    generator = _TokenSequenceGenerator(
+        [
+            ("bad stmt\n", 3),
+            ("fixed stmt\n", 5),
+        ]
+    )
+    renderer = _OkRenderer()
+    oracles = [_OracleFail()]
+    budget = Budget(gen_tokens_budget=16)
+    feedback_state = FeedbackState()
+    rollback_manager = RollbackManager()
+    policy = _GenerateFeedbackApplyTerminatePolicy()
+
+    _, trace = run_dtv_loop(
+        generator=generator,
+        renderer=renderer,
+        oracles=oracles,
+        budget=budget,
+        feedback_state=feedback_state,
+        rollback_manager=rollback_manager,
+        policy=policy,
+        max_steps=8,
+    )
+
+    actions = [event.action for event in trace]
+    assert actions == [
+        Action.GENERATE,
+        Action.VERIFY,
+        Action.ROLLBACK,
+        Action.FEEDBACK,
+        Action.APPLY_PATCH,
+        Action.TERMINATE,
+    ]
+    assert budget.gen_tokens_used == 8
+    feedback_event = next(event for event in trace if event.action == Action.FEEDBACK)
+    apply_patch_event = next(event for event in trace if event.action == Action.APPLY_PATCH)
+    assert feedback_event.budget_snapshot["gen_tokens_used"] == 8
+    assert apply_patch_event.budget_snapshot["gen_tokens_used"] == 8
 
 
 def test_continue_then_generate_raises_when_feedback_payload_exists() -> None:
