@@ -230,6 +230,119 @@ def test_default_policy_fail_rolls_back() -> None:
     assert op.rollback_scope == RollbackScope.STMT
 
 
+def test_default_policy_stmt_stall_escalates_to_block_after_retry_budget() -> None:
+    policy = DefaultPolicy(
+        DefaultPolicyConfig(
+            enable_rollback=True,
+            default_fail_scope=RollbackScope.STMT,
+            stmt_stall_max_retries_before_escalation=3,
+        )
+    )
+
+    for _ in range(3):
+        ctx = _ctx(
+            prefix="bad;",
+            last_action=Action.VERIFY,
+            last_render_status=RenderStatus.OK,
+            last_outputs=_fail_outputs(scope=RollbackScope.STMT),
+        )
+        ctx.rollback.open_group(Granularity.FUNC)
+        ctx.rollback.open_group(Granularity.BLOCK)
+        op = policy.next_action(ctx)
+        assert op.action == Action.ROLLBACK
+        assert op.rollback_scope == RollbackScope.STMT
+
+    ctx = _ctx(
+        prefix="bad;",
+        last_action=Action.VERIFY,
+        last_render_status=RenderStatus.OK,
+        last_outputs=_fail_outputs(scope=RollbackScope.STMT),
+    )
+    ctx.rollback.open_group(Granularity.FUNC)
+    ctx.rollback.open_group(Granularity.BLOCK)
+    op = policy.next_action(ctx)
+
+    assert op.action == Action.ROLLBACK
+    assert op.rollback_scope == RollbackScope.BLOCK
+
+
+def test_default_policy_stmt_stall_escalates_to_func_without_active_block() -> None:
+    policy = DefaultPolicy(
+        DefaultPolicyConfig(
+            enable_rollback=True,
+            default_fail_scope=RollbackScope.STMT,
+            stmt_stall_max_retries_before_escalation=3,
+        )
+    )
+
+    for _ in range(3):
+        ctx = _ctx(
+            prefix="bad;",
+            last_action=Action.VERIFY,
+            last_render_status=RenderStatus.OK,
+            last_outputs=_fail_outputs(scope=RollbackScope.STMT),
+        )
+        ctx.rollback.open_group(Granularity.FUNC)
+        op = policy.next_action(ctx)
+        assert op.action == Action.ROLLBACK
+        assert op.rollback_scope == RollbackScope.STMT
+
+    ctx = _ctx(
+        prefix="bad;",
+        last_action=Action.VERIFY,
+        last_render_status=RenderStatus.OK,
+        last_outputs=_fail_outputs(scope=RollbackScope.STMT),
+    )
+    ctx.rollback.open_group(Granularity.FUNC)
+    op = policy.next_action(ctx)
+
+    assert op.action == Action.ROLLBACK
+    assert op.rollback_scope == RollbackScope.FUNC
+
+
+def test_default_policy_stmt_stall_counter_resets_after_pass() -> None:
+    policy = DefaultPolicy(
+        DefaultPolicyConfig(
+            enable_rollback=True,
+            default_fail_scope=RollbackScope.STMT,
+            stmt_stall_max_retries_before_escalation=1,
+        )
+    )
+
+    first_fail = _ctx(
+        prefix="bad;",
+        last_action=Action.VERIFY,
+        last_render_status=RenderStatus.OK,
+        last_outputs=_fail_outputs(scope=RollbackScope.STMT),
+    )
+    first_fail.rollback.open_group(Granularity.FUNC)
+    first_fail.rollback.open_group(Granularity.BLOCK)
+    first_op = policy.next_action(first_fail)
+    assert first_op.action == Action.ROLLBACK
+    assert first_op.rollback_scope == RollbackScope.STMT
+
+    pass_ctx = _ctx(
+        prefix="good;",
+        last_action=Action.VERIFY,
+        last_render_status=RenderStatus.OK,
+        last_outputs=_outputs(Verdict.PASS),
+    )
+    pass_op = policy.next_action(pass_ctx)
+    assert pass_op.action == Action.COMMIT
+
+    second_fail = _ctx(
+        prefix="bad;",
+        last_action=Action.VERIFY,
+        last_render_status=RenderStatus.OK,
+        last_outputs=_fail_outputs(scope=RollbackScope.STMT),
+    )
+    second_fail.rollback.open_group(Granularity.FUNC)
+    second_fail.rollback.open_group(Granularity.BLOCK)
+    second_op = policy.next_action(second_fail)
+    assert second_op.action == Action.ROLLBACK
+    assert second_op.rollback_scope == RollbackScope.STMT
+
+
 def test_default_policy_generate_boundary_triggers_verify() -> None:
     policy = DefaultPolicy()
     ctx = _ctx(

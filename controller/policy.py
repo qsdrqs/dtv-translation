@@ -30,6 +30,7 @@ class DefaultPolicyConfig:
     eos_granularity: Granularity = Granularity.PROGRAM
     enable_rollback: bool = True
     default_fail_scope: RollbackScope = RollbackScope.STMT
+    stmt_stall_max_retries_before_escalation: int = 3
     enable_cdhr: bool = False
     enable_feedback: bool = True  # Controls both FEEDBACK and APPLY_PATCH.
     repair_verify_granularity: Granularity = Granularity.STMT
@@ -85,6 +86,8 @@ class DefaultPolicy(Policy):
         self._repair_rounds: dict[tuple[str, RollbackScope], int] = {}
         self._repair_schedule: dict[tuple[str, RollbackScope], _RepairScheduleState] = {}
         self._pending_fail_snapshot: _FailSnapshot | None = None
+        self._stmt_stall_key: tuple[str, tuple[Granularity, ...]] | None = None
+        self._stmt_stall_retries: int = 0
 
     def next_action(self, ctx) -> ControllerOp:
         tokens_left = _tokens_left(ctx.budget)
@@ -146,8 +149,10 @@ class DefaultPolicy(Policy):
 
         if ctx.last_action == Action.VERIFY:
             if ctx.last_render_status != RenderStatus.OK:
+                self._reset_stmt_stall_state()
                 return _continue_or_terminate(tokens_left)
             if not ctx.last_outputs:
+                self._reset_stmt_stall_state()
                 if is_eos:
                     return ControllerOp(Action.COMMIT)
                 if self.config.commit_when_no_oracle_selected:
@@ -155,7 +160,7 @@ class DefaultPolicy(Policy):
                 return _continue_or_terminate(tokens_left)
             if _any_fail(ctx.last_outputs):
                 if self.config.enable_rollback:
-                    scope = _select_fail_scope(self.config, ctx.last_outputs)
+                    scope = self._select_fail_scope(ctx)
                     self._pending_fail_snapshot = _FailSnapshot(
                         failed_prefix=ctx.state.prefix,
                         signature=_fail_signature(ctx.last_outputs),
@@ -163,7 +168,9 @@ class DefaultPolicy(Policy):
                         error_count=_error_count(ctx.last_outputs),
                     )
                     return ControllerOp(Action.ROLLBACK, rollback_scope=scope)
+                self._reset_stmt_stall_state()
                 return _continue_or_terminate(tokens_left)
+            self._reset_stmt_stall_state()
             if _all_pass(ctx.last_outputs):
                 return ControllerOp(Action.COMMIT)
             return _continue_or_terminate(tokens_left)
@@ -252,6 +259,30 @@ class DefaultPolicy(Policy):
             schedule_state.b_rounds += 1
             schedule_state.locked_mechanism = FeedbackMechanism.B
 
+    def _reset_stmt_stall_state(self) -> None:
+        self._stmt_stall_key = None
+        self._stmt_stall_retries = 0
+
+    def _select_fail_scope(self, ctx) -> RollbackScope:
+        scope = _select_fail_scope(self.config, ctx.last_outputs)
+        if scope != RollbackScope.STMT:
+            self._reset_stmt_stall_state()
+            return scope
+
+        key = _stmt_stall_key(ctx)
+        if key != self._stmt_stall_key:
+            self._stmt_stall_key = key
+            self._stmt_stall_retries = 1
+        else:
+            self._stmt_stall_retries += 1
+
+        max_stmt_retries = max(0, self.config.stmt_stall_max_retries_before_escalation)
+        if self._stmt_stall_retries <= max_stmt_retries:
+            return RollbackScope.STMT
+        if _has_active_block(ctx):
+            return RollbackScope.BLOCK
+        return RollbackScope.FUNC
+
     def select_oracles(
         self,
         artifact: Artifact,
@@ -329,6 +360,18 @@ def _select_fail_scope(config: DefaultPolicyConfig, outputs: tuple[OracleOutput,
                 if diag.hint_scope is not None:
                     return diag.hint_scope
     return config.default_fail_scope
+
+
+def _stmt_stall_key(ctx) -> tuple[str, tuple[Granularity, ...]]:
+    anchor_prefix = ""
+    if ctx.rollback.stmt_checkpoints:
+        anchor_prefix = ctx.rollback.stmt_checkpoints[-1].code_prefix
+    active_groups = tuple(frame.kind for frame in ctx.rollback.group_stack)
+    return (anchor_prefix, active_groups)
+
+
+def _has_active_block(ctx) -> bool:
+    return any(frame.kind == Granularity.BLOCK for frame in ctx.rollback.group_stack)
 
 
 def _repair_key(ctx) -> tuple[str, RollbackScope] | None:
