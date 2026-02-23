@@ -657,6 +657,7 @@ def _handle_rollback(
     generator.restore_output_extractor_state(runtime.extractor_state)
     if feedback_enabled:
         feedback_state.on_rollback(op.rollback_scope)
+        feedback_state.bind_failures_to_scope(list(runtime.last_outputs), op.rollback_scope)
         runtime.pending_patch = None
         runtime.repair_base_prefix = runtime.state.prefix
         runtime.repair_base_assistant_prefix = runtime.assistant_prefix

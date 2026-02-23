@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from collections.abc import Sequence
 
 from core.types import OracleOutput, RollbackScope, Verdict
 
@@ -78,8 +79,42 @@ class FeedbackState:
     def on_rollback(self, selected_scope: RollbackScope) -> None:
         _ = selected_scope
 
+    def bind_failures_to_scope(
+        self,
+        outputs: Sequence[OracleOutput],
+        selected_scope: RollbackScope,
+    ) -> None:
+        updated = False
+        for output in outputs:
+            if output.verdict != Verdict.FAIL:
+                continue
+            source_scope = _scope_for_output(output, selected_scope)
+            owner_scope = source_scope
+            if selected_scope > source_scope:
+                owner_scope = selected_scope
+            filtered_output = _copy_with_filtered_diagnostics(output, owner_scope)
+            if filtered_output is None:
+                raise ValueError("FAIL output has no error/fatal diagnostics")
+            self._drop_oracle_entries(output.oracle_name)
+            self._active_outputs[(output.oracle_name, owner_scope)] = filtered_output
+            updated = True
+        if not updated:
+            return
+        self._prune_scope_anchors()
+        self._refresh_views()
+
     def on_commit(self, committed_scope: RollbackScope | None) -> None:
-        _ = committed_scope
+        if committed_scope is None:
+            return
+        stale_keys = [
+            key
+            for key in self._active_outputs
+            if key[1] <= committed_scope
+        ]
+        for key in stale_keys:
+            del self._active_outputs[key]
+        self._prune_scope_anchors()
+        self._refresh_views()
 
     def on_terminate(self) -> None:
         self._active_outputs = {}
@@ -138,6 +173,11 @@ class FeedbackState:
         if code_offset < 0:
             raise ValueError("code_offset must be >= 0")
         self._scope_anchor_offsets[scope] = code_offset
+
+    def _drop_oracle_entries(self, oracle_name: str) -> None:
+        stale_keys = [key for key in self._active_outputs if key[0] == oracle_name]
+        for key in stale_keys:
+            del self._active_outputs[key]
 
     def best_fix_hint(self) -> str | None:
         for output in self.recent_outputs:
