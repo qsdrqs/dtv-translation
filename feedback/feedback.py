@@ -48,6 +48,11 @@ class FeedbackState:
         init=False,
         repr=False,
     )
+    _scope_anchor_offsets: dict[RollbackScope, int] = field(
+        default_factory=dict,
+        init=False,
+        repr=False,
+    )
 
     def on_verify(
         self,
@@ -67,6 +72,7 @@ class FeedbackState:
                 continue
             if output.verdict in {Verdict.PASS, Verdict.NOT_APPLICABLE}:
                 self._active_outputs.pop(key, None)
+        self._prune_scope_anchors()
         self._refresh_views()
 
     def on_rollback(self, selected_scope: RollbackScope) -> None:
@@ -77,6 +83,7 @@ class FeedbackState:
 
     def on_terminate(self) -> None:
         self._active_outputs = {}
+        self._scope_anchor_offsets = {}
         self._refresh_views()
 
     def _sorted_active_outputs(self) -> list[OracleOutput]:
@@ -98,6 +105,9 @@ class FeedbackState:
         self.recent_outputs = ordered_outputs
         self.items = current_items
 
+    def _prune_scope_anchors(self) -> None:
+        _prune_anchor_offsets(self._active_outputs, self._scope_anchor_offsets)
+
     def encode(self) -> str:
         if not self.items:
             return ""
@@ -106,11 +116,28 @@ class FeedbackState:
     def active_snapshot(self) -> tuple[OracleOutput, ...]:
         return tuple(self._sorted_active_outputs())
 
-    def augment_prompt(self, base_prompt: str) -> str:
-        feedback = self.encode()
-        if not feedback:
-            return base_prompt
-        return f"{base_prompt}\n\n# Feedback\n{feedback}\n"
+    def scoped_active_snapshot(
+        self,
+    ) -> tuple[tuple[RollbackScope, int | None, tuple[OracleOutput, ...]], ...]:
+        grouped: dict[RollbackScope, list[OracleOutput]] = {}
+        for (_, scope), output in self._active_outputs.items():
+            grouped.setdefault(scope, []).append(output)
+        rows: list[tuple[RollbackScope, int | None, tuple[OracleOutput, ...]]] = []
+        for scope, outputs in grouped.items():
+            rows.append(
+                (
+                    scope,
+                    self._scope_anchor_offsets.get(scope),
+                    tuple(sorted(outputs, key=lambda output: output.oracle_name)),
+                )
+            )
+        rows.sort(key=lambda item: item[0], reverse=True)
+        return tuple(rows)
+
+    def set_scope_anchor(self, scope: RollbackScope, code_offset: int) -> None:
+        if code_offset < 0:
+            raise ValueError("code_offset must be >= 0")
+        self._scope_anchor_offsets[scope] = code_offset
 
     def best_fix_hint(self) -> str | None:
         for output in self.recent_outputs:
@@ -138,3 +165,19 @@ def _extract_help_from_message(message: str) -> str | None:
 def _is_error_level(severity: str) -> bool:
     level = severity.lower().strip()
     return level in _ERROR_LEVELS
+
+
+def _active_scopes(
+    active_outputs: dict[tuple[str, RollbackScope], OracleOutput],
+) -> set[RollbackScope]:
+    return {scope for _, scope in active_outputs}
+
+
+def _prune_anchor_offsets(
+    active_outputs: dict[tuple[str, RollbackScope], OracleOutput],
+    anchor_offsets: dict[RollbackScope, int],
+) -> None:
+    scopes = _active_scopes(active_outputs)
+    stale_scopes = [scope for scope in anchor_offsets if scope not in scopes]
+    for scope in stale_scopes:
+        del anchor_offsets[scope]

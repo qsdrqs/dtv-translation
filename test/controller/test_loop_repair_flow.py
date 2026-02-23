@@ -4,7 +4,7 @@ import pytest
 
 from controller.loop import ControllerOp, run_dtv_loop, select_oracles_by_granularity
 from core.budget import Budget
-from core.llm_output import FenceParserSnapshot, FenceState, OutputExtractorState
+from core.llm_output import AssistantContent, FenceParserSnapshot, FenceState, OutputExtractorState
 from core.types import (
     Action,
     Artifact,
@@ -136,6 +136,73 @@ class _TrackingSequenceGenerator(_SequenceGenerator):
         self.seen_assistant_messages.append(_last_assistant_text(context))
         self.seen_user_messages.append(_last_user_text(context))
         return super().generate_step(context)
+
+
+class _FencedTrackingGenerator:
+    def __init__(self, steps: list[str]) -> None:
+        self.steps = steps
+        self.idx = 0
+        self.seen_assistant_messages: list[str] = []
+        self.seen_user_messages: list[str] = []
+        snapshot = FenceParserSnapshot(state=FenceState.OUTSIDE, saw_fence=False)
+        self._extractor_state = OutputExtractorState(
+            segment=snapshot,
+            extract=snapshot,
+            shared=snapshot,
+            warning_emitted=False,
+        )
+
+    def generate_step(self, context: GenerateContext) -> GenerateResult:
+        self.seen_assistant_messages.append(_last_assistant_text(context))
+        self.seen_user_messages.append(_last_user_text(context))
+        if self.idx >= len(self.steps):
+            return GenerateResult(
+                delta_text="",
+                delta_tokens=0,
+                stop_reason=StopReason(kind="empty"),
+                assistant_delta=AssistantContent.empty(),
+            )
+        delta = self.steps[self.idx]
+        self.idx += 1
+        inside = FenceParserSnapshot(state=FenceState.INSIDE, saw_fence=True)
+        self._extractor_state = OutputExtractorState(
+            segment=inside,
+            extract=inside,
+            shared=inside,
+            warning_emitted=False,
+        )
+        assistant_delta = AssistantContent(
+            pre_fence="",
+            fence_lang="rust",
+            code=delta,
+            post_fence="",
+            pending_text="",
+            fence_state=FenceState.INSIDE,
+        )
+        return GenerateResult(
+            delta_text=delta,
+            delta_tokens=1,
+            stop_reason=StopReason(kind="boundary"),
+            assistant_delta=assistant_delta,
+        )
+
+    def reset_output_extractor(self) -> None:
+        snapshot = FenceParserSnapshot(state=FenceState.OUTSIDE, saw_fence=False)
+        self._extractor_state = OutputExtractorState(
+            segment=snapshot,
+            extract=snapshot,
+            shared=snapshot,
+            warning_emitted=False,
+        )
+
+    def get_output_extractor_state(self) -> FenceState:
+        return self._extractor_state.extract.state
+
+    def capture_output_extractor_state(self) -> OutputExtractorState:
+        return self._extractor_state
+
+    def restore_output_extractor_state(self, state: OutputExtractorState) -> None:
+        self._extractor_state = state
 
 
 class _ToggleRenderer:
@@ -429,6 +496,83 @@ class _ScopeAwareFeedbackPolicy:
         )
 
 
+class _GenerateUsesActiveFeedbackPolicy:
+    def __init__(self) -> None:
+        self.stage = 0
+
+    def next_action(self, ctx) -> ControllerOp:
+        _ = ctx
+        if self.stage == 0:
+            self.stage = 1
+            return ControllerOp(Action.GENERATE)
+        if self.stage == 1:
+            self.stage = 2
+            return ControllerOp(Action.VERIFY, verification_granularity=Granularity.PROGRAM)
+        if self.stage == 2:
+            self.stage = 3
+            return ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT)
+        if self.stage == 3:
+            self.stage = 4
+            return ControllerOp(Action.COMMIT)
+        if self.stage == 4:
+            self.stage = 5
+            return ControllerOp(Action.GENERATE)
+        return ControllerOp(Action.TERMINATE)
+
+    def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
+        if selection_granularity is None:
+            raise ValueError("selection_granularity is required")
+        return select_oracles_by_granularity(
+            artifact,
+            budget,
+            available,
+            selection_granularity=selection_granularity,
+        )
+
+
+class _FeedbackThenGeneratePolicy:
+    def __init__(self) -> None:
+        self.stage = 0
+
+    def next_action(self, ctx) -> ControllerOp:
+        _ = ctx
+        if self.stage == 0:
+            self.stage = 1
+            return ControllerOp(Action.GENERATE)
+        if self.stage == 1:
+            self.stage = 2
+            return ControllerOp(Action.VERIFY, verification_granularity=Granularity.PROGRAM)
+        if self.stage == 2:
+            self.stage = 3
+            return ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.PROGRAM)
+        if self.stage == 3:
+            self.stage = 4
+            return ControllerOp(Action.FEEDBACK, feedback_mechanism=FeedbackMechanism.A)
+        if self.stage == 4:
+            self.stage = 5
+            return ControllerOp(Action.APPLY_PATCH)
+        if self.stage == 5:
+            self.stage = 6
+            return ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT)
+        if self.stage == 6:
+            self.stage = 7
+            return ControllerOp(Action.COMMIT)
+        if self.stage == 7:
+            self.stage = 8
+            return ControllerOp(Action.GENERATE)
+        return ControllerOp(Action.TERMINATE)
+
+    def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
+        if selection_granularity is None:
+            raise ValueError("selection_granularity is required")
+        return select_oracles_by_granularity(
+            artifact,
+            budget,
+            available,
+            selection_granularity=selection_granularity,
+        )
+
+
 def test_failed_context_survives_inconclusive_verify() -> None:
     generator = _SequenceGenerator(["bad stmt\n", "fix\n"])
     renderer = _ToggleRenderer()
@@ -686,3 +830,100 @@ def test_scope_aware_feedback_retains_per_oracle_entries_until_owner_clears() ->
 
     final_feedback_lines = feedback_state.encode().splitlines()
     assert final_feedback_lines == []
+
+
+def test_generate_includes_active_feedback_outside_repair_payload() -> None:
+    generator = _TrackingSequenceGenerator(
+        [
+            "bad stmt\n",
+            "more\n",
+        ]
+    )
+    renderer = _OkRenderer()
+    program_oracle = _ScopeSequencedOracle(
+        name="program_oracle",
+        required_granularity=Granularity.PROGRAM,
+        rollback_scope=RollbackScope.PROGRAM,
+        verdicts=[Verdict.FAIL],
+        message="program mismatch",
+    )
+    stmt_oracle = _ScopeSequencedOracle(
+        name="stmt_oracle",
+        required_granularity=Granularity.STMT,
+        rollback_scope=RollbackScope.STMT,
+        verdicts=[Verdict.PASS],
+        message="unused",
+    )
+    budget = Budget(gen_tokens_budget=16)
+    feedback_state = FeedbackState()
+    rollback_manager = RollbackManager()
+    policy = _GenerateUsesActiveFeedbackPolicy()
+
+    run_dtv_loop(
+        generator=generator,
+        renderer=renderer,
+        oracles=[stmt_oracle, program_oracle],
+        budget=budget,
+        feedback_state=feedback_state,
+        rollback_manager=rollback_manager,
+        policy=policy,
+        max_steps=12,
+    )
+
+    assert len(generator.seen_assistant_messages) == 2
+    assert "repair feedback" not in generator.seen_assistant_messages[0]
+    prompt = generator.seen_assistant_messages[1]
+    assert "bad stmt\n" in prompt
+    assert "/* repair feedback:" in prompt
+    assert prompt.find("bad stmt\n") < prompt.find("/* repair feedback:")
+    assert "oracle=program_oracle" in prompt
+
+
+def test_generate_keeps_feedback_anchor_position_after_feedback_a() -> None:
+    generator = _FencedTrackingGenerator(
+        [
+            "bad stmt\n",
+            "use std::io::{self, Write};\n",
+            "next;\n",
+        ]
+    )
+    renderer = _OkRenderer()
+    program_oracle = _ScopeSequencedOracle(
+        name="program_oracle",
+        required_granularity=Granularity.PROGRAM,
+        rollback_scope=RollbackScope.PROGRAM,
+        verdicts=[Verdict.FAIL],
+        message="program mismatch",
+    )
+    stmt_oracle = _ScopeSequencedOracle(
+        name="stmt_oracle",
+        required_granularity=Granularity.STMT,
+        rollback_scope=RollbackScope.STMT,
+        verdicts=[Verdict.PASS],
+        message="unused",
+    )
+    budget = Budget(gen_tokens_budget=24)
+    feedback_state = FeedbackState()
+    rollback_manager = RollbackManager()
+    policy = _FeedbackThenGeneratePolicy()
+
+    run_dtv_loop(
+        generator=generator,
+        renderer=renderer,
+        oracles=[stmt_oracle, program_oracle],
+        budget=budget,
+        feedback_state=feedback_state,
+        rollback_manager=rollback_manager,
+        policy=policy,
+        max_steps=16,
+    )
+
+    assert len(generator.seen_assistant_messages) == 3
+    feedback_prompt = generator.seen_assistant_messages[1]
+    generate_prompt = generator.seen_assistant_messages[2]
+    assert "/* repair feedback:" in feedback_prompt
+    assert "oracle=program_oracle" in feedback_prompt
+    assert "/* repair feedback:" in generate_prompt
+    assert "oracle=program_oracle" in generate_prompt
+    assert "use std::io::{self, Write};\n" in generate_prompt
+    assert generate_prompt.find("/* repair feedback:") < generate_prompt.find("use std::io::{self, Write};\n")

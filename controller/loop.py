@@ -32,7 +32,7 @@ from core.types import (
     TraceEvent,
     Verdict,
 )
-from feedback.formatter import RepairFeedbackFormatConfig
+from feedback.formatter import RepairFeedbackFormatConfig, render_repair_feedback
 from feedback.feedback import FeedbackState
 from feedback.output_parser import parse_feedback_output, validate_patch_scope
 from feedback.plan import FeedbackPlan, build_feedback_plan
@@ -351,6 +351,45 @@ def _append_trace(
     )
 
 
+def _render_generate_feedback_assistant(
+    assistant_prefix: AssistantContent,
+    feedback_state: FeedbackState,
+) -> str:
+    scoped_feedback = feedback_state.scoped_active_snapshot()
+    if not scoped_feedback:
+        return assistant_prefix.render()
+
+    format_config = RepairFeedbackFormatConfig(include_failed_snippet=False)
+    blocks: list[tuple[int | None, str]] = []
+    for scope, anchor, outputs in scoped_feedback:
+        feedback_text = render_repair_feedback(
+            RepairContext(
+                failed_snippet="(empty)",
+                repair_scope=scope,
+                outputs=outputs,
+            ),
+            format_config=format_config,
+        )
+        blocks.append((anchor, feedback_text))
+
+    if assistant_prefix.fence_state in {FenceState.INSIDE, FenceState.DONE}:
+        code = assistant_prefix.code
+        insertions: list[tuple[int, str]] = []
+        for anchor, block in blocks:
+            pos = len(code) if anchor is None else max(0, min(anchor, len(code)))
+            insertions.append((pos, block))
+        insertions.sort(key=lambda item: item[0], reverse=True)
+        for pos, block in insertions:
+            code = f"{code[:pos]}{block}\n\n{code[pos:]}"
+        return assistant_prefix.with_code(code).render()
+
+    rendered_prefix = assistant_prefix.render()
+    suffix = "\n\n".join(block for _, block in blocks)
+    if not rendered_prefix:
+        return suffix
+    return f"{rendered_prefix}\n\n{suffix}"
+
+
 def _handle_generate(
     runtime: ControllerRuntime,
     base_messages: list[GenerateMessage],
@@ -364,12 +403,14 @@ def _handle_generate(
 ) -> None:
     context.extract_fence = True
     context.channel = GenerationChannel.CONTINUATION
-    feedback = feedback_state.encode()
+    active_outputs = feedback_state.active_snapshot()
+    repair_payload_active = (
+        runtime.failed_prefix is not None and runtime.repair_base_prefix is not None
+    )
     if (
         feedback_enabled
-        and feedback
-        and runtime.failed_prefix is not None
-        and runtime.repair_base_prefix is not None
+        and active_outputs
+        and repair_payload_active
     ):
         raise RuntimeError("Action.GENERATE cannot include feedback payload; use Action.FEEDBACK")
     if runtime.extractor_state is None:
@@ -377,7 +418,13 @@ def _handle_generate(
     _assert_extractor_consistency(runtime)
     generator.restore_output_extractor_state(runtime.extractor_state)
     update_last_assistant(base_messages, runtime.assistant_prefix)
-    context.messages = list(base_messages)
+    messages = list(base_messages)
+    if feedback_enabled and active_outputs and not repair_payload_active:
+        update_last_assistant(
+            messages,
+            _render_generate_feedback_assistant(runtime.assistant_prefix, feedback_state),
+        )
+    context.messages = messages
     result = generator.generate_step(context)
     runtime.state.prefix += result.delta_text
     assistant_delta = result.assistant_delta or AssistantContent.from_unfenced(result.delta_text)
@@ -615,6 +662,7 @@ def _handle_rollback(
         runtime.repair_base_assistant_prefix = runtime.assistant_prefix
         runtime.repair_base_extractor_state = runtime.extractor_state
         runtime.repair_scope = op.rollback_scope
+        feedback_state.set_scope_anchor(op.rollback_scope, len(runtime.state.prefix))
     else:
         _clear_repair_context(runtime)
     runtime.last_render_status = None
