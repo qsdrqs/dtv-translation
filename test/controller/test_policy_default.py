@@ -36,6 +36,7 @@ def _ctx(
     failed_prefix: str | None = None,
     pending_patch: str | None = None,
     repair_base_prefix: str | None = None,
+    repair_scope: RollbackScope | None = None,
 ) -> PolicyContext:
     return PolicyContext(
         state=ControllerState(prefix=prefix),
@@ -49,6 +50,7 @@ def _ctx(
         failed_prefix=failed_prefix,
         pending_patch=pending_patch,
         repair_base_prefix=repair_base_prefix,
+        repair_scope=repair_scope,
     )
 
 
@@ -318,6 +320,7 @@ def test_default_policy_feedback_starts_with_mechanism_a() -> None:
         last_action=Action.ROLLBACK,
         failed_prefix="bad;",
         repair_base_prefix="",
+        repair_scope=RollbackScope.STMT,
     )
 
     op = policy.next_action(ctx)
@@ -362,6 +365,7 @@ def test_default_policy_feedback_once_b_no_downgrade_per_key() -> None:
         last_action=Action.ROLLBACK,
         failed_prefix="bad;",
         repair_base_prefix="",
+        repair_scope=RollbackScope.STMT,
     )
     first_feedback_op = policy.next_action(first_feedback_ctx)
     assert first_feedback_op.action == Action.FEEDBACK
@@ -381,6 +385,7 @@ def test_default_policy_feedback_once_b_no_downgrade_per_key() -> None:
         last_action=Action.ROLLBACK,
         failed_prefix="bad;",
         repair_base_prefix="",
+        repair_scope=RollbackScope.STMT,
     )
     second_feedback_op = policy.next_action(second_feedback_ctx)
     assert second_feedback_op.action == Action.FEEDBACK
@@ -400,6 +405,7 @@ def test_default_policy_feedback_once_b_no_downgrade_per_key() -> None:
         last_action=Action.ROLLBACK,
         failed_prefix="bad;",
         repair_base_prefix="",
+        repair_scope=RollbackScope.STMT,
     )
     third_feedback_op = policy.next_action(third_feedback_ctx)
     assert third_feedback_op.action == Action.TERMINATE
@@ -417,12 +423,56 @@ def test_default_policy_feedback_once_b_no_downgrade_per_key() -> None:
         prefix="",
         last_action=Action.ROLLBACK,
         failed_prefix="bad2;",
-        repair_base_prefix="",
+        repair_base_prefix="anchor2",
+        repair_scope=RollbackScope.STMT,
     )
     new_key_feedback_op = policy.next_action(new_key_feedback_ctx)
-    # Locking is per repair key. A new failed snippet starts from A again.
     assert new_key_feedback_op.action == Action.FEEDBACK
     assert new_key_feedback_op.feedback_mechanism == FeedbackMechanism.A
+
+
+def test_default_policy_program_scope_escalates_to_b_even_when_failed_prefix_changes() -> None:
+    policy = DefaultPolicy(DefaultPolicyConfig(max_repair_rounds=4))
+
+    first_verify_fail_ctx = _ctx(
+        prefix="program_fail_v1",
+        last_action=Action.VERIFY,
+        last_render_status=RenderStatus.OK,
+        last_outputs=_fail_outputs(scope=RollbackScope.PROGRAM),
+    )
+    first_rollback_op = policy.next_action(first_verify_fail_ctx)
+    assert first_rollback_op.action == Action.ROLLBACK
+
+    first_feedback_ctx = _ctx(
+        prefix="",
+        last_action=Action.ROLLBACK,
+        failed_prefix="program_fail_v1",
+        repair_base_prefix="",
+        repair_scope=RollbackScope.PROGRAM,
+    )
+    first_feedback_op = policy.next_action(first_feedback_ctx)
+    assert first_feedback_op.action == Action.FEEDBACK
+    assert first_feedback_op.feedback_mechanism == FeedbackMechanism.A
+
+    second_verify_fail_ctx = _ctx(
+        prefix="program_fail_v2",
+        last_action=Action.VERIFY,
+        last_render_status=RenderStatus.OK,
+        last_outputs=_fail_outputs(scope=RollbackScope.PROGRAM),
+    )
+    second_rollback_op = policy.next_action(second_verify_fail_ctx)
+    assert second_rollback_op.action == Action.ROLLBACK
+
+    second_feedback_ctx = _ctx(
+        prefix="",
+        last_action=Action.ROLLBACK,
+        failed_prefix="program_fail_v2",
+        repair_base_prefix="",
+        repair_scope=RollbackScope.PROGRAM,
+    )
+    second_feedback_op = policy.next_action(second_feedback_ctx)
+    assert second_feedback_op.action == Action.FEEDBACK
+    assert second_feedback_op.feedback_mechanism == FeedbackMechanism.B
 
 
 def test_default_policy_feedback_force_mechanism_b() -> None:
@@ -432,6 +482,7 @@ def test_default_policy_feedback_force_mechanism_b() -> None:
         last_action=Action.ROLLBACK,
         failed_prefix="bad;",
         repair_base_prefix="",
+        repair_scope=RollbackScope.STMT,
     )
 
     op = policy.next_action(ctx)

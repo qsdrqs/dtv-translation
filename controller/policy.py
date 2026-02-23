@@ -82,8 +82,8 @@ class DefaultPolicy(Policy):
 
     def __init__(self, config: DefaultPolicyConfig | None = None) -> None:
         self.config = config or DefaultPolicyConfig()
-        self._repair_rounds: dict[tuple[str, str], int] = {}
-        self._repair_schedule: dict[tuple[str, str], _RepairScheduleState] = {}
+        self._repair_rounds: dict[tuple[str, RollbackScope], int] = {}
+        self._repair_schedule: dict[tuple[str, RollbackScope], _RepairScheduleState] = {}
         self._pending_fail_snapshot: _FailSnapshot | None = None
 
     def next_action(self, ctx) -> ControllerOp:
@@ -331,15 +331,15 @@ def _select_fail_scope(config: DefaultPolicyConfig, outputs: tuple[OracleOutput,
     return config.default_fail_scope
 
 
-def _repair_key(ctx) -> tuple[str, str] | None:
-    if ctx.failed_prefix is None or ctx.repair_base_prefix is None:
+def _repair_key(ctx) -> tuple[str, RollbackScope] | None:
+    if ctx.repair_base_prefix is None or ctx.repair_scope is None:
         return None
-    return (ctx.repair_base_prefix, ctx.failed_prefix)
+    return (ctx.repair_base_prefix, ctx.repair_scope)
 
 
 def _can_start_repair(
     config: DefaultPolicyConfig,
-    rounds: dict[tuple[str, str], int],
+    rounds: dict[tuple[str, RollbackScope], int],
     ctx,
 ) -> bool:
     if not config.enable_feedback:
@@ -352,7 +352,7 @@ def _can_start_repair(
     return rounds.get(key, 0) < config.max_repair_rounds
 
 
-def _record_repair_round(rounds: dict[tuple[str, str], int], ctx) -> None:
+def _record_repair_round(rounds: dict[tuple[str, RollbackScope], int], ctx) -> None:
     key = _repair_key(ctx)
     if key is None:
         return

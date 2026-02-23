@@ -162,3 +162,43 @@ def test_build_feedback_plan_maps_mechanism_b_to_patch_fenced() -> None:
     assert plan.mode == FeedbackMode.FENCED
     assert plan.channel == GenerationChannel.PATCH
     assert "Return exactly one Rust code block:" in plan.prompt
+
+
+def test_build_repair_context_scope_filter_limits_outputs() -> None:
+    state = FeedbackState()
+    state.on_verify([
+        OracleOutput(
+            oracle_name="stmt_oracle",
+            verdict=Verdict.FAIL,
+            diagnostics=(Diagnostic(message="stmt mismatch", severity="error"),),
+            rollback_scope=RollbackScope.STMT,
+        )
+    ],
+    selected_scope=RollbackScope.STMT,)
+    state.on_verify([
+        OracleOutput(
+            oracle_name="program_oracle",
+            verdict=Verdict.FAIL,
+            diagnostics=(Diagnostic(message="program mismatch", severity="error"),),
+            rollback_scope=RollbackScope.PROGRAM,
+        )
+    ],
+    selected_scope=RollbackScope.PROGRAM,)
+
+    stmt_context = RepairContext.from_feedback_state(
+        state,
+        bad_snippet="bad stmt",
+        repair_scope=RollbackScope.STMT,
+        scope_filter=RollbackScope.STMT,
+    )
+    assert len(stmt_context.outputs) == 1
+    assert stmt_context.outputs[0].oracle_name == "stmt_oracle"
+
+    program_context = RepairContext.from_feedback_state(
+        state,
+        bad_snippet="bad program",
+        repair_scope=RollbackScope.PROGRAM,
+        scope_filter=RollbackScope.PROGRAM,
+    )
+    assert len(program_context.outputs) == 1
+    assert program_context.outputs[0].oracle_name == "program_oracle"

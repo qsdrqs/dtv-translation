@@ -496,6 +496,49 @@ class _ScopeAwareFeedbackPolicy:
         )
 
 
+class _ScopeAwareFeedbackMechanismBPolicy:
+    def __init__(self) -> None:
+        self.stage = 0
+
+    def next_action(self, ctx) -> ControllerOp:
+        _ = ctx
+        if self.stage == 0:
+            self.stage = 1
+            return ControllerOp(Action.GENERATE)
+        if self.stage == 1:
+            self.stage = 2
+            return ControllerOp(Action.VERIFY, verification_granularity=Granularity.PROGRAM)
+        if self.stage == 2:
+            self.stage = 3
+            return ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.PROGRAM)
+        if self.stage == 3:
+            self.stage = 4
+            return ControllerOp(Action.FEEDBACK, feedback_mechanism=FeedbackMechanism.B)
+        if self.stage == 4:
+            self.stage = 5
+            return ControllerOp(Action.APPLY_PATCH)
+        if self.stage == 5:
+            self.stage = 6
+            return ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT)
+        if self.stage == 6:
+            self.stage = 7
+            return ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.STMT)
+        if self.stage == 7:
+            self.stage = 8
+            return ControllerOp(Action.FEEDBACK, feedback_mechanism=FeedbackMechanism.B)
+        return ControllerOp(Action.TERMINATE)
+
+    def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
+        if selection_granularity is None:
+            raise ValueError("selection_granularity is required")
+        return select_oracles_by_granularity(
+            artifact,
+            budget,
+            available,
+            selection_granularity=selection_granularity,
+        )
+
+
 class _GenerateUsesActiveFeedbackPolicy:
     def __init__(self) -> None:
         self.stage = 0
@@ -548,6 +591,49 @@ class _FeedbackThenGeneratePolicy:
         if self.stage == 3:
             self.stage = 4
             return ControllerOp(Action.FEEDBACK, feedback_mechanism=FeedbackMechanism.A)
+        if self.stage == 4:
+            self.stage = 5
+            return ControllerOp(Action.APPLY_PATCH)
+        if self.stage == 5:
+            self.stage = 6
+            return ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT)
+        if self.stage == 6:
+            self.stage = 7
+            return ControllerOp(Action.COMMIT)
+        if self.stage == 7:
+            self.stage = 8
+            return ControllerOp(Action.GENERATE)
+        return ControllerOp(Action.TERMINATE)
+
+    def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
+        if selection_granularity is None:
+            raise ValueError("selection_granularity is required")
+        return select_oracles_by_granularity(
+            artifact,
+            budget,
+            available,
+            selection_granularity=selection_granularity,
+        )
+
+
+class _FeedbackBThenGeneratePolicy:
+    def __init__(self) -> None:
+        self.stage = 0
+
+    def next_action(self, ctx) -> ControllerOp:
+        _ = ctx
+        if self.stage == 0:
+            self.stage = 1
+            return ControllerOp(Action.GENERATE)
+        if self.stage == 1:
+            self.stage = 2
+            return ControllerOp(Action.VERIFY, verification_granularity=Granularity.PROGRAM)
+        if self.stage == 2:
+            self.stage = 3
+            return ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.PROGRAM)
+        if self.stage == 3:
+            self.stage = 4
+            return ControllerOp(Action.FEEDBACK, feedback_mechanism=FeedbackMechanism.B)
         if self.stage == 4:
             self.stage = 5
             return ControllerOp(Action.APPLY_PATCH)
@@ -875,7 +961,56 @@ def test_scope_aware_feedback_retains_per_oracle_entries_until_owner_clears() ->
     assert final_feedback_lines == []
 
 
-def test_generate_includes_active_feedback_outside_repair_payload() -> None:
+def test_feedback_b_filters_diagnostics_to_current_repair_scope() -> None:
+    generator = _TrackingSequenceGenerator(
+        [
+            "bad stmt\n",
+            "```rust\nprogram_fix;\n```",
+            "```rust\nstmt_fix;\n```",
+        ]
+    )
+    renderer = _OkRenderer()
+    program_oracle = _ScopeSequencedOracle(
+        name="program_oracle",
+        required_granularity=Granularity.PROGRAM,
+        rollback_scope=RollbackScope.PROGRAM,
+        verdicts=[Verdict.FAIL],
+        message="program mismatch",
+    )
+    stmt_oracle = _ScopeSequencedOracle(
+        name="stmt_oracle",
+        required_granularity=Granularity.STMT,
+        rollback_scope=RollbackScope.STMT,
+        verdicts=[Verdict.FAIL],
+        message="statement mismatch",
+    )
+    budget = Budget(gen_tokens_budget=24)
+    feedback_state = FeedbackState()
+    rollback_manager = RollbackManager()
+    policy = _ScopeAwareFeedbackMechanismBPolicy()
+
+    _, trace = run_dtv_loop(
+        generator=generator,
+        renderer=renderer,
+        oracles=[stmt_oracle, program_oracle],
+        budget=budget,
+        feedback_state=feedback_state,
+        rollback_manager=rollback_manager,
+        policy=policy,
+        max_steps=16,
+    )
+
+    feedback_events = [event for event in trace if event.action == Action.FEEDBACK]
+    assert len(feedback_events) == 2
+    first_feedback_prompt = generator.seen_user_messages[1]
+    second_feedback_prompt = generator.seen_user_messages[2]
+    assert "[program_oracle] program mismatch" in first_feedback_prompt
+    assert "[stmt_oracle] statement mismatch" not in first_feedback_prompt
+    assert "[stmt_oracle] statement mismatch" in second_feedback_prompt
+    assert "[program_oracle] program mismatch" not in second_feedback_prompt
+
+
+def test_generate_without_feedback_a_does_not_inject_active_feedback() -> None:
     generator = _TrackingSequenceGenerator(
         [
             "bad stmt\n",
@@ -916,10 +1051,9 @@ def test_generate_includes_active_feedback_outside_repair_payload() -> None:
     assert len(generator.seen_assistant_messages) == 2
     assert "repair feedback" not in generator.seen_assistant_messages[0]
     prompt = generator.seen_assistant_messages[1]
-    assert "bad stmt\n" in prompt
-    assert "/* repair feedback:" in prompt
-    assert prompt.find("bad stmt\n") < prompt.find("/* repair feedback:")
-    assert "oracle=program_oracle" in prompt
+    assert "bad stmt" in prompt
+    assert "/* repair feedback:" not in prompt
+    assert "oracle=program_oracle" not in prompt
 
 
 def test_generate_keeps_feedback_anchor_position_after_feedback_a() -> None:
@@ -970,6 +1104,52 @@ def test_generate_keeps_feedback_anchor_position_after_feedback_a() -> None:
     assert "oracle=program_oracle" in generate_prompt
     assert "use std::io::{self, Write};\n" in generate_prompt
     assert generate_prompt.find("/* repair feedback:") < generate_prompt.find("use std::io::{self, Write};\n")
+
+
+def test_generate_skips_inline_feedback_after_feedback_b() -> None:
+    generator = _TrackingSequenceGenerator(
+        [
+            "bad stmt\n",
+            "fixed stmt\n",
+            "next stmt\n",
+        ]
+    )
+    renderer = _OkRenderer()
+    program_oracle = _ScopeSequencedOracle(
+        name="program_oracle",
+        required_granularity=Granularity.PROGRAM,
+        rollback_scope=RollbackScope.PROGRAM,
+        verdicts=[Verdict.FAIL],
+        message="program mismatch",
+    )
+    stmt_oracle = _ScopeSequencedOracle(
+        name="stmt_oracle",
+        required_granularity=Granularity.STMT,
+        rollback_scope=RollbackScope.STMT,
+        verdicts=[Verdict.PASS],
+        message="unused",
+    )
+    budget = Budget(gen_tokens_budget=24)
+    feedback_state = FeedbackState()
+    rollback_manager = RollbackManager()
+    policy = _FeedbackBThenGeneratePolicy()
+
+    run_dtv_loop(
+        generator=generator,
+        renderer=renderer,
+        oracles=[stmt_oracle, program_oracle],
+        budget=budget,
+        feedback_state=feedback_state,
+        rollback_manager=rollback_manager,
+        policy=policy,
+        max_steps=16,
+    )
+
+    assert len(generator.seen_assistant_messages) == 3
+    feedback_user_prompt = generator.seen_user_messages[1]
+    generate_prompt = generator.seen_assistant_messages[2]
+    assert "The previous generated next code snippet was:" in feedback_user_prompt
+    assert "/* repair feedback:" not in generate_prompt
 
 
 def test_stmt_failure_lifted_to_func_persists_feedback_through_stmt_commit() -> None:

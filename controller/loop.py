@@ -64,6 +64,7 @@ class PolicyContext:
     failed_prefix: str | None
     pending_patch: str | None
     repair_base_prefix: str | None
+    repair_scope: RollbackScope | None
 
 
 @dataclass
@@ -419,7 +420,12 @@ def _handle_generate(
     generator.restore_output_extractor_state(runtime.extractor_state)
     update_last_assistant(base_messages, runtime.assistant_prefix)
     messages = list(base_messages)
-    if feedback_enabled and active_outputs and not repair_payload_active:
+    if (
+        feedback_enabled
+        and active_outputs
+        and not repair_payload_active
+        and runtime.last_feedback_mechanism == FeedbackMechanism.A
+    ):
         update_last_assistant(
             messages,
             _render_generate_feedback_assistant(runtime.assistant_prefix, feedback_state),
@@ -711,10 +717,12 @@ def _handle_feedback(
         raise RuntimeError("FEEDBACK requires failed_prefix and repair base prefix.")
     mechanism = op.feedback_mechanism or FeedbackMechanism.A
     bad_snippet = _failed_snippet(runtime.repair_base_prefix, runtime.failed_prefix)
+    scope_filter = runtime.repair_scope if mechanism == FeedbackMechanism.B else None
     repair_context = RepairContext.from_feedback_state(
         feedback_state,
         bad_snippet,
         repair_scope=runtime.repair_scope or RollbackScope.STMT,
+        scope_filter=scope_filter,
         parser_error_context=runtime.feedback_parser_error,
     )
     feedback_plan = build_feedback_plan(
@@ -915,6 +923,7 @@ def run_dtv_loop(
             failed_prefix=runtime.failed_prefix,
             pending_patch=runtime.pending_patch,
             repair_base_prefix=runtime.repair_base_prefix,
+            repair_scope=runtime.repair_scope,
         )
         op = policy.next_action(ctx)
         logger.info(

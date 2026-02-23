@@ -20,13 +20,17 @@ class RepairContext:
         bad_snippet: str,
         *,
         repair_scope: RollbackScope = RollbackScope.STMT,
+        scope_filter: RollbackScope | None = None,
         parser_error_context: str | None = None,
     ) -> RepairContext:
         snippet = bad_snippet.strip() or "(empty)"
         parser_context = parser_error_context.strip() if parser_error_context else None
+        outputs = feedback_state.active_snapshot()
+        if scope_filter is not None:
+            outputs = feedback_state.active_snapshot_for_scope(scope_filter)
         return cls(
             failed_snippet=snippet,
             repair_scope=repair_scope,
-            outputs=feedback_state.active_snapshot(),
+            outputs=outputs,
             parser_error_context=parser_context,
         )

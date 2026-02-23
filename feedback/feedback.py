@@ -151,6 +151,14 @@ class FeedbackState:
     def active_snapshot(self) -> tuple[OracleOutput, ...]:
         return tuple(self._sorted_active_outputs())
 
+    def active_snapshot_for_scope(self, scope: RollbackScope) -> tuple[OracleOutput, ...]:
+        outputs = [
+            output
+            for output in self._sorted_active_outputs()
+            if output.rollback_scope == scope
+        ]
+        return tuple(outputs)
+
     def scoped_active_snapshot(
         self,
     ) -> tuple[tuple[RollbackScope, int | None, tuple[OracleOutput, ...]], ...]:
