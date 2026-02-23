@@ -33,7 +33,12 @@ def _compile_diagnostics(code: str):
 def _compile_oracle_output(code: str) -> OracleOutput:
     diagnostics = _compile_diagnostics(code)
     verdict = Verdict.FAIL if has_errors(diagnostics) else Verdict.PASS
-    return OracleOutput(oracle_name="rustc", verdict=verdict, diagnostics=diagnostics)
+    return OracleOutput(
+        oracle_name="rustc",
+        verdict=verdict,
+        diagnostics=diagnostics,
+        rollback_scope=RollbackScope.STMT,
+    )
 
 
 def _error_messages(diagnostics) -> list[str]:
@@ -81,11 +86,11 @@ fn main() {
 
     feedback_state = FeedbackState()
 
-    feedback_state.update([warning_output])
+    feedback_state.on_verify([warning_output])
     assert feedback_state.encode() == ""
     assert feedback_state.best_fix_hint() is None
 
-    feedback_state.update([error_output])
+    feedback_state.on_verify([error_output])
     assert feedback_state.encode().splitlines() == _prefixed_error_messages(
         "rustc", error_output.diagnostics
     )
@@ -94,7 +99,7 @@ fn main() {
         pytest.skip("rustc did not emit a help hint on this toolchain")
     assert feedback_state.best_fix_hint() == expected_hint
 
-    feedback_state.update([warning_output])
+    feedback_state.on_verify([warning_output])
     assert feedback_state.encode() == ""
     assert feedback_state.best_fix_hint() is None
 
@@ -113,15 +118,14 @@ fn main() {
         pytest.skip("rustc did not emit a help hint on this toolchain")
     assert expected_hint is not None
     feedback_state = FeedbackState()
-    feedback_state.update(
-        [
-            OracleOutput(
-                oracle_name="rustc",
-                verdict=Verdict.FAIL,
-                diagnostics=diagnostics,
-            )
-        ]
-    )
+    feedback_state.on_verify([
+        OracleOutput(
+            oracle_name="rustc",
+            verdict=Verdict.FAIL,
+            diagnostics=diagnostics,
+            rollback_scope=RollbackScope.STMT,
+        )
+    ])
 
     prompt = build_repair_feedback(feedback_state, "")
     diagnostic_blocks: list[str] = []
@@ -165,15 +169,14 @@ fn main() {
     if any(diag.hints for diag in diagnostics):
         pytest.skip("rustc emitted a help hint on this toolchain; fallback path not applicable")
     feedback_state = FeedbackState()
-    feedback_state.update(
-        [
-            OracleOutput(
-                oracle_name="rustc",
-                verdict=Verdict.FAIL,
-                diagnostics=diagnostics,
-            )
-        ]
-    )
+    feedback_state.on_verify([
+        OracleOutput(
+            oracle_name="rustc",
+            verdict=Verdict.FAIL,
+            diagnostics=diagnostics,
+            rollback_scope=RollbackScope.STMT,
+        )
+    ])
 
     prompt = build_repair_feedback(feedback_state, "")
     diagnostic_blocks: list[str] = []
@@ -241,7 +244,7 @@ fn foo() -> i32 {
     )
 
     feedback_state = FeedbackState()
-    feedback_state.update([stmt_output, func_output], selected_scope=RollbackScope.STMT)
+    feedback_state.on_verify([stmt_output, func_output], selected_scope=RollbackScope.STMT)
 
     encoded = feedback_state.encode()
     assert encoded.splitlines() == _prefixed_error_messages("rustc", stmt_diagnostics)
@@ -280,7 +283,7 @@ fn main() {
     )
 
     feedback_state = FeedbackState()
-    feedback_state.update([stmt_output_1, stmt_output_2], selected_scope=RollbackScope.STMT)
+    feedback_state.on_verify([stmt_output_1, stmt_output_2], selected_scope=RollbackScope.STMT)
 
     encoded = feedback_state.encode()
     assert encoded.splitlines() == (
@@ -305,10 +308,10 @@ def test_feedback_raises_when_fail_has_no_error_fatal_diagnostics() -> None:
 
     feedback_state = FeedbackState()
     with pytest.raises(ValueError, match="FAIL output has no error/fatal diagnostics"):
-        feedback_state.update([fail_output], selected_scope=RollbackScope.STMT)
+        feedback_state.on_verify([fail_output], selected_scope=RollbackScope.STMT)
 
 
-def test_feedback_raises_when_no_outputs_match_selected_scope() -> None:
+def test_feedback_ignores_fail_outputs_outside_selected_scope() -> None:
     func_diagnostics = _compile_diagnostics(
         """\
 fn foo() -> i32 {
@@ -324,8 +327,8 @@ fn foo() -> i32 {
     )
 
     feedback_state = FeedbackState()
-    with pytest.raises(ValueError, match="No FAIL outputs match selected rollback scope"):
-        feedback_state.update([func_output], selected_scope=RollbackScope.STMT)
+    feedback_state.on_verify([func_output], selected_scope=RollbackScope.STMT)
+    assert feedback_state.encode() == ""
 
 
 def test_feedback_hint_from_scope_aligned_diagnostics_only() -> None:
@@ -359,7 +362,7 @@ fn foo() -> i32 {
     )
 
     feedback_state = FeedbackState()
-    feedback_state.update([stmt_output, func_output], selected_scope=RollbackScope.STMT)
+    feedback_state.on_verify([stmt_output, func_output], selected_scope=RollbackScope.STMT)
 
     hint = feedback_state.best_fix_hint()
     expected_hint = _first_hint(stmt_diagnostics)
@@ -386,7 +389,7 @@ fn main() {
     )
 
     feedback_state = FeedbackState()
-    feedback_state.update([stmt_output], selected_scope=RollbackScope.STMT)
+    feedback_state.on_verify([stmt_output], selected_scope=RollbackScope.STMT)
 
     prompt = build_repair_feedback(feedback_state, "")
     diagnostic_blocks: list[str] = []
@@ -436,7 +439,7 @@ def test_build_repair_feedback_uses_existing_diagnostic_fields() -> None:
         rollback_scope=RollbackScope.FUNC,
     )
     feedback_state = FeedbackState()
-    feedback_state.update([fail_output], selected_scope=RollbackScope.FUNC)
+    feedback_state.on_verify([fail_output], selected_scope=RollbackScope.FUNC)
     prompt = build_repair_feedback(feedback_state, "let result = buggy_call();")
     assert prompt == """/* repair feedback:
 failed snippet:
@@ -463,7 +466,7 @@ def test_build_repair_feedback_can_omit_failed_snippet() -> None:
         rollback_scope=RollbackScope.FUNC,
     )
     feedback_state = FeedbackState()
-    feedback_state.update([fail_output], selected_scope=RollbackScope.FUNC)
+    feedback_state.on_verify([fail_output], selected_scope=RollbackScope.FUNC)
     prompt = build_repair_feedback(
         feedback_state,
         "let result = buggy_call();",
@@ -502,7 +505,7 @@ def test_feedback_preserves_deterministic_oracle_and_diagnostic_order() -> None:
     )
 
     feedback_state = FeedbackState()
-    feedback_state.update([oracle_a, oracle_b], selected_scope=RollbackScope.STMT)
+    feedback_state.on_verify([oracle_a, oracle_b], selected_scope=RollbackScope.STMT)
 
     encoded = feedback_state.encode()
     lines = encoded.strip().split("\n")

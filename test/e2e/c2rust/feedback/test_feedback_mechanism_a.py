@@ -242,7 +242,7 @@ fn main() {
         DefaultPolicyConfig(
             verify_on_boundary=False,
             verify_on_eos=True,
-            eos_granularity=Granularity.PROGRAM,
+            eos_granularity=Granularity.STMT,
             enable_feedback=True,
             feedback_mode=FeedbackMode.FENCED,
             max_repair_rounds=1,

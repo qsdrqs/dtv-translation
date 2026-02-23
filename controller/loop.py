@@ -505,7 +505,7 @@ def _handle_verify(
                         _truncate(output.diagnostics[0].message, 800),
                     )
             if feedback_enabled:
-                feedback_state.update(outputs)
+                feedback_state.on_verify(outputs, selected_scope=effective_granularity)
         else:
             notes = notes or "no oracles selected"
     else:
@@ -542,6 +542,8 @@ def _handle_verify(
 def _handle_commit(
     runtime: ControllerRuntime,
     rollback_manager: RollbackManager,
+    feedback_state: FeedbackState,
+    feedback_enabled: bool,
     budget: Budget,
     trace: list[TraceEvent],
 ) -> None:
@@ -556,6 +558,8 @@ def _handle_commit(
         runtime.assistant_prefix,
         runtime.extractor_state,
     )
+    if feedback_enabled:
+        feedback_state.on_commit(runtime.last_verification_granularity)
     _clear_repair_context(runtime)
     runtime.last_action = Action.COMMIT
     logger.info(
@@ -605,7 +609,7 @@ def _handle_rollback(
         runtime.extractor_state = generator.capture_output_extractor_state()
     generator.restore_output_extractor_state(runtime.extractor_state)
     if feedback_enabled:
-        feedback_state.update(list(runtime.last_outputs), selected_scope=op.rollback_scope)
+        feedback_state.on_rollback(op.rollback_scope)
         runtime.pending_patch = None
         runtime.repair_base_prefix = runtime.state.prefix
         runtime.repair_base_assistant_prefix = runtime.assistant_prefix
@@ -789,9 +793,13 @@ def _handle_continue(
 
 def _handle_terminate(
     runtime: ControllerRuntime,
+    feedback_state: FeedbackState,
+    feedback_enabled: bool,
     budget: Budget,
     trace: list[TraceEvent],
 ) -> None:
+    if feedback_enabled:
+        feedback_state.on_terminate()
     runtime.last_action = Action.TERMINATE
     logger.info("terminate: step=%s", runtime.state.step)
     _append_trace(
@@ -895,7 +903,7 @@ def run_dtv_loop(
             if runtime.last_stop_reason is not None and runtime.last_stop_reason.kind in {
                 "no_fence_eos",
             }:
-                _handle_terminate(runtime, budget, trace)
+                _handle_terminate(runtime, feedback_state, feedback_enabled, budget, trace)
                 break
             continue
 
@@ -916,7 +924,14 @@ def run_dtv_loop(
             continue
 
         if op.action == Action.COMMIT:
-            _handle_commit(runtime, rollback_manager, budget, trace)
+            _handle_commit(
+                runtime,
+                rollback_manager,
+                feedback_state,
+                feedback_enabled,
+                budget,
+                trace,
+            )
             runtime.state.step += 1
             continue
 
@@ -961,7 +976,7 @@ def run_dtv_loop(
             continue
 
         if op.action == Action.TERMINATE:
-            _handle_terminate(runtime, budget, trace)
+            _handle_terminate(runtime, feedback_state, feedback_enabled, budget, trace)
             break
 
         raise ValueError(f"Unsupported action: {op.action}")

@@ -27,6 +27,6 @@ class RepairContext:
         return cls(
             failed_snippet=snippet,
             repair_scope=repair_scope,
-            outputs=tuple(feedback_state.recent_outputs),
+            outputs=feedback_state.active_snapshot(),
             parser_error_context=parser_context,
         )

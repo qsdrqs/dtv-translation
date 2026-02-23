@@ -38,7 +38,7 @@ def test_build_repair_context_collects_scope_aligned_diagnostics() -> None:
             rollback_scope=RollbackScope.STMT,
         ),
     ]
-    state.update(outputs, selected_scope=RollbackScope.STMT)
+    state.on_verify(outputs, selected_scope=RollbackScope.STMT)
 
     repair_context = RepairContext.from_feedback_state(state, bad_snippet='let x: i32 = "1";')
 
@@ -55,19 +55,17 @@ def test_build_repair_context_collects_scope_aligned_diagnostics() -> None:
 
 def test_render_feedback_prompt_includes_parser_error_context() -> None:
     state = FeedbackState()
-    state.update(
-        [
-            OracleOutput(
-                oracle_name="rustc",
-                verdict=Verdict.FAIL,
-                diagnostics=(
-                    Diagnostic(message="expected `i32`, found `&str`", severity="error"),
-                ),
-                rollback_scope=RollbackScope.STMT,
-            )
-        ],
-        selected_scope=RollbackScope.STMT,
-    )
+    state.on_verify([
+        OracleOutput(
+            oracle_name="rustc",
+            verdict=Verdict.FAIL,
+            diagnostics=(
+                Diagnostic(message="expected `i32`, found `&str`", severity="error"),
+            ),
+            rollback_scope=RollbackScope.STMT,
+        )
+    ],
+    selected_scope=RollbackScope.STMT,)
 
     repair_context = RepairContext.from_feedback_state(
         state,
@@ -114,19 +112,17 @@ Return exactly one Rust code block:
 
 def test_build_feedback_plan_maps_mechanism_a_to_continuation() -> None:
     state = FeedbackState()
-    state.update(
-        [
-            OracleOutput(
-                oracle_name="rustc",
-                verdict=Verdict.FAIL,
-                diagnostics=(
-                    Diagnostic(message="expected `i32`, found `&str`", severity="error"),
-                ),
-                rollback_scope=RollbackScope.STMT,
-            )
-        ],
-        selected_scope=RollbackScope.STMT,
-    )
+    state.on_verify([
+        OracleOutput(
+            oracle_name="rustc",
+            verdict=Verdict.FAIL,
+            diagnostics=(
+                Diagnostic(message="expected `i32`, found `&str`", severity="error"),
+            ),
+            rollback_scope=RollbackScope.STMT,
+        )
+    ],
+    selected_scope=RollbackScope.STMT,)
     repair_context = RepairContext.from_feedback_state(state, bad_snippet='let x: i32 = "1";')
 
     plan = build_feedback_plan(
@@ -143,19 +139,17 @@ def test_build_feedback_plan_maps_mechanism_a_to_continuation() -> None:
 
 def test_build_feedback_plan_maps_mechanism_b_to_patch_fenced() -> None:
     state = FeedbackState()
-    state.update(
-        [
-            OracleOutput(
-                oracle_name="rustc",
-                verdict=Verdict.FAIL,
-                diagnostics=(
-                    Diagnostic(message="expected `i32`, found `&str`", severity="error"),
-                ),
-                rollback_scope=RollbackScope.STMT,
-            )
-        ],
-        selected_scope=RollbackScope.STMT,
-    )
+    state.on_verify([
+        OracleOutput(
+            oracle_name="rustc",
+            verdict=Verdict.FAIL,
+            diagnostics=(
+                Diagnostic(message="expected `i32`, found `&str`", severity="error"),
+            ),
+            rollback_scope=RollbackScope.STMT,
+        )
+    ],
+    selected_scope=RollbackScope.STMT,)
     repair_context = RepairContext.from_feedback_state(state, bad_snippet='let x: i32 = "1";')
 
     plan = build_feedback_plan(

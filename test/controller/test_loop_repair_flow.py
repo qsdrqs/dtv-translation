@@ -334,6 +334,101 @@ class _MechanismBRetryPolicy:
         )
 
 
+class _ScopeSequencedOracle:
+    def __init__(
+        self,
+        *,
+        name: str,
+        required_granularity: Granularity,
+        rollback_scope: RollbackScope,
+        verdicts: list[Verdict],
+        message: str,
+    ) -> None:
+        self.name = name
+        self.required_granularity = required_granularity
+        self.rollback_scope = rollback_scope
+        self._verdicts = verdicts
+        self._idx = 0
+        self._message = message
+
+    def run(self, state, artifact, context):
+        _ = state
+        _ = artifact
+        _ = context
+        from core.types import Diagnostic, OracleOutput
+
+        if self._idx >= len(self._verdicts):
+            verdict = self._verdicts[-1]
+        else:
+            verdict = self._verdicts[self._idx]
+        self._idx += 1
+        diagnostics = ()
+        if verdict == Verdict.FAIL:
+            diagnostics = (Diagnostic(message=self._message),)
+        return OracleOutput(
+            oracle_name=self.name,
+            verdict=verdict,
+            diagnostics=diagnostics,
+            realized_cost=1,
+            rollback_scope=self.rollback_scope,
+        )
+
+
+class _ScopeAwareFeedbackPolicy:
+    def __init__(self) -> None:
+        self.stage = 0
+
+    def next_action(self, ctx) -> ControllerOp:
+        _ = ctx
+        if self.stage == 0:
+            self.stage = 1
+            return ControllerOp(Action.GENERATE)
+        if self.stage == 1:
+            self.stage = 2
+            return ControllerOp(Action.VERIFY, verification_granularity=Granularity.PROGRAM)
+        if self.stage == 2:
+            self.stage = 3
+            return ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.PROGRAM)
+        if self.stage == 3:
+            self.stage = 4
+            return ControllerOp(Action.FEEDBACK, feedback_mechanism=FeedbackMechanism.A)
+        if self.stage == 4:
+            self.stage = 5
+            return ControllerOp(Action.APPLY_PATCH)
+        if self.stage == 5:
+            self.stage = 6
+            return ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT)
+        if self.stage == 6:
+            self.stage = 7
+            return ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.STMT)
+        if self.stage == 7:
+            self.stage = 8
+            return ControllerOp(Action.FEEDBACK, feedback_mechanism=FeedbackMechanism.A)
+        if self.stage == 8:
+            self.stage = 9
+            return ControllerOp(Action.APPLY_PATCH)
+        if self.stage == 9:
+            self.stage = 10
+            return ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT)
+        if self.stage == 10:
+            self.stage = 11
+            return ControllerOp(Action.VERIFY, verification_granularity=Granularity.PROGRAM)
+        if self.stage == 11:
+            self.stage = 12
+            return ControllerOp(Action.COMMIT)
+        return ControllerOp(Action.TERMINATE)
+
+    def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
+        if selection_granularity is None:
+            raise ValueError("selection_granularity is required")
+        return select_oracles_by_granularity(
+            artifact,
+            budget,
+            available,
+            selection_granularity=selection_granularity,
+        )
+
+
 def test_failed_context_survives_inconclusive_verify() -> None:
     generator = _SequenceGenerator(["bad stmt\n", "fix\n"])
     renderer = _ToggleRenderer()
@@ -539,3 +634,55 @@ fn main() {
     assert Action.APPLY_PATCH not in [event.action for event in trace]
     assert generator.seen_user_messages[-1].count("Previous parse error:") == 1
     assert "stmt-scope patch cannot include top-level items (function_item)" in generator.seen_user_messages[-1]
+
+
+def test_scope_aware_feedback_retains_per_oracle_entries_until_owner_clears() -> None:
+    generator = _TrackingSequenceGenerator(
+        [
+            "bad stmt\n",
+            "func patch\n",
+            "stmt patch\n",
+        ]
+    )
+    renderer = _OkRenderer()
+    func_oracle = _ScopeSequencedOracle(
+        name="program_oracle",
+        required_granularity=Granularity.PROGRAM,
+        rollback_scope=RollbackScope.PROGRAM,
+        verdicts=[Verdict.FAIL, Verdict.PASS],
+        message="program mismatch",
+    )
+    stmt_oracle = _ScopeSequencedOracle(
+        name="stmt_oracle",
+        required_granularity=Granularity.STMT,
+        rollback_scope=RollbackScope.STMT,
+        verdicts=[Verdict.FAIL, Verdict.PASS],
+        message="statement mismatch",
+    )
+    budget = Budget(gen_tokens_budget=24)
+    feedback_state = FeedbackState()
+    rollback_manager = RollbackManager()
+    policy = _ScopeAwareFeedbackPolicy()
+
+    _, trace = run_dtv_loop(
+        generator=generator,
+        renderer=renderer,
+        oracles=[stmt_oracle, func_oracle],
+        budget=budget,
+        feedback_state=feedback_state,
+        rollback_manager=rollback_manager,
+        policy=policy,
+        max_steps=16,
+    )
+
+    feedback_events = [event for event in trace if event.action == Action.FEEDBACK]
+    assert len(feedback_events) == 2
+    feedback_prompts = generator.seen_assistant_messages[1:]
+    assert len(feedback_prompts) == 2
+    assert "oracle=program_oracle" in feedback_prompts[0]
+    assert "oracle=stmt_oracle" not in feedback_prompts[0]
+    assert "oracle=program_oracle" in feedback_prompts[1]
+    assert "oracle=stmt_oracle" in feedback_prompts[1]
+
+    final_feedback_lines = feedback_state.encode().splitlines()
+    assert final_feedback_lines == []
