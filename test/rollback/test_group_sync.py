@@ -27,6 +27,24 @@ def _commit_named(
     m.add_stmt_checkpoint(prefix, AssistantContent.empty(), None)
 
 
+def _identity_frames(
+    items: tuple[tuple[Granularity, str | None, str | None], ...],
+) -> tuple[GroupStackFrame, ...]:
+    return tuple(
+        GroupStackFrame(kind=kind, name_id=name_id, group_id=group_id)
+        for kind, name_id, group_id in items
+    )
+
+
+def _commit_identity(
+    m: RollbackManager,
+    prefix: str,
+    group_stack: tuple[tuple[Granularity, str | None, str | None], ...],
+) -> None:
+    m.sync_groups(_identity_frames(group_stack))
+    m.add_stmt_checkpoint(prefix, AssistantContent.empty(), None)
+
+
 def test_sync_groups_opens_block_at_first_commit_inside_block() -> None:
     m = RollbackManager()
 
@@ -102,3 +120,43 @@ def test_rollback_func_after_function_switch_keeps_previous_function() -> None:
     out = m.rollback(RollbackScope.FUNC)
     assert out.code_prefix == "main_complete"
     assert [c.code_prefix for c in m.stmt_checkpoints] == ["preamble", "main_complete"]
+
+
+def test_rollback_block_after_sibling_switch_uses_block_group_id() -> None:
+    m = RollbackManager()
+
+    _commit_identity(m, "preamble", ())
+    _commit_identity(
+        m,
+        "block_a_stmt",
+        (
+            (Granularity.FUNC, "foo", "func@0"),
+            (Granularity.BLOCK, None, "block@10"),
+        ),
+    )
+    _commit_identity(
+        m,
+        "block_b_stmt",
+        (
+            (Granularity.FUNC, "foo", "func@0"),
+            (Granularity.BLOCK, None, "block@30"),
+        ),
+    )
+
+    out = m.rollback(RollbackScope.BLOCK)
+    assert out.code_prefix == "block_a_stmt"
+    assert [c.code_prefix for c in m.stmt_checkpoints] == ["preamble", "block_a_stmt"]
+
+
+def test_sync_groups_reopens_func_when_name_mismatch_with_same_group_id() -> None:
+    m = RollbackManager()
+
+    _commit_identity(m, "s1", ((Granularity.FUNC, "main", "func@0"),))
+    assert [(f.kind, f.name_id, f.group_id, f.start_stmt) for f in m.group_stack] == [
+        (Granularity.FUNC, "main", "func@0", 0)
+    ]
+
+    _commit_identity(m, "s2", ((Granularity.FUNC, "min", "func@0"),))
+    assert [(f.kind, f.name_id, f.group_id, f.start_stmt) for f in m.group_stack] == [
+        (Granularity.FUNC, "min", "func@0", 1)
+    ]

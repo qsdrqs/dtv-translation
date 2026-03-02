@@ -32,12 +32,23 @@ def rust_group_stack(
     cur = anchor
     while cur is not None:
         if cur.type == "function_item":
-            frames.append(GroupStackFrame(kind=Granularity.FUNC, name_id=_function_name(cur, source_bytes)))
+            frames.append(
+                GroupStackFrame(
+                    kind=Granularity.FUNC,
+                    name_id=_function_name(cur, source_bytes),
+                    group_id=f"func@{cur.start_byte}",
+                )
+            )
         elif cur.type == "block":
             if skip_function_body_block and _is_function_body_block(cur):
                 pass
             else:
-                frames.append(GroupStackFrame(kind=Granularity.BLOCK, name_id=str(cur.id))) # FIXME: use something more stable here
+                frames.append(
+                    GroupStackFrame(
+                        kind=Granularity.BLOCK,
+                        group_id=f"block@{cur.start_byte}",
+                    )
+                )
         cur = cur.parent
 
     frames.reverse()
@@ -62,4 +73,3 @@ def _is_function_body_block(node) -> bool:
         return False
     body = parent.child_by_field_name("body")
     return body is not None and body.id == node.id
-

@@ -3,7 +3,7 @@ from __future__ import annotations
 from c_rust.render import CRustRenderer
 from c_rust.render.groups import parse_rust, rust_group_stack
 from controller.loop import _closed_stack_diff
-from core.types import Granularity, RenderStatus
+from core.types import Granularity, GroupStackFrame, RenderStatus
 
 def _stack(prefix: str, suffix: str = "") -> tuple[Granularity, ...]:
     code = f"{prefix}{suffix}"
@@ -150,7 +150,21 @@ fn main() {
     # Both should have same structure: (FUNC main, BLOCK for)
     assert tuple(f.kind for f in stack_short) == (Granularity.FUNC, Granularity.BLOCK)
     assert tuple(f.kind for f in stack_long) == (Granularity.FUNC, Granularity.BLOCK)
+    assert stack_short[0].group_id == stack_long[0].group_id
+    assert stack_short[1].group_id == stack_long[1].group_id
 
     # No blocks closed -- we are still inside the same for-loop block
     closed = _closed_stack_diff(stack_short, stack_long)
     assert closed == (), f"Expected no closed frames, got {closed}"
+
+
+def test_closed_stack_diff_requires_name_match_when_group_id_matches() -> None:
+    previous = (
+        GroupStackFrame(kind=Granularity.FUNC, name_id="main", group_id="func@0"),
+    )
+    current = (
+        GroupStackFrame(kind=Granularity.FUNC, name_id="min", group_id="func@0"),
+    )
+
+    closed = _closed_stack_diff(previous, current)
+    assert closed == previous

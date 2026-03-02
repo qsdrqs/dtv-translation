@@ -12,6 +12,26 @@ from .enums import Granularity, GroupEventAction, RenderStatus
 class GroupStackFrame:
     kind: Granularity
     name_id: str | None = None
+    group_id: str | None = None
+    start_stmt: int | None = None
+
+    @staticmethod
+    def matches(previous_frame: GroupStackFrame, current_frame: GroupStackFrame) -> bool:
+        if previous_frame.kind != current_frame.kind:
+            return False
+        if (
+            previous_frame.group_id is not None
+            and current_frame.group_id is not None
+            and previous_frame.group_id != current_frame.group_id
+        ):
+            return False
+        if (
+            previous_frame.name_id is not None
+            and current_frame.name_id is not None
+            and previous_frame.name_id != current_frame.name_id
+        ):
+            return False
+        return True
 
 
 @dataclass(frozen=True)

@@ -290,7 +290,7 @@ def _closed_stack_diff(
     if current is None:
         return previous
     k = 0
-    while k < len(previous) and k < len(current) and previous[k] == current[k]:
+    while k < len(previous) and k < len(current) and GroupStackFrame.matches(previous[k], current[k]):
         k += 1
     return previous[k:]
 

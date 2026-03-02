@@ -15,19 +15,12 @@ class Checkpoint:
     extractor_state: OutputExtractorState | None = None
 
 
-@dataclass(frozen=True)
-class GroupFrame:
-    """Active block/function group with its starting statement index."""
-    kind: Granularity
-    start_stmt: int  # Index into stmt_checkpoints at group open.
-
-
 @dataclass
 class RollbackManager:
     """Tracks checkpoints and rollback scopes for decoding."""
     stmt_checkpoints: list[Checkpoint] = field(default_factory=list)
     # TODO: consider implicit root function/block; decide when renderer should open root groups.
-    group_stack: list[GroupFrame] = field(default_factory=list)  # Open group frames in nesting order.
+    group_stack: list[GroupStackFrame] = field(default_factory=list)  # Open group frames in nesting order.
     retry_counters: dict[str, int] = field(default_factory=dict)  # Per-key retry counts.
     max_stmt_retries: int = 3
     max_block_retries: int = 2
@@ -60,10 +53,23 @@ class RollbackManager:
             extractor_state=extractor_state,
         )
 
-    def open_group(self, kind: Granularity) -> None:
+    def open_group(
+        self,
+        kind: Granularity,
+        *,
+        name_id: str | None = None,
+        group_id: str | None = None,
+    ) -> None:
         if kind not in {Granularity.BLOCK, Granularity.FUNC}:
             return
-        self.group_stack.append(GroupFrame(kind=kind, start_stmt=len(self.stmt_checkpoints)))
+        self.group_stack.append(
+            GroupStackFrame(
+                kind=kind,
+                name_id=name_id,
+                group_id=group_id,
+                start_stmt=len(self.stmt_checkpoints),
+            )
+        )
 
     def close_group(self, kind: Granularity) -> None:
         if kind not in {Granularity.BLOCK, Granularity.FUNC}:
@@ -86,23 +92,38 @@ class RollbackManager:
         This is intended to be called at COMMIT time, before adding the stmt checkpoint,
         so that open_group() records the correct start_stmt index.
         """
-        desired_kinds = [frame.kind for frame in desired if frame.kind in {Granularity.BLOCK, Granularity.FUNC}]
-        current_kinds = [frame.kind for frame in self.group_stack]
+        desired_frames = [
+            frame
+            for frame in desired
+            if frame.kind in {Granularity.BLOCK, Granularity.FUNC}
+        ]
 
         k = 0
-        while k < len(desired_kinds) and k < len(current_kinds) and desired_kinds[k] == current_kinds[k]:
+        while (
+            k < len(desired_frames)
+            and k < len(self.group_stack)
+            and GroupStackFrame.matches(desired_frames[k], self.group_stack[k])
+        ):
             k += 1
 
-        for kind in reversed(current_kinds[k:]):
-            self.close_group(kind)
-        for kind in desired_kinds[k:]:
-            self.open_group(kind)
+        for frame in reversed(self.group_stack[k:]):
+            self.close_group(frame.kind)
+        for frame in desired_frames[k:]:
+            self.open_group(
+                frame.kind,
+                name_id=frame.name_id,
+                group_id=frame.group_id,
+            )
 
     def _truncate_to(self, keep_count: int) -> Checkpoint:
         keep_count = max(0, keep_count)
         if keep_count < len(self.stmt_checkpoints):
             del self.stmt_checkpoints[keep_count:]
-        self.group_stack = [g for g in self.group_stack if g.start_stmt < keep_count]
+        self.group_stack = [
+            g
+            for g in self.group_stack
+            if g.start_stmt is not None and g.start_stmt < keep_count
+        ]
         if keep_count == 0:
             return Checkpoint(
                 code_prefix="",
