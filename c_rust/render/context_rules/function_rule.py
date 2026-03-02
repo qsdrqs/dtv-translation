@@ -1,8 +1,16 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from c_rust.render.context_rules.base import ContextRule, ContextRegistry, block_tail_needs_todo, PatchPlan, Analysis
+from c_rust.render.context_rules.base import (
+    Analysis,
+    ContextRegistry,
+    ContextRule,
+    PatchPlan,
+    TailCompletion,
+    TailCompletionKind,
+    classify_block_tail,
+)
 
 
 @dataclass(frozen=True)
@@ -10,8 +18,9 @@ class FunctionContext:
     in_function: bool = False
     returns_value: bool = False
     body_start: int | None = None
-    tail_needs_todo: bool = False
-    tail_needs_semicolon: bool = False
+    tail_completion: TailCompletion = field(
+        default_factory=lambda: TailCompletion(kind=TailCompletionKind.COMPLETE)
+    )
 
 
 class FunctionContextRule(ContextRule):
@@ -30,18 +39,16 @@ class FunctionContextRule(ContextRule):
                 in_function = False
                 body_start = None
             header = prefix_bytes[node.start_byte:header_end]
-            tail_needs_todo = False
-            tail_needs_semicolon = False
+            tail_completion = TailCompletion(kind=TailCompletionKind.COMPLETE)
             if body is not None:
-                tail_needs_todo, tail_needs_semicolon = block_tail_needs_todo(body)
+                tail_completion = classify_block_tail(body, end_byte=end_byte)
             registry.add(
                 self.key,
                 FunctionContext(
                     in_function=in_function,
                     returns_value=b"->" in header,
                     body_start=body_start,
-                    tail_needs_todo=tail_needs_todo,
-                    tail_needs_semicolon=tail_needs_semicolon,
+                    tail_completion=tail_completion,
                 ),
             )
 
@@ -53,8 +60,35 @@ class FunctionContextRule(ContextRule):
                 break
         if target is None or not target.returns_value:
             return
-        if not target.tail_needs_todo:
+        completion = target.tail_completion
+        if (
+            completion.kind == TailCompletionKind.IF_MISSING_ELSE
+            and completion.if_consequence_start is not None
+        ):
+            consequence_closed = (
+                completion.if_consequence_end is not None
+                and completion.if_consequence_end <= analysis.end_byte
+            )
+            if consequence_closed:
+                plan.add_head_expr(" else { todo!() }", raw=True)
+                plan.notes.append("render_patch:fn_tail_if_else_head")
+            else:
+                if completion.if_in_consequence:
+                    plan.insert_before(completion.if_consequence_start, "todo!()")
+                plan.insert_before(completion.if_consequence_start, "} else { todo!()")
+                plan.notes.append("render_patch:fn_tail_if_else")
             return
-        text = "; todo!()" if target.tail_needs_semicolon else "todo!()"
+        if completion.kind == TailCompletionKind.COMPLETE:
+            return
+        if completion.kind not in {
+            TailCompletionKind.NEEDS_TODO,
+            TailCompletionKind.NEEDS_SEMI_TODO,
+        }:
+            return
+        text = (
+            "; todo!()"
+            if completion.kind == TailCompletionKind.NEEDS_SEMI_TODO
+            else "todo!()"
+        )
         plan.insert_before(target.body_start, text, fallback=plan.brace_count - 1)
         plan.notes.append("render_patch:fn_tail")

@@ -226,6 +226,50 @@ fn min(a: i32, b: i32, c: i32, d: i32) -> i32 {
     assert compile.ok, compile.stderr
 
 
+def test_expression_tail_else_if_chain_compiles() -> None:
+    prefix = """\
+fn foo(a: i32, b: i32) -> i32 {
+    if a > 0 { 1 } else if b > 0 { 2 }
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    assert "render_patch:fn_tail_if_else_head" in result.notes
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_expression_tail_nested_if_compiles() -> None:
+    prefix = """\
+fn foo(a: i32, b: i32) -> i32 {
+    if a > 0 {
+        if b > 0 { 1 } else { 2 }
+    }
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    assert "render_patch:fn_tail_if_else_head" in result.notes
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_statement_context_if_does_not_force_else_patch() -> None:
+    prefix = """\
+fn foo(a: i32) {
+    if a > 0 {
+        println!("positive");
+    }
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    assert "render_patch:if_else" not in result.notes
+    assert "render_patch:if_else_head" not in result.notes
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
 def test_match_empty_block_compiles() -> None:
     prefix = """\
 fn foo(a: i32) -> i32 {

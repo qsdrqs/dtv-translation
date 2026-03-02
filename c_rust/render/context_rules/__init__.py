@@ -7,9 +7,12 @@ from c_rust.render.context_rules.base import (
     PatchPhase,
     PatchPlan,
     Scaffold,
+    TailCompletion,
+    TailCompletionKind,
     ancestor_of_type,
     ancestor_chain_of_type,
     block_tail_needs_todo,
+    classify_block_tail,
     has_else_clause,
 )
 from c_rust.render.context_rules.if_rule import IfContext, IfContextRule
@@ -63,10 +66,13 @@ __all__ = [
     "PatchPhase",
     "PatchPlan",
     "Scaffold",
+    "TailCompletion",
+    "TailCompletionKind",
     "CONTEXT_RULES",
     "apply_patch_rules",
     "ancestor_of_type",
     "ancestor_chain_of_type",
     "block_tail_needs_todo",
+    "classify_block_tail",
     "has_else_clause",
 ]

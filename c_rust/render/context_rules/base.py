@@ -10,6 +10,13 @@ class PatchPhase(str, Enum):
     SEMANTIC = "semantic"
 
 
+class TailCompletionKind(str, Enum):
+    COMPLETE = "complete"
+    IF_MISSING_ELSE = "if_missing_else"
+    NEEDS_TODO = "needs_todo"
+    NEEDS_SEMI_TODO = "needs_semi_todo"
+
+
 @dataclass(frozen=True)
 class Analysis:
     ok: bool
@@ -19,6 +26,14 @@ class Analysis:
 
     def get(self, key: str) -> tuple[object, ...]:
         return self.contexts.get(key, ())
+
+
+@dataclass(frozen=True)
+class TailCompletion:
+    kind: TailCompletionKind
+    if_consequence_start: int | None = None
+    if_consequence_end: int | None = None
+    if_in_consequence: bool = False
 
 
 class ContextRegistry:
@@ -187,36 +202,90 @@ def has_else_clause(if_node) -> bool:
     return False
 
 
+def _else_if_target(if_node):
+    alternative = None
+    for field in ("alternative", "else_clause"):
+        alternative = if_node.child_by_field_name(field)
+        if alternative is not None:
+            break
+    if alternative is None:
+        return None
+    if alternative.type == "if_expression":
+        return alternative
+    if alternative.type != "else_clause":
+        return None
+    for child in alternative.named_children:
+        if child.type == "if_expression":
+            return child
+    return None
+
+
+def _tail_if_missing_else(expr_node):
+    if expr_node.type != "if_expression":
+        return None
+    cur = expr_node
+    while cur is not None:
+        if not has_else_clause(cur):
+            return cur
+        cur = _else_if_target(cur)
+    return None
+
+
+def classify_block_tail(block_node, *, end_byte: int | None = None) -> TailCompletion:
+    tail_node = block_node.named_children[-1] if block_node.named_children else None
+    if tail_node is None:
+        return TailCompletion(kind=TailCompletionKind.NEEDS_TODO)
+    if tail_node.type == "return_expression":
+        return TailCompletion(kind=TailCompletionKind.COMPLETE)
+
+    if tail_node.type == "expression_statement":
+        expr = tail_node.named_children[0] if tail_node.named_children else None
+        if expr is None:
+            return TailCompletion(kind=TailCompletionKind.NEEDS_SEMI_TODO)
+        if expr.type == "return_expression":
+            return TailCompletion(kind=TailCompletionKind.COMPLETE)
+        # expression_statement with a `;` child is a real statement (e.g. `foo();`).
+        # Without `;`, tree-sitter may wrap a tail expression as expression_statement
+        # when parsing scaffolded code - treat it as a value-producing tail.
+        has_semicolon = any(c.type == ";" for c in tail_node.children)
+        if not has_semicolon:
+            missing_else_if = _tail_if_missing_else(expr)
+            if missing_else_if is not None:
+                consequence = missing_else_if.child_by_field_name("consequence")
+                if consequence is not None:
+                    in_consequence = False
+                    if end_byte is not None:
+                        in_consequence = consequence.start_byte <= end_byte < consequence.end_byte
+                    return TailCompletion(
+                        kind=TailCompletionKind.IF_MISSING_ELSE,
+                        if_consequence_start=consequence.start_byte,
+                        if_consequence_end=consequence.end_byte,
+                        if_in_consequence=in_consequence,
+                    )
+                return TailCompletion(kind=TailCompletionKind.NEEDS_SEMI_TODO)
+            if expr.type in {"while_expression", "for_expression"}:
+                return TailCompletion(kind=TailCompletionKind.NEEDS_SEMI_TODO)
+            return TailCompletion(kind=TailCompletionKind.COMPLETE)
+        return TailCompletion(kind=TailCompletionKind.NEEDS_TODO)
+
+    if tail_node.type in {"let_declaration", "let_statement", "empty_statement"}:
+        return TailCompletion(kind=TailCompletionKind.NEEDS_TODO)
+    if tail_node.type.endswith("_item"):
+        return TailCompletion(kind=TailCompletionKind.NEEDS_TODO)
+    if tail_node.type == "ERROR":
+        return TailCompletion(kind=TailCompletionKind.NEEDS_SEMI_TODO)
+    return TailCompletion(kind=TailCompletionKind.COMPLETE)
+
+
 def block_tail_needs_todo(block_node) -> tuple[bool, bool]:
     """Determine if a block needs a todo!() tail to produce a value.
 
     Returns (needs_todo, needs_semicolon).
     Shared by FunctionContextRule (function bodies) and MatchContextRule (arm blocks).
     """
-    tail_node = block_node.named_children[-1] if block_node.named_children else None
-    if tail_node is None:
-        return True, False
-    if tail_node.type == "return_expression":
+    completion = classify_block_tail(block_node)
+    if completion.kind == TailCompletionKind.COMPLETE:
         return False, False
-    if tail_node.type == "expression_statement":
-        expr = tail_node.named_children[0] if tail_node.named_children else None
-        if expr is None:
-            return True, True
-        if expr.type == "return_expression":
-            return False, False
-        # expression_statement with a `;` child is a real statement (e.g. `foo();`).
-        # Without `;`, tree-sitter may wrap a tail expression as expression_statement
-        # when parsing scaffolded code - treat it as a value-producing tail.
-        has_semicolon = any(c.type == ";" for c in tail_node.children)
-        if not has_semicolon:
-            if expr.type == "if_expression" and not has_else_clause(expr):
-                return True, True
-            if expr.type in {"while_expression", "for_expression"}:
-                return True, True
-            return False, False
+    if completion.kind == TailCompletionKind.NEEDS_TODO:
         return True, False
-    if tail_node.type in {"let_declaration", "let_statement", "empty_statement"}:
-        return True, False
-    if tail_node.type.endswith("_item") or tail_node.type == "ERROR":
-        return True, tail_node.type == "ERROR"
-    return False, False
+    return True, True
