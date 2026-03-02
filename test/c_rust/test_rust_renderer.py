@@ -209,6 +209,23 @@ fn foo() -> i32 {
     assert not compile.ok # should not compile due to type error
 
 
+def test_expression_tail_if_from_min_case_compiles() -> None:
+    prefix = """\
+use std::io;
+
+fn min(a: i32, b: i32, c: i32, d: i32) -> i32 {
+    let r = if a < b { a } else { b };
+    if c < r {
+        c
+    }
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
 def test_match_empty_block_compiles() -> None:
     prefix = """\
 fn foo(a: i32) -> i32 {

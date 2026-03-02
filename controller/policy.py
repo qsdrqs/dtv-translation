@@ -118,7 +118,11 @@ class DefaultPolicy(Policy):
                     return ControllerOp(Action.TERMINATE)
                 if not _can_start_repair(self.config, self._repair_rounds, ctx):
                     return ControllerOp(Action.GENERATE)
-                mechanism = self._choose_feedback_mechanism(schedule_state, tokens_left)
+                mechanism = self._choose_feedback_mechanism(
+                    schedule_state,
+                    tokens_left,
+                    repair_scope=ctx.repair_scope,
+                )
                 if mechanism is None:
                     return ControllerOp(Action.TERMINATE)
                 _record_repair_round(self._repair_rounds, ctx)
@@ -214,13 +218,22 @@ class DefaultPolicy(Policy):
         self,
         schedule_state: _RepairScheduleState,
         tokens_left: int,
+        *,
+        repair_scope: RollbackScope | None,
     ) -> FeedbackMechanism | None:
+        # Selection priority (high -> low):
+        # 1) locked mechanism from prior B rounds in this key,
+        # 2) explicit force mechanism in config,
+        # 3) immediate B for non-statement repair scopes,
+        # 4) key-local default/escalation logic.
         allow_fallback = True
         if schedule_state.locked_mechanism is not None:
             preferred = schedule_state.locked_mechanism
             allow_fallback = False
         elif self.config.feedback_force_mechanism is not None:
             preferred = self.config.feedback_force_mechanism
+        elif _scope_prefers_b(schedule_state, repair_scope):
+            preferred = FeedbackMechanism.B
         elif schedule_state.a_rounds == 0 and schedule_state.b_rounds == 0:
             preferred = self.config.feedback_default_mechanism
         elif _should_escalate_to_b(self.config, schedule_state):
@@ -228,6 +241,8 @@ class DefaultPolicy(Policy):
         else:
             preferred = FeedbackMechanism.A
 
+        # If preferred mechanism is unavailable (round cap or token floor),
+        # fallback to the other mechanism unless selection was explicitly locked.
         order = (preferred, _other_feedback_mechanism(preferred)) if allow_fallback else (preferred,)
         for mechanism in order:
             if self._mechanism_available(schedule_state, mechanism, tokens_left):
@@ -443,6 +458,7 @@ def _should_escalate_to_b(
     config: DefaultPolicyConfig,
     schedule_state: _RepairScheduleState,
 ) -> bool:
+    # Escalation applies after at least one A round in the same repair key.
     if schedule_state.a_rounds == 0:
         return False
     if schedule_state.no_progress_count >= config.feedback_no_progress_escalation_threshold:
@@ -453,6 +469,17 @@ def _should_escalate_to_b(
     ):
         return True
     return schedule_state.last_error_count >= config.feedback_error_escalation_threshold
+
+
+def _scope_prefers_b(
+    schedule_state: _RepairScheduleState,
+    repair_scope: RollbackScope | None,
+) -> bool:
+    # For non-statement repairs, use mechanism B immediately.
+    # Prefer the scope captured from the latest failure snapshot; if unavailable,
+    # fall back to the current repair scope from runtime context.
+    scope = schedule_state.last_fail_scope or repair_scope
+    return scope is not None and scope > RollbackScope.STMT
 
 
 def _other_feedback_mechanism(mechanism: FeedbackMechanism) -> FeedbackMechanism:

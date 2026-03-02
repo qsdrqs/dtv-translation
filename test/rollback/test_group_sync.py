@@ -14,6 +14,19 @@ def _commit(m: RollbackManager, prefix: str, group_stack: tuple[Granularity, ...
     m.add_stmt_checkpoint(prefix, AssistantContent.empty(), None)
 
 
+def _named_frames(items: tuple[tuple[Granularity, str | None], ...]) -> tuple[GroupStackFrame, ...]:
+    return tuple(GroupStackFrame(kind=kind, name_id=name_id) for kind, name_id in items)
+
+
+def _commit_named(
+    m: RollbackManager,
+    prefix: str,
+    group_stack: tuple[tuple[Granularity, str | None], ...],
+) -> None:
+    m.sync_groups(_named_frames(group_stack))
+    m.add_stmt_checkpoint(prefix, AssistantContent.empty(), None)
+
+
 def test_sync_groups_opens_block_at_first_commit_inside_block() -> None:
     m = RollbackManager()
 
@@ -77,3 +90,15 @@ def test_rollback_func_truncates_to_block_start() -> None:
     assert out.code_prefix == "in_func_s1"
     assert [c.code_prefix for c in m.stmt_checkpoints] == ["before_func", "in_func_s1"]
     assert [(f.kind, f.start_stmt) for f in m.group_stack] == [(Granularity.FUNC, 1)]
+
+
+def test_rollback_func_after_function_switch_keeps_previous_function() -> None:
+    m = RollbackManager()
+
+    _commit_named(m, "preamble", ())
+    _commit_named(m, "main_complete", ((Granularity.FUNC, "main"),))
+    _commit_named(m, "min_partial", ((Granularity.FUNC, "min"),))
+
+    out = m.rollback(RollbackScope.FUNC)
+    assert out.code_prefix == "main_complete"
+    assert [c.code_prefix for c in m.stmt_checkpoints] == ["preamble", "main_complete"]

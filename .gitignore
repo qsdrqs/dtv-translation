@@ -13,3 +13,5 @@ wheels/
 
 # Local environment config (direnv)
 .envrc
+
+result/

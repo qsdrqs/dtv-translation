@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from c_rust.render import CRustRenderer
 from c_rust.render.groups import parse_rust, rust_group_stack
+from controller.loop import _closed_stack_diff
 from core.types import Granularity, RenderStatus
-
 
 def _stack(prefix: str, suffix: str = "") -> tuple[Granularity, ...]:
     code = f"{prefix}{suffix}"
@@ -109,3 +109,48 @@ fn foo() {
     s2;
 """
     assert _render_stack(prefix) == (Granularity.FUNC, Granularity.BLOCK)
+
+
+def _full_stack(prefix: str, suffix: str = "") -> tuple:
+    code = f"{prefix}{suffix}"
+    end_byte = len(prefix.rstrip().encode("utf-8"))
+    tree = parse_rust(code)
+    return rust_group_stack(
+        tree,
+        prefix_end_byte=end_byte,
+        source_bytes=code.encode("utf-8"),
+        skip_function_body_block=True,
+    )
+
+
+def test_block_frame_stable_across_reparses() -> None:
+    """Same logical block should produce equal frames across re-parses.
+
+    When a prefix grows by one stmt but stays inside the same block,
+    _closed_stack_diff should return () -- no blocks closed.
+    """
+    prefix_short = """\
+fn main() {
+    for i in 0..10 {
+        let x = 1;
+"""
+    prefix_long = """\
+fn main() {
+    for i in 0..10 {
+        let x = 1;
+        let y = 2;
+"""
+    suffix = """\
+    }
+}
+"""
+    stack_short = _full_stack(prefix_short, suffix)
+    stack_long = _full_stack(prefix_long, suffix)
+
+    # Both should have same structure: (FUNC main, BLOCK for)
+    assert tuple(f.kind for f in stack_short) == (Granularity.FUNC, Granularity.BLOCK)
+    assert tuple(f.kind for f in stack_long) == (Granularity.FUNC, Granularity.BLOCK)
+
+    # No blocks closed -- we are still inside the same for-loop block
+    closed = _closed_stack_diff(stack_short, stack_long)
+    assert closed == (), f"Expected no closed frames, got {closed}"
