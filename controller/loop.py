@@ -881,7 +881,7 @@ def run_dtv_loop(
     repair_feedback_format_config: RepairFeedbackFormatConfig | None = None,
     max_steps: int = 100,
     max_new_length: int = 1024,
-    prompt_prefix: str = "",
+    prompt_prefix: str = "Translate the following C code into Rust, keep the same function order:",
     oracle_runner: OracleRunner | None = None,
 ) -> tuple[str, list[TraceEvent]]:
     """

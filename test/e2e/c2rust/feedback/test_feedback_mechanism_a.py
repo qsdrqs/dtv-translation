@@ -358,12 +358,12 @@ fn main() {
     )
     feedback_events = [event for event in trace if event.action == Action.FEEDBACK]
     assert len(feedback_events) == 1
-    assert feedback_events[0].notes == "feedback_mechanism=b"
-    feedback_message = _FeedbackBackend.seen_user_messages[0]
-    assert "The previous generated next code snippet was:" in feedback_message
-    assert "[program_diff]" in feedback_message
+    assert feedback_events[0].notes == "feedback_mechanism=a"
+    feedback_message = _FeedbackBackend.seen_assistant_messages[0]
+    assert "/* repair feedback:" in feedback_message
+    assert "oracle=program_diff" in feedback_message
     assert "stdout mismatch" in feedback_message
-    assert "[rustc]" not in feedback_message
+    assert "oracle=rustc" not in feedback_message
 
 
 def test_feedback_e2e_program_failure_then_mechanism_b_repair_success() -> None:

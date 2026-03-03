@@ -101,6 +101,70 @@ def test_validate_patch_scope_program_allows_function_wrapper() -> None:
     assert error is None
 
 
+def test_validate_patch_scope_func_allows_single_function() -> None:
+    """FUNC rollback drops an entire function; the repair patch must regenerate it."""
+    error = validate_patch_scope(
+        """fn min(a: i32, b: i32, c: i32, d: i32) -> i32 {
+    let r = if a < b { a } else { b };
+    if c < r { c } else { r }
+    if d < r { d } else { r }
+}""",
+        RollbackScope.FUNC,
+    )
+
+    assert error is None
+
+
+def test_validate_patch_scope_func_allows_multiple_functions() -> None:
+    """FUNC patch with helper + main function should pass."""
+    error = validate_patch_scope(
+        """fn helper() -> i32 { 42 }
+
+fn main() {
+    let x = helper();
+}""",
+        RollbackScope.FUNC,
+    )
+
+    assert error is None
+
+
+def test_validate_patch_scope_func_rejects_non_function_top_level() -> None:
+    """FUNC patch should not contain unrelated top-level items like use/struct."""
+    error = validate_patch_scope(
+        """use std::io;
+
+fn main() {
+    let x: i32 = 1;
+}""",
+        RollbackScope.FUNC,
+    )
+
+    assert error == (
+        "scope validator: func-scope patch cannot include"
+        " non-function top-level items (use_declaration)"
+    )
+
+
+def test_validate_patch_scope_func_accepts_statements_only() -> None:
+    """FUNC patch with only statements (no function wrapper) should pass."""
+    error = validate_patch_scope("let x: i32 = 1;", RollbackScope.FUNC)
+
+    assert error is None
+
+
+def test_validate_patch_scope_block_still_rejects_function() -> None:
+    """BLOCK scope should still reject function_item (unchanged behavior)."""
+    error = validate_patch_scope(
+        """fn main() {
+    let x: i32 = 1;
+}""",
+        RollbackScope.BLOCK,
+    )
+
+    assert error == "scope validator: block-scope patch cannot include top-level items (function_item)"
+
+
 def test_feedback_fence_stream_parser_detects_complete_fence() -> None:
     parser = FeedbackFenceStreamParser()
 

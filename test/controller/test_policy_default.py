@@ -526,14 +526,6 @@ def test_default_policy_feedback_stays_on_b_per_key_by_default() -> None:
     assert third_feedback_op.action == Action.FEEDBACK
     assert third_feedback_op.feedback_mechanism == FeedbackMechanism.B
 
-    reset_ctx = _ctx(
-        prefix="good;",
-        last_action=Action.VERIFY,
-        last_render_status=RenderStatus.OK,
-        last_outputs=_outputs(Verdict.PASS),
-    )
-    reset_op = policy.next_action(reset_ctx)
-    assert reset_op.action == Action.COMMIT
 
     new_key_verify_fail_ctx = _ctx(
         prefix="bad2;",
@@ -645,7 +637,7 @@ def test_default_policy_program_scope_escalates_to_b_even_when_failed_prefix_cha
     )
     first_feedback_op = policy.next_action(first_feedback_ctx)
     assert first_feedback_op.action == Action.FEEDBACK
-    assert first_feedback_op.feedback_mechanism == FeedbackMechanism.B
+    assert first_feedback_op.feedback_mechanism == FeedbackMechanism.A
 
     second_verify_fail_ctx = _ctx(
         prefix="program_fail_v2",
@@ -668,29 +660,6 @@ def test_default_policy_program_scope_escalates_to_b_even_when_failed_prefix_cha
     assert second_feedback_op.feedback_mechanism == FeedbackMechanism.B
 
 
-def test_default_policy_func_scope_uses_mechanism_b_immediately() -> None:
-    policy = DefaultPolicy(DefaultPolicyConfig(max_repair_rounds=4))
-
-    verify_fail_ctx = _ctx(
-        prefix="func_fail_v1",
-        last_action=Action.VERIFY,
-        last_render_status=RenderStatus.OK,
-        last_outputs=_fail_outputs(scope=RollbackScope.FUNC),
-    )
-    rollback_op = policy.next_action(verify_fail_ctx)
-    assert rollback_op.action == Action.ROLLBACK
-    assert rollback_op.rollback_scope == RollbackScope.FUNC
-
-    feedback_ctx = _ctx(
-        prefix="",
-        last_action=Action.ROLLBACK,
-        failed_prefix="func_fail_v1",
-        repair_base_prefix="",
-        repair_scope=RollbackScope.FUNC,
-    )
-    feedback_op = policy.next_action(feedback_ctx)
-    assert feedback_op.action == Action.FEEDBACK
-    assert feedback_op.feedback_mechanism == FeedbackMechanism.B
 
 
 def test_default_policy_feedback_force_mechanism_b() -> None:

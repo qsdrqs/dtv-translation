@@ -127,6 +127,25 @@ def validate_patch_scope(patch: str, scope: RollbackScope) -> str | None:
     if not named_children:
         return "scope validator: patch has no Rust syntax nodes"
 
+    # FUNC scope: allow the repaired function itself, but reject unrelated
+    # top-level declarations (e.g. extra use/struct/impl items).
+    if scope == RollbackScope.FUNC:
+        non_func_top = sorted(
+            {
+                child.type
+                for child in named_children
+                if (child.type in _TOP_LEVEL_ITEM_TYPES or child.type.endswith("_item"))
+                and child.type != "function_item"
+            }
+        )
+        if non_func_top:
+            node_types = ", ".join(non_func_top)
+            return (
+                f"scope validator: func-scope patch cannot include"
+                f" non-function top-level items ({node_types})"
+            )
+        return None
+
     disallowed = sorted(
         {
             child.type
