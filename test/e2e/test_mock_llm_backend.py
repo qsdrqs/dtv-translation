@@ -164,7 +164,7 @@ def test_c_to_rust_translate_trap() -> None:
 
     c_program = c_source_path.read_text(encoding="utf-8").strip()
     prompt = (
-        "Translated the following C code into Rust:\n"
+        "Translate the following C code into Rust, keep the same function order:\n"
         "```c\n"
         f"{c_program}\n"
         "```\n"

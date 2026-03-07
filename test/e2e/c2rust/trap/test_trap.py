@@ -17,7 +17,7 @@ from rollback.manager import RollbackManager
 from test.e2e.mock_llm_backend import MockLLMBackend
 
 
-PROMPT_PREFIX = "Translated the following C code into Rust:"
+PROMPT_PREFIX = "Translate the following C code into Rust, keep the same function order:"
 
 
 def _load_tests(path: Path) -> list[TestCase]:

@@ -45,6 +45,7 @@ class DefaultPolicyConfig:
     feedback_no_progress_escalation_threshold: int = 1
     feedback_max_a_rounds_per_key: int = 2
     feedback_max_b_rounds_per_key: int | None = None
+    feedback_max_b_no_patch_rounds: int = 3
     feedback_budget_reserve_tokens: int = 0
     feedback_min_tokens_a: int = 0
     feedback_min_tokens_b: int = 0
@@ -59,6 +60,7 @@ class _RepairScheduleState:
     last_fail_scope: RollbackScope | None = None
     last_error_count: int = 0
     locked_mechanism: FeedbackMechanism | None = None
+    b_no_patch_rounds: int = 0
 
 
 @dataclass(frozen=True)
@@ -114,6 +116,17 @@ class DefaultPolicy(Policy):
                     self._apply_pending_fail_snapshot(schedule_state, ctx)
                 else:
                     schedule_state = _RepairScheduleState()
+                # Track B rounds that produced no usable patch
+                # (parser extraction or scope validation failed).
+                if ctx.last_action == Action.FEEDBACK:
+                    schedule_state.b_no_patch_rounds += 1
+                    if (
+                        schedule_state.b_no_patch_rounds
+                        >= self.config.feedback_max_b_no_patch_rounds
+                    ):
+                        # Treat as a verify fail: rollback with stall escalation.
+                        scope = self._select_fail_scope(ctx)
+                        return ControllerOp(Action.ROLLBACK, rollback_scope=scope)
                 if tokens_left <= 0:
                     return ControllerOp(Action.TERMINATE)
                 if not _can_start_repair(self.config, self._repair_rounds, ctx):
@@ -458,7 +471,7 @@ def _should_escalate_to_b(
         schedule_state.last_fail_scope is not None
         and schedule_state.last_fail_scope >= config.feedback_scope_escalation
     ):
-        return True
+        return True # FIXME: This may be too aggressive
     return schedule_state.last_error_count >= config.feedback_error_escalation_threshold
 
 

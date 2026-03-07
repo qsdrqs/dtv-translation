@@ -676,3 +676,64 @@ def test_default_policy_feedback_force_mechanism_b() -> None:
 
     assert op.action == Action.FEEDBACK
     assert op.feedback_mechanism == FeedbackMechanism.B
+
+
+def test_default_policy_b_no_patch_escalates_to_rollback() -> None:
+    """When B repeatedly produces no usable patch (parser/scope validation fail),
+    treat as a verify fail and rollback with stall escalation."""
+    policy = DefaultPolicy(
+        DefaultPolicyConfig(
+            enable_rollback=True,
+            enable_feedback=True,
+            feedback_force_mechanism=FeedbackMechanism.B,
+            feedback_max_b_no_patch_rounds=3,
+        )
+    )
+
+    # VERIFY FAIL -> ROLLBACK
+    verify_fail_ctx = _ctx(
+        prefix="bad;",
+        last_action=Action.VERIFY,
+        last_render_status=RenderStatus.OK,
+        last_outputs=_fail_outputs(scope=RollbackScope.STMT),
+    )
+    rollback_op = policy.next_action(verify_fail_ctx)
+    assert rollback_op.action == Action.ROLLBACK
+    assert rollback_op.rollback_scope == RollbackScope.STMT
+
+    # After ROLLBACK -> first FEEDBACK(B) (b_no_patch not incremented; last_action=ROLLBACK)
+    after_rollback_ctx = _ctx(
+        prefix="",
+        last_action=Action.ROLLBACK,
+        failed_prefix="bad;",
+        repair_base_prefix="",
+        repair_scope=RollbackScope.STMT,
+    )
+    feedback_op = policy.next_action(after_rollback_ctx)
+    assert feedback_op.action == Action.FEEDBACK
+    assert feedback_op.feedback_mechanism == FeedbackMechanism.B
+
+    # B produced no patch x2 -> still FEEDBACK(B)
+    for i in range(2):
+        no_patch_ctx = _ctx(
+            prefix="",
+            last_action=Action.FEEDBACK,
+            failed_prefix="bad;",
+            repair_base_prefix="",
+            repair_scope=RollbackScope.STMT,
+        )
+        op = policy.next_action(no_patch_ctx)
+        assert op.action == Action.FEEDBACK, f"expected FEEDBACK at no-patch round {i + 1}"
+        assert op.feedback_mechanism == FeedbackMechanism.B
+
+    # B produced no patch (3rd) -> ROLLBACK (treated as verify fail)
+    final_no_patch_ctx = _ctx(
+        prefix="",
+        last_action=Action.FEEDBACK,
+        failed_prefix="bad;",
+        repair_base_prefix="",
+        repair_scope=RollbackScope.STMT,
+    )
+    escalation_op = policy.next_action(final_no_patch_ctx)
+    assert escalation_op.action == Action.ROLLBACK
+    assert escalation_op.rollback_scope == RollbackScope.STMT
