@@ -22,6 +22,17 @@ from c_rust.oracles.compiler_oracle.rustc_parser import has_errors, parse_rustc_
 
 logger = get_logger(__name__)
 
+# Error codes that are expected noise when compiling partial programs.
+# At sub-PROGRAM granularity the model has not finished generating all
+# definitions, so "cannot find function/type/module" is not a real error.
+# These are filtered out before verdict at STMT/BLOCK/FUNC level;
+# PROGRAM-level compilation keeps them because the full program is available.
+_PARTIAL_COMPILATION_NOISE: frozenset[str] = frozenset({
+    "E0425",  # cannot find value/function in this scope
+    "E0412",  # cannot find type in this scope
+    "E0433",  # failed to resolve: use of undeclared crate or module
+})
+
 
 class RustcOracle(Oracle):
     name = "rustc"
@@ -60,6 +71,9 @@ class RustcOracle(Oracle):
             if result.timed_out:
                 diagnostics = (Diagnostic(message="rustc_timeout", error_code="TIMEOUT"),) + diagnostics
 
+        if self.required_granularity < Granularity.PROGRAM:
+            diagnostics = _filter_partial_noise(diagnostics)
+
         verdict = _decide_verdict(result.exit_code, diagnostics, result.timed_out)
         first_diag = diagnostics[0].message if diagnostics else ""
         logger.info(
@@ -75,12 +89,38 @@ class RustcOracle(Oracle):
         )
 
 
+def _filter_partial_noise(
+    diagnostics: tuple[Diagnostic, ...],
+) -> tuple[Diagnostic, ...]:
+    filtered = tuple(
+        d for d in diagnostics
+        if d.error_code not in _PARTIAL_COMPILATION_NOISE
+    )
+    removed_any = len(filtered) < len(diagnostics)
+    # Only clean up orphaned summaries ("aborting due to N previous errors")
+    # when we actually removed noise.  Without this guard, real errors that
+    # lack an error_code (e.g. syntax errors) would be dropped.
+    if removed_any:
+        has_coded_errors = any(
+            d.error_code is not None and d.severity in ("error", "fatal")
+            for d in filtered
+        )
+        if not has_coded_errors:
+            filtered = tuple(d for d in filtered if d.severity not in ("error", "fatal"))
+    return filtered
+
+
 def _decide_verdict(exit_code: int, diagnostics: tuple, timed_out: bool) -> Verdict:
     if timed_out:
         return Verdict.FAIL
-    if exit_code == 0 and not has_errors(diagnostics):
-        return Verdict.PASS
-    return Verdict.FAIL
+    if has_errors(diagnostics):
+        return Verdict.FAIL
+    # When diagnostics is empty after partial-noise filtering, exit_code may
+    # still be non-zero.  Trust the (filtered) diagnostics over exit_code.
+    # Guard: if no diagnostics were parsed at all AND exit failed, stay FAIL.
+    if not diagnostics and exit_code != 0:
+        return Verdict.FAIL
+    return Verdict.PASS
 
 
 def _extract_sample(artifact: Artifact) -> Any | None:
