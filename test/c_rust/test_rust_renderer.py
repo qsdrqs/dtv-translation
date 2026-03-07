@@ -539,3 +539,38 @@ todo!()}}
 todo!()}"""
     compile = compile_rust(result.artifact.code)
     assert compile.ok, compile.stderr
+
+
+def test_match_implicit_return_arm_block_let_tail_compiles() -> None:
+    # Reproduces s842128761: match is the last expression in fn -> i32,
+    # so it is the implicit return. The arm block ends with `let result = ...;`
+    # which has type (). The renderer must detect implicit-return context and
+    # add todo!() to the arm block tail so the arm produces a value.
+    prefix = """\
+fn foo(a: i32) -> i32 {
+    match a {
+        0 => {
+            let result = a + 1;
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_match_implicit_return_arm_block_expr_tail_compiles() -> None:
+    # Arm block tail is an expression (`a`) that already produces a value.
+    # The renderer should NOT insert an extra todo!() here.
+    prefix = """\
+fn foo(a: i32) -> i32 {
+    match a {
+        0 => {
+            let result = a + 1;
+            a
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr

@@ -762,6 +762,7 @@ def _handle_feedback(
         runtime.pending_patch = parse_result.patch
         runtime.feedback_parser_error = parse_result.error or scope_error
         if runtime.feedback_parser_error is not None:
+            logger.warning("feedback patch rejected: %s", runtime.feedback_parser_error)
             runtime.pending_patch = None
     else:
         runtime.pending_patch = result.delta_text
@@ -879,7 +880,7 @@ def run_dtv_loop(
     policy: Policy,
     feedback_generator: Generator | None = None,
     repair_feedback_format_config: RepairFeedbackFormatConfig | None = None,
-    max_steps: int = 100,
+    max_steps: int | None = 100,
     max_new_length: int = 1024,
     prompt_prefix: str = "Translate the following C code into Rust, keep the same function order:",
     oracle_runner: OracleRunner | None = None,
@@ -910,7 +911,7 @@ def run_dtv_loop(
     )
     context = GenerateContext(messages=base_messages, steps=0, max_new_length=max_new_length)
 
-    while runtime.state.step < max_steps:
+    while max_steps is None or runtime.state.step < max_steps:
         ctx = PolicyContext(
             state=runtime.state,
             budget=budget,

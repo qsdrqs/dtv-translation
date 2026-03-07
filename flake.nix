@@ -6,14 +6,15 @@
   outputs =
     { nixpkgs, ... }:
     let
-      pkgs = import nixpkgs {
-        config.allowUnfree = true;
-        system = "x86_64-linux";
-      };
-    in
-    {
-      devShells.x86_64-linux.default =
-        pkgs.mkShell rec {
+      mkDevShell =
+        system:
+        let
+          pkgs = import nixpkgs {
+            config.allowUnfree = true;
+            inherit system;
+          };
+        in
+        pkgs.mkShell {
           buildInputs = with pkgs; [
             python3
             rustup
@@ -23,5 +24,9 @@
           shellHook = ''
           '';
         };
+    in
+    {
+      devShells.x86_64-linux.default = mkDevShell "x86_64-linux";
+      devShells.aarch64-linux.default = mkDevShell "aarch64-linux";
     };
 }
