@@ -154,21 +154,19 @@ def test_adapter_passes_through_when_extraction_disabled() -> None:
     assert result.delta_tokens == 1
 
 
-def test_adapter_fence_reopen_raises() -> None:
+def test_adapter_fence_reopen_skips_marker() -> None:
     adapter = GeneratorAdapter(model_name="stub", backend_cls=_StubBackend)
     _set_steps([
         GenerateResult(
-            delta_text="""```rust
-line1
-```rust
-""",
+            delta_text="```rust\nline1\n```rust\nline2\n",
             delta_tokens=3,
             stop_reason=StopReason(kind="boundary"),
         ),
     ])
 
-    with pytest.raises(FenceReopenError):
-        adapter.generate_step(_context(extract_fence=True))
+    result = adapter.generate_step(_context(extract_fence=True))
+    assert "line1" in result.delta_text
+    assert "line2" in result.delta_text
 
 
 def test_adapter_keeps_fence_parser_state_from_stop_criteria() -> None:

@@ -177,8 +177,8 @@ def test_stop_criteria_raises_on_fence_reopen() -> None:
     assert not _call(criteria, tokens)
 
     tokens.append(3)
-    with pytest.raises(FenceReopenError):
-        _call(criteria, tokens)
+    # Reopen is now skipped (no raise); parser stays INSIDE so no boundary fires
+    assert not _call(criteria, tokens)
 
 
 def test_stop_criteria_resets_stream_on_parser_epoch_change() -> None:

@@ -94,10 +94,33 @@ print('x')
     assert parser.consume_inside() == ""
 
 
-def test_parser_reopen_raises() -> None:
+@pytest.mark.parametrize(
+    "initial_state",
+    [FenceState.OUTSIDE, FenceState.INSIDE, FenceState.DONE],
+)
+def test_feed_empty_preserves_fence_state(initial_state: FenceState) -> None:
+    """feed('') must return fence_state=self.state, not default OUTSIDE."""
+    parser = FenceParser(allowed_langs=("rust", "rs"))
+    if initial_state == FenceState.INSIDE:
+        parser.feed("```rust\n")
+    elif initial_state == FenceState.DONE:
+        parser.feed("```rust\n")
+        parser.feed("```\n")
+    assert parser.state == initial_state
+
+    result = parser.feed("")
+    assert result.fence_state == initial_state
+    assert parser.state == initial_state
+
+
+def test_parser_reopen_skips_marker() -> None:
     parser = FenceParser(allowed_langs=("rust", "rs"))
 
     parser.feed("```rust\n")
     parser.feed("line1\n")
-    with pytest.raises(FenceReopenError):
-        parser.feed("```rust\n")
+    result = parser.feed("```rust\nline2\n")
+    # Reopen marker is skipped; parser stays INSIDE and extracts new code
+    assert parser.state == FenceState.INSIDE
+    assert result.code == "line2\n"
+    # Old code is still in inside_parts
+    assert parser.consume_inside() == "line1\nline2\n"

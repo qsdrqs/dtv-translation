@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from enum import Enum
+
+_logger = logging.getLogger(__name__)
 
 
 class FenceState(str, Enum):
@@ -127,7 +130,7 @@ class FenceParser:
 
     def feed(self, chunk: str) -> AssistantContent:
         if not chunk:
-            return AssistantContent.empty()
+            return AssistantContent(fence_state=self.state)
         if self.state == FenceState.DONE and not self._buffer:
             return AssistantContent(post_fence=chunk, fence_state=self.state)
 
@@ -156,7 +159,11 @@ class FenceParser:
             if self.state == FenceState.INSIDE:
                 lang = _extract_fence_lang(line, self.allowed_langs)
                 if lang is not None:
-                    raise FenceReopenError("Fence reopened before closing fence")
+                    _logger.warning(
+                        "Fence reopen detected while INSIDE; "
+                        "skipping marker and continuing extraction"
+                    )
+                    continue
                 if _is_closing_fence(line):
                     self.state = FenceState.DONE
                     continue
