@@ -18,8 +18,8 @@ _CALLS = 0
 
 
 class _StubBackend(GeneratorBackend):
-    def __init__(self, model_name: str, stop_criteria_factory=None) -> None:
-        super().__init__(model_name=model_name, stop_criteria_factory=stop_criteria_factory)
+    def __init__(self, model_name: str, stop_criteria_factory=None, **kwargs) -> None:
+        super().__init__(model_name=model_name, stop_criteria_factory=stop_criteria_factory, **kwargs)
 
     def generate_step(self, context: GenerateContext) -> GenerateResult:
         _ = context
@@ -44,8 +44,8 @@ class _FakeTokenizer:
 
 
 class _StopCriteriaBackend(GeneratorBackend):
-    def __init__(self, model_name: str, stop_criteria_factory=None) -> None:
-        super().__init__(model_name=model_name, stop_criteria_factory=stop_criteria_factory)
+    def __init__(self, model_name: str, stop_criteria_factory=None, **kwargs) -> None:
+        super().__init__(model_name=model_name, stop_criteria_factory=stop_criteria_factory, **kwargs)
         mapping = {
             1: "```rust\n",
             2: "let x = 1;\n",

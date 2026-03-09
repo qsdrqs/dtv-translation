@@ -23,8 +23,15 @@ class QwenGeneratorBackend(GeneratorBackend):
             Sequence[StoppingCriteria],
         ]
         | None = None,
+        do_sample: bool | None = None,
+        temperature: float | None = None,
     ) -> None:
-        super().__init__(model_name=model_name, stop_criteria_factory=stop_criteria_factory)
+        super().__init__(
+            model_name=model_name,
+            stop_criteria_factory=stop_criteria_factory,
+            do_sample=do_sample,
+            temperature=temperature,
+        )
         self.model_name = model_name
         use_cuda = torch.cuda.is_available()
         model_kwargs: dict[str, object] = {}
@@ -109,6 +116,8 @@ class QwenGeneratorBackend(GeneratorBackend):
             attention_mask=inputs.attention_mask,
             max_new_tokens=context.max_new_length,
             stopping_criteria=self.stop_criteria,
+            do_sample=self.do_sample,
+            temperature=self.temperature,
         )
 
         output_ids = outputs[0]

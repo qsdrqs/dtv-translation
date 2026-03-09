@@ -31,9 +31,13 @@ class GeneratorBackend(ABC):
         self,
         model_name: str,
         stop_criteria_factory: Callable[[Any], Sequence[Any]] | None = None,
+        do_sample: bool | None = None,
+        temperature: float | None = None,
     ) -> None:
         self.model_name = model_name
         self.stop_criteria_factory = stop_criteria_factory
+        self.do_sample = do_sample
+        self.temperature = temperature
 
     def _render_content(self, content: str | AssistantContent) -> str:
         if isinstance(content, AssistantContent):

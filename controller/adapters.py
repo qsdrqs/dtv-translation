@@ -34,10 +34,14 @@ class GeneratorAdapter(Generator):
         | None = None,
         fence_parser: FenceParser | None = None,
         backend_cls: type[GeneratorBackend] = QwenGeneratorBackend,
+        do_sample: bool | None = None,
+        temperature: float | None = None,
     ) -> None:
         self.backend = backend_cls(
             model_name=model_name,
             stop_criteria_factory=stop_criteria_factory,
+            do_sample=do_sample,
+            temperature=temperature,
         )
         self._fence_parser = fence_parser
         allowed_langs = fence_parser.allowed_langs if fence_parser is not None else ("rust", "rs")

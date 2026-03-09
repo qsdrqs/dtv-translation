@@ -23,8 +23,8 @@ class MockLLMBackend(GeneratorBackend):
     source_path: Path | None = None
     chunk_size: int = 1
 
-    def __init__(self, model_name: str, stop_criteria_factory=None) -> None:
-        super().__init__(model_name=model_name, stop_criteria_factory=stop_criteria_factory)
+    def __init__(self, model_name: str, stop_criteria_factory=None, **kwargs) -> None:
+        super().__init__(model_name=model_name, stop_criteria_factory=stop_criteria_factory, **kwargs)
         if self.source_path is None:
             raise ValueError("MockLLMBackend.source_path is not set")
         self._content = self.source_path.read_text(encoding="utf-8")

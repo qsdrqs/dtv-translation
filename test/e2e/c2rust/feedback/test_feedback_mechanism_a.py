@@ -44,8 +44,8 @@ class _ScriptedBackend(GeneratorBackend):
         cls.seen_assistant_messages = []
         cls.seen_user_messages = []
 
-    def __init__(self, model_name: str, stop_criteria_factory=None) -> None:
-        super().__init__(model_name=model_name, stop_criteria_factory=stop_criteria_factory)
+    def __init__(self, model_name: str, stop_criteria_factory=None, **kwargs) -> None:
+        super().__init__(model_name=model_name, stop_criteria_factory=stop_criteria_factory, **kwargs)
         self._index = 0
         self._token_ids: list[int] = []
         self._stop_criteria = self._build_stop_criteria()
