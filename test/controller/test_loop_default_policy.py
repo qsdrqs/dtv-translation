@@ -33,6 +33,7 @@ class _Step:
     text: str
     stop_reason: StopReason
     tokens: int = 1
+    fence_state: FenceState | None = None
 
 
 class _SequenceGenerator:
@@ -57,6 +58,19 @@ class _SequenceGenerator:
             )
         step = self.steps[self.idx]
         self.idx += 1
+        if step.fence_state is not None:
+            snap = FenceParserSnapshot(
+                state=step.fence_state,
+                saw_fence=step.fence_state != FenceState.OUTSIDE,
+            )
+            self._extractor_state = OutputExtractorState(
+                segment=snap, extract=snap, shared=snap, warning_emitted=False,
+            )
+        elif step.stop_reason.kind == "eos":
+            done = FenceParserSnapshot(state=FenceState.DONE, saw_fence=True)
+            self._extractor_state = OutputExtractorState(
+                segment=done, extract=done, shared=done, warning_emitted=False,
+            )
         return GenerateResult(
             delta_text=step.text,
             delta_tokens=step.tokens,

@@ -67,7 +67,8 @@ class _GenerateOnlyPolicy:
         return []
 
 
-def test_run_loop_terminates_on_no_fence_eos() -> None:
+def test_run_loop_no_fence_eos_delegates_to_policy() -> None:
+    """no_fence_eos no longer short-circuits the loop; the policy decides."""
     budget = Budget(gen_tokens_budget=4)
     feedback_state = FeedbackState()
     rollback_manager = RollbackManager()
@@ -83,4 +84,8 @@ def test_run_loop_terminates_on_no_fence_eos() -> None:
         max_steps=2,
     )
 
-    assert trace[-1].action == Action.TERMINATE
+    # The loop runs until max_steps; policy gets to decide (no short-circuit).
+    actions = [e.action for e in trace]
+    assert Action.TERMINATE not in actions
+    assert actions[0] == Action.GENERATE
+

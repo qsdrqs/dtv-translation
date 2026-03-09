@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from controller.loop import ControllerOp, Policy, select_oracles_by_granularity
 from core.budget import Budget
 from core.interfaces import Oracle
+from core.llm_output import FenceState
 from core.types import (
     Action,
     Artifact,
@@ -93,7 +94,7 @@ class DefaultPolicy(Policy):
 
     def next_action(self, ctx) -> ControllerOp:
         tokens_left = _tokens_left(ctx.budget)
-        is_eos = _is_eos(ctx.last_stop_reason)
+        is_eos = _is_eos(ctx.last_stop_reason, ctx.fence_state)
         is_boundary = _is_boundary_suffix(ctx.state.prefix)
         can_verify = _can_verify(self.config, is_boundary, is_eos)
 
@@ -335,8 +336,12 @@ def _is_boundary_suffix(prefix: str) -> bool:
     return prefix.rstrip().endswith((";", "}"))
 
 
-def _is_eos(stop_reason: StopReason | None) -> bool:
-    return stop_reason is not None and stop_reason.kind == "eos"
+def _is_eos(stop_reason: StopReason | None, fence_state: FenceState) -> bool:
+    return (
+        stop_reason is not None
+        and stop_reason.kind == "eos"
+        and fence_state == FenceState.DONE
+    )
 
 
 def _can_verify(config: DefaultPolicyConfig, is_boundary: bool, is_eos: bool) -> bool:

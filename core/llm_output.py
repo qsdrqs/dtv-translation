@@ -196,6 +196,12 @@ class FenceParser:
             fence_state=self.state,
         )
 
+    def flush(self) -> AssistantContent:
+        """Finalize parsing when no more input is expected (e.g. EOS)."""
+        if self._buffer:
+            return self.feed("\n")
+        return AssistantContent(fence_state=self.state)
+
     def consume_inside(self) -> str:
         if not self._inside_parts:
             return ""

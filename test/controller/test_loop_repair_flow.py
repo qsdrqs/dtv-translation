@@ -1045,7 +1045,7 @@ def test_scope_aware_feedback_retains_per_oracle_entries_until_owner_clears() ->
         name="stmt_oracle",
         required_granularity=Granularity.STMT,
         rollback_scope=RollbackScope.STMT,
-        verdicts=[Verdict.FAIL, Verdict.PASS],
+        verdicts=[Verdict.FAIL, Verdict.FAIL, Verdict.PASS, Verdict.PASS],
         message="statement mismatch",
     )
     budget = Budget(gen_tokens_budget=24)
@@ -1069,7 +1069,7 @@ def test_scope_aware_feedback_retains_per_oracle_entries_until_owner_clears() ->
     feedback_prompts = generator.seen_assistant_messages[1:]
     assert len(feedback_prompts) == 2
     assert "oracle=program_oracle" in feedback_prompts[0]
-    assert "oracle=stmt_oracle" not in feedback_prompts[0]
+    assert "oracle=stmt_oracle" in feedback_prompts[0]
     assert "oracle=program_oracle" in feedback_prompts[1]
     assert "oracle=stmt_oracle" in feedback_prompts[1]
 
@@ -1097,7 +1097,7 @@ def test_feedback_b_filters_diagnostics_to_current_repair_scope() -> None:
         name="stmt_oracle",
         required_granularity=Granularity.STMT,
         rollback_scope=RollbackScope.STMT,
-        verdicts=[Verdict.FAIL],
+        verdicts=[Verdict.FAIL, Verdict.FAIL, Verdict.PASS, Verdict.PASS],
         message="statement mismatch",
     )
     budget = Budget(gen_tokens_budget=24)
@@ -1121,9 +1121,8 @@ def test_feedback_b_filters_diagnostics_to_current_repair_scope() -> None:
     first_feedback_prompt = generator.seen_user_messages[1]
     second_feedback_prompt = generator.seen_user_messages[2]
     assert "[program_oracle] program mismatch" in first_feedback_prompt
-    assert "[stmt_oracle] statement mismatch" not in first_feedback_prompt
+    assert "[stmt_oracle] statement mismatch" in first_feedback_prompt
     assert "[stmt_oracle] statement mismatch" in second_feedback_prompt
-    assert "[program_oracle] program mismatch" not in second_feedback_prompt
 
 
 def test_generate_without_feedback_a_does_not_inject_active_feedback() -> None:

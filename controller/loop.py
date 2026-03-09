@@ -65,6 +65,7 @@ class PolicyContext:
     pending_patch: str | None
     repair_base_prefix: str | None
     repair_scope: RollbackScope | None
+    fence_state: FenceState
 
 
 @dataclass
@@ -119,13 +120,13 @@ def select_oracles_by_granularity(
     # Terms used in granularity filtering:
     # - required_granularity: each oracle's declared scope (e.g., STMT/FUNC/PROGRAM).
     # - boundary_granularity (min_granularity): policy lower bound; skip oracles below it.
-    # - effective_boundary (selection_granularity): actual closed boundary for this verify.
+    # - effective_boundary (selection_granularity): actual closed boundary upper bound for this verify.
     actual_granularity = selection_granularity
     selected: list[Oracle] = []
     for oracle in available:
-        if actual_granularity != oracle.required_granularity:
+        if oracle.required_granularity > actual_granularity:
             logger.info(
-                "oracle skipped: name=%s reason=boundary_mismatch actual=%s required=%s",
+                "oracle skipped: name=%s reason=boundary_too_shallow actual=%s required=%s",
                 oracle.name,
                 actual_granularity,
                 oracle.required_granularity,
@@ -925,6 +926,7 @@ def run_dtv_loop(
             pending_patch=runtime.pending_patch,
             repair_base_prefix=runtime.repair_base_prefix,
             repair_scope=runtime.repair_scope,
+            fence_state=generator.get_output_extractor_state(),
         )
         op = policy.next_action(ctx)
         logger.info(
@@ -958,12 +960,6 @@ def run_dtv_loop(
                 trace,
             )
             runtime.state.step += 1
-            # Terminate immediately if the model ended without producing a rust fence.
-            if runtime.last_stop_reason is not None and runtime.last_stop_reason.kind in {
-                "no_fence_eos",
-            }:
-                _handle_terminate(runtime, feedback_state, feedback_enabled, budget, trace)
-                break
             continue
 
         if op.action == Action.VERIFY:

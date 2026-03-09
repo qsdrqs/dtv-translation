@@ -53,6 +53,8 @@ class GeneratorAdapter(Generator):
         self._warning_emitted = False
 
     def get_output_extractor_state(self) -> FenceState:
+        if self._fence_parser is not None:
+            return self._fence_parser.state
         return self._extract_parser.state
 
     def capture_output_extractor_state(self) -> OutputExtractorState:
@@ -110,6 +112,8 @@ class GeneratorAdapter(Generator):
 
         assistant_accum = self._segment_parser.feed(result.delta_text)
         if self._fence_parser is not None:
+            if result.stop_reason.kind == "eos":
+                self._fence_parser.flush()
             extracted = self._fence_parser.consume_inside()
             stop_reason = result.stop_reason
             if stop_reason.kind == "eos" and not self._fence_parser.saw_fence:

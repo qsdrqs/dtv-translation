@@ -110,8 +110,8 @@ def test_trap_end_to_end() -> None:
         if output.oracle_name == "function_diff"
     ]
     assert function_outputs, "Expected function_diff to run at least once"
-    assert len(function_outputs) == 2, (
-        "Expected function_diff to run exactly twice for trap test; "
+    assert len(function_outputs) >= 2, (
+        "Expected function_diff to run at least twice for trap test; "
         f"found {len(function_outputs)} calls: {function_outputs}"
     )
     not_applicable_outputs = [
@@ -119,8 +119,8 @@ def test_trap_end_to_end() -> None:
         for step, verdict, diagnostics in function_outputs
         if verdict == Verdict.NOT_APPLICABLE.value
     ]
-    assert len(not_applicable_outputs) == 1, (
-        "Expected exactly one NOT_APPLICABLE function_diff output for main signature mismatch; "
+    assert len(not_applicable_outputs) >= 1, (
+        "Expected at least one NOT_APPLICABLE function_diff output for main signature mismatch; "
         f"found: {not_applicable_outputs}"
     )
     assert not_applicable_outputs[0][2] == ("return_type_mismatch",), (

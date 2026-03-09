@@ -37,6 +37,7 @@ def _ctx(
     pending_patch: str | None = None,
     repair_base_prefix: str | None = None,
     repair_scope: RollbackScope | None = None,
+    fence_state: FenceState = FenceState.DONE,
 ) -> PolicyContext:
     return PolicyContext(
         state=ControllerState(prefix=prefix),
@@ -51,6 +52,7 @@ def _ctx(
         pending_patch=pending_patch,
         repair_base_prefix=repair_base_prefix,
         repair_scope=repair_scope,
+        fence_state=fence_state,
     )
 
 
@@ -377,6 +379,37 @@ def test_default_policy_continue_then_generate() -> None:
     )
     op = policy.next_action(ctx)
     assert op.action == Action.GENERATE
+
+
+def test_eos_with_fence_inside_does_not_terminate() -> None:
+    """When stop_reason=eos but fence is still INSIDE, _is_eos() returns False.
+    After COMMIT the policy should GENERATE (not TERMINATE), because the fence
+    was never closed - the model's EOS is premature."""
+    policy = DefaultPolicy(DefaultPolicyConfig(terminate_on_eos_and_pass=True))
+    ctx = _ctx(
+        last_action=Action.COMMIT,
+        last_stop_reason=StopReason(kind="eos"),
+        last_outputs=_outputs(Verdict.PASS),
+        fence_state=FenceState.INSIDE,
+    )
+    op = policy.next_action(ctx)
+    assert op.action == Action.GENERATE
+
+
+def test_eos_with_fence_inside_does_not_verify_program() -> None:
+    """When stop_reason=eos but fence is still INSIDE, verification should use
+    boundary granularity (STMT), not EOS granularity (PROGRAM).
+    The prefix ends with ';' so is_boundary=True, but _is_eos()=False."""
+    policy = DefaultPolicy()
+    ctx = _ctx(
+        prefix="let x = 1;",
+        last_action=Action.GENERATE,
+        last_stop_reason=StopReason(kind="eos"),
+        fence_state=FenceState.INSIDE,
+    )
+    op = policy.next_action(ctx)
+    assert op.action == Action.VERIFY
+    assert op.verification_granularity == Granularity.STMT
 
 
 def test_default_policy_eos_pass_commits_then_terminates() -> None:
