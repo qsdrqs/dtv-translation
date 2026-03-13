@@ -21,7 +21,7 @@ from rollback.manager import RollbackManager
 MODEL_NAME = "Qwen/Qwen3-4B-Instruct-2507"
 TOKEN_BUDGET = 20480
 MAX_NEW_LENGTH = 1024
-PROMPT_PREFIX = "Translated the following C code into Rust:"
+PROMPT_PREFIX = "Translate the following C code into Rust, keep the same function order:"
 
 
 def _load_tests(path: Path) -> list[TestCase]:
