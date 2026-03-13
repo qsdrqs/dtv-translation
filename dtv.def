@@ -1,0 +1,51 @@
+Bootstrap: docker
+From: ubuntu:24.04
+
+%files
+    flake.nix /opt/dtv-flake/flake.nix
+    flake.lock /opt/dtv-flake/flake.lock
+
+%post
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y curl xz-utils ca-certificates
+    apt-get clean
+    rm -rf /var/lib/apt/lists/*
+
+    # Install Nix single-user (no daemon, no chown)
+    curl -L https://nixos.org/nix/install | sh -s -- --no-daemon
+    . /root/.nix-profile/etc/profile.d/nix.sh
+
+    # Enable flakes
+    mkdir -p /etc/nix
+    echo "experimental-features = nix-command flakes" > /etc/nix/nix.conf
+    echo "filter-syscalls = false" >> /etc/nix/nix.conf
+
+    # Install packages from pinned nixpkgs (matching flake.nix)
+    cd /opt/dtv-flake
+    nix profile install --profile /nix/var/nix/profiles/dtv \
+        --inputs-from . \
+        nixpkgs#python3 \
+        nixpkgs#rustup \
+        nixpkgs#uv \
+        nixpkgs#tree-sitter \
+        nixpkgs#gcc
+
+    # Install Rust toolchain
+    export RUSTUP_HOME=/opt/rustup
+    export CARGO_HOME=/opt/cargo
+    export PATH="/nix/var/nix/profiles/dtv/bin:${PATH}"
+    rustup install nightly-2025-11-13
+    rustup default nightly-2025-11-13
+    rustup component add rustfmt clippy rust-analyzer
+
+    # Clean up Nix garbage
+    nix-collect-garbage -d
+
+%environment
+    export PATH="/nix/var/nix/profiles/dtv/bin:/opt/cargo/bin:${PATH}"
+    export RUSTUP_HOME=/opt/rustup
+    export CARGO_HOME=/opt/cargo
+
+%runscript
+    exec bash "$@"

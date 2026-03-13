@@ -15,3 +15,21 @@ wheels/
 .envrc
 
 result/
+result_delta*/
+out_dtv_rollback_analysis/
+
+# Generated plots
+plots/
+plots_old/
+
+# Logs
+*.log
+
+# Large binaries
+*.tar
+
+# Debug output
+debug_crash_*.json
+
+# Local infrastructure/developing scripts
+develop/
