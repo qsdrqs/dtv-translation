@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from c_rust.oracles.function_diff_test_oracle.trace_comparator import (
+from core.trace_comparator import (
     find_first_mismatch,
     parse_trace_events,
 )

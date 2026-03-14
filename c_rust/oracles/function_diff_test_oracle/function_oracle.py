@@ -5,7 +5,7 @@ from __future__ import annotations
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 from core.interfaces import Oracle
@@ -40,12 +40,14 @@ from c_rust.oracles.function_diff_test_oracle.rust_instrumenter import (
     instrument_rust_functions,
     list_rust_function_names,
 )
-from c_rust.oracles.function_diff_test_oracle.trace_comparator import (
+from core.trace_comparator import (
     TraceComparisonStats,
+    filter_trace_for_function,
     find_first_mismatch,
     parse_trace_events,
+    remap_trace_function_id,
 )
-from core.types import ExecutionResult, ExecutionTraceEvent, TraceEventKind, TranslationSample
+from core.types import ExecutionResult, TranslationSample
 from c_rust.oracles.program_diff_test_oracle.execution_driver import run_binary
 
 
@@ -475,7 +477,7 @@ def _run_tests_and_compare(
             )
 
         # Function oracle compares only the target function's enter/exit events.
-        c_trace = _filter_trace_for_function(
+        c_trace = filter_trace_for_function(
             parse_trace_events(c_exec.stderr),
             c_function_name,
         )
@@ -486,11 +488,11 @@ def _run_tests_and_compare(
         # filter by c_function_name will be empty and the fallback by
         # rust_function_name is the actual match.  When names are identical
         # the first filter succeeds directly.
-        rust_trace = _filter_trace_for_function(rust_events, c_function_name)
+        rust_trace = filter_trace_for_function(rust_events, c_function_name)
         if not rust_trace:
-            rust_trace = _filter_trace_for_function(rust_events, rust_function_name)
+            rust_trace = filter_trace_for_function(rust_events, rust_function_name)
             if rust_trace and rust_function_name != c_function_name:
-                rust_trace = _remap_trace_function_id(rust_trace, c_function_name)
+                rust_trace = remap_trace_function_id(rust_trace, c_function_name)
         mismatch, stats = find_first_mismatch(
             c_trace,
             rust_trace,
@@ -637,20 +639,4 @@ def _run_compile(
         )
 
 
-def _filter_trace_for_function(
-    events: list[ExecutionTraceEvent],
-    function_name: str,
-) -> list[ExecutionTraceEvent]:
-    return [
-        event
-        for event in events
-        if event.kind in (TraceEventKind.FUNC_ENTER, TraceEventKind.FUNC_EXIT)
-        and event.id == function_name
-    ]
 
-
-def _remap_trace_function_id(
-    events: list[ExecutionTraceEvent],
-    function_name: str,
-) -> list[ExecutionTraceEvent]:
-    return [replace(event, id=function_name) for event in events]

@@ -20,6 +20,8 @@
             rustup
             uv
             tree-sitter
+            nodejs
+            nodePackages.typescript
           ];
           shellHook = ''
           '';

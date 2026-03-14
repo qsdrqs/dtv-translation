@@ -1,9 +1,9 @@
-"""Trace comparison utilities for differential testing oracles."""
+"""Language-agnostic trace comparison utilities for differential testing oracles."""
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from core.types import ExecutionTraceEvent, Mismatch, RollbackScope, TraceEventKind
@@ -80,6 +80,27 @@ def find_first_mismatch(
             return payload_mismatch, stats
 
     return None, stats
+
+
+def filter_trace_for_function(
+    events: list[ExecutionTraceEvent],
+    function_name: str,
+) -> list[ExecutionTraceEvent]:
+    """Filter trace events to only func_enter/func_exit for a specific function."""
+    return [
+        event
+        for event in events
+        if event.kind in (TraceEventKind.FUNC_ENTER, TraceEventKind.FUNC_EXIT)
+        and event.id == function_name
+    ]
+
+
+def remap_trace_function_id(
+    events: list[ExecutionTraceEvent],
+    function_name: str,
+) -> list[ExecutionTraceEvent]:
+    """Remap all event ids to a given function name (for cross-language name normalization)."""
+    return [replace(event, id=function_name) for event in events]
 
 
 def _events_match(c_event: ExecutionTraceEvent, rust_event: ExecutionTraceEvent) -> bool:
