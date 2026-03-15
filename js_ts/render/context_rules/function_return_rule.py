@@ -7,7 +7,7 @@ _FUNCTION_TYPES = frozenset({
     "generator_function_declaration",
 })
 
-_EXEMPT_RETURN_TYPES = frozenset({"void", "undefined", "any"})
+_EXEMPT_RETURN_TYPES = frozenset({"void", "undefined", "any", "never"})
 
 
 def apply_function_return(
@@ -26,8 +26,6 @@ def apply_function_return(
             continue
         body = node.child_by_field_name("body")
         if body is None or body.type != "statement_block":
-            continue
-        if _has_return_in_body(body):
             continue
         insert_pos = body.end_byte - 1  # before the closing }
         if insert_pos < prefix_len:
@@ -59,14 +57,4 @@ def _find_functions(root):
         stack.extend(reversed(node.children))
 
 
-def _has_return_in_body(body_node) -> bool:
-    # Skip nested function bodies - their returns don't count for the outer function.
-    stack = list(body_node.children)
-    while stack:
-        node = stack.pop()
-        if node.type == "return_statement":
-            return True
-        if node.type in _FUNCTION_TYPES:
-            continue
-        stack.extend(node.children)
-    return False
+

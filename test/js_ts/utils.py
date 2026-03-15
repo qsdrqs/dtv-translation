@@ -54,7 +54,8 @@ def check_typescript(code: str) -> TscCheckResult:
         src = tmp / "check.ts"
         src.write_text(code, encoding="utf-8")
         proc = subprocess.run(
-            [tsc, "--noEmit", "--pretty", "false", str(src)],
+            [tsc, "--noEmit", "--pretty", "false", "--strict",
+             "--target", "ES2020", "--lib", "ES2020,DOM", str(src)],
             capture_output=True,
             text=True,
             check=False,
