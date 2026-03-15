@@ -3,10 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 _OPEN_TO_CLOSE = {"(": ")", "[": "]", "{": "}"}
-_CLOSE_TO_OPEN = {")": "(",
-    "]": "[",
-    "}": "{",
-}
+_CLOSE_TO_OPEN = {v: k for k, v in _OPEN_TO_CLOSE.items()}
 
 
 def _looks_like_char_literal(text: str, idx: int) -> bool:
