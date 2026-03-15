@@ -4,6 +4,7 @@ from tree_sitter_language_pack import get_parser
 
 from js_ts.render.scan import closing_suffix, scan_unclosed
 from js_ts.render.context_rules import apply_context_rules
+from js_ts.render.groups import ts_group_stack
 from core.types import Artifact, RenderResult, RenderStatus, TranslationSample
 
 _TS_PARSER = get_parser("typescript")
@@ -50,16 +51,24 @@ class JSToTSRenderer:
         code = prefix + result.suffix
         tree = _parse_ts(code)
 
-        patched = apply_context_rules(code, len(prefix.encode("utf-8")), tree)
+        prefix_byte_len = len(prefix.encode("utf-8"))
+        patched = apply_context_rules(code, prefix_byte_len, tree)
         if patched != code:
             code = patched
             tree = _parse_ts(code)
+
+        source_bytes = code.encode("utf-8")
+        group_stack = ts_group_stack(
+            tree,
+            prefix_end_byte=prefix_byte_len,
+            source_bytes=source_bytes,
+        )
 
         artifact = Artifact(
             code=code,
             ast_tree=tree,
             sample=self.sample,
             group_events=(),
-            group_stack=None,
+            group_stack=group_stack,
         )
         return RenderResult(status=RenderStatus.OK, artifact=artifact)
