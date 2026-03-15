@@ -101,6 +101,42 @@ function foo(): number {
     assert compile.ok, compile.stdout
 
 
+def test_function_missing_return_with_unicode_compiles() -> None:
+    prefix = """\
+function foo(): number {
+    const s: string = "\u4f60\u597d";
+    const x: number = 1;
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = check_typescript(result.artifact.code)
+    assert compile.ok, compile.stdout
+
+
+def test_try_without_catch_with_unicode_compiles() -> None:
+    prefix = """\
+function foo() {
+    const s: string = "\u4f60\u597d";
+    try {
+        const x: number = 1;
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = check_typescript(result.artifact.code)
+    assert compile.ok, compile.stdout
+
+
+def test_try_closed_in_prefix_gets_catch() -> None:
+    prefix = "function foo() { try { const x = 1; }"
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = check_typescript(result.artifact.code)
+    assert compile.ok, compile.stdout
+
+
 def test_try_without_catch_compiles() -> None:
     prefix = """\
 function foo() {

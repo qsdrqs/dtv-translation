@@ -3,6 +3,7 @@ from __future__ import annotations
 from tree_sitter_language_pack import get_parser
 
 from js_ts.render.scan import closing_suffix, scan_unclosed
+from js_ts.render.context_rules import apply_context_rules
 from core.types import Artifact, RenderResult, RenderStatus, TranslationSample
 
 _TS_PARSER = get_parser("typescript")
@@ -48,6 +49,11 @@ class JSToTSRenderer:
 
         code = prefix + result.suffix
         tree = _parse_ts(code)
+
+        patched = apply_context_rules(code, len(prefix.encode("utf-8")), tree)
+        if patched != code:
+            code = patched
+            tree = _parse_ts(code)
 
         artifact = Artifact(
             code=code,

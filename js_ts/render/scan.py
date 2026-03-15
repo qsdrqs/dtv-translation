@@ -158,3 +158,4 @@ def closing_suffix(text: str) -> ClosingResult:
         return ClosingResult(ok=False, notes=notes)
     closers = "".join(_OPEN_TO_CLOSE[e.opener] for e in reversed(stack))
     return ClosingResult(ok=True, suffix=closers)
+
