@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from c_rust.oracles.compiler_oracle.compiler_oracle import (
+    RustcProgramOracle,
     _decide_verdict,
     _filter_partial_noise,
 )
@@ -193,3 +194,41 @@ fn main() {
     filtered = _filter_partial_noise(diagnostics)
     verdict = _decide_verdict(compile.returncode, filtered, timed_out=False)
     assert verdict == Verdict.FAIL
+
+
+# RustcProgramOracle
+
+
+def test_program_oracle_attributes() -> None:
+    from core.types import Granularity, RollbackScope
+    oracle = RustcProgramOracle()
+    assert oracle.name == "rustc_program"
+    assert oracle.required_granularity == Granularity.PROGRAM
+    assert oracle.rollback_scope == RollbackScope.PROGRAM
+
+
+def test_program_oracle_noise_not_filtered() -> None:
+    """At PROGRAM granularity, E0425 (cannot find value) is a real error, not noise."""
+    from core.types import (
+        Artifact,
+        ControllerState,
+        Granularity,
+        OracleContext,
+        RollbackScope,
+        Verdict,
+    )
+    from core.types.diff_testing import TranslationSample
+
+    code = """\
+fn main() {
+    let x = helper();
+}
+"""
+    oracle = RustcProgramOracle()
+    sample = TranslationSample(source_code="", source_lang="c", test_cases=[])
+    artifact = Artifact(code=code, sample=sample)
+    state = ControllerState(prefix=code)
+    context = OracleContext()
+    output = oracle.run(state, artifact, context)
+    assert output.verdict == Verdict.FAIL
+    assert any(d.error_code == "E0425" for d in output.diagnostics)

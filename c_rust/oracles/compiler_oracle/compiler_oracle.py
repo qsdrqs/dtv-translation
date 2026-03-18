@@ -123,5 +123,11 @@ def _decide_verdict(exit_code: int, diagnostics: tuple, timed_out: bool) -> Verd
     return Verdict.PASS
 
 
+class RustcProgramOracle(RustcOracle):
+    name = "rustc_program"
+    required_granularity = Granularity.PROGRAM
+    rollback_scope = RollbackScope.PROGRAM
+
+
 def _extract_sample(artifact: Artifact) -> Any | None:
     return artifact.sample

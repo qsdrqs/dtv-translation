@@ -34,8 +34,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Protocol, cast
 
-from c_rust.oracles import FunctionOracle, RustcOracle
-from c_rust.oracles.compiler_oracle.compiler_oracle import RustcOracle as _RustcOracleBase
+from c_rust.oracles import FunctionOracle, RustcOracle, RustcProgramOracle
 from c_rust.oracles.program_diff_test_oracle.execution_driver import compile_and_run
 from c_rust.render import CRustRenderer
 from controller.adapters import GeneratorAdapter
@@ -102,12 +101,6 @@ NAIVE_CONFIG = DefaultPolicyConfig(
     enable_feedback=True,
     repair_verify_granularity=Granularity.PROGRAM,
 )
-
-
-class ProgramCompileOracle(_RustcOracleBase):
-    name = "rustc_program"
-    required_granularity = Granularity.PROGRAM
-    rollback_scope = RollbackScope.PROGRAM
 
 
 class _StopCriteriaBackend(Protocol):
@@ -504,7 +497,7 @@ def run_single(
             "trace_log": naive_result.trace_log,
         }
     else:
-        oracles = [RustcOracle(), FunctionOracle(), ProgramCompileOracle()]
+        oracles = [RustcOracle(), FunctionOracle(), RustcProgramOracle()]
         budget = Budget(gen_tokens_budget=effective_budget)
         feedback_state = FeedbackState()
         rollback_manager = RollbackManager()

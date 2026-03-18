@@ -26,7 +26,6 @@ from run_ab_experiment import (
     MODEL_NAME,
     OUTPUT_TOKEN_CAP,
     PROMPT_PREFIX,
-    ProgramCompileOracle,
     load_test_cases,
     run_single,
 )
@@ -132,7 +131,7 @@ def main() -> None:
     print(f"Model: {MODEL_NAME}")
     print(f"Dataset: {DATASET_DIR}")
 
-    from c_rust.oracles import FunctionOracle, RustcOracle
+    from c_rust.oracles import FunctionOracle, RustcOracle, RustcProgramOracle
     from controller.adapters import GeneratorAdapter
     from controller.stop_criteria import DTVStoppingCriteria, RUST_PROFILE
     from core.llm_output import FenceParser
@@ -162,7 +161,7 @@ def main() -> None:
     from c_rust.render import CRustRenderer
 
     renderer = CRustRenderer(sample=sample)
-    oracles = [RustcOracle(), FunctionOracle(), ProgramCompileOracle()]
+    oracles = [RustcOracle(), FunctionOracle(), RustcProgramOracle()]
     budget = Budget(gen_tokens_budget=OUTPUT_TOKEN_CAP)
     feedback_state = FeedbackState()
     rollback_manager = RollbackManager()

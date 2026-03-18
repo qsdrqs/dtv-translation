@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from js_ts.oracles.compiler_oracle.tsc_oracle import TscOracle
+from js_ts.oracles.compiler_oracle.tsc_oracle import TscOracle, TscProgramOracle
 from core.types import (
     Artifact,
     ControllerState,
@@ -94,3 +94,26 @@ function foo(): string {
 """
     output = _run_oracle(code)
     assert output.verdict == Verdict.FAIL
+
+
+# TscProgramOracle
+
+
+def test_program_oracle_attributes() -> None:
+    oracle = TscProgramOracle()
+    assert oracle.name == "tsc_program"
+    assert oracle.required_granularity == Granularity.PROGRAM
+    assert oracle.rollback_scope == RollbackScope.PROGRAM
+
+
+def test_program_oracle_noise_not_filtered() -> None:
+    """At PROGRAM granularity, TS2304 (cannot find name) is a real error, not noise."""
+    oracle = TscProgramOracle()
+    code = "const x: number = unknownVar;"
+    sample = TranslationSample(source_code="", source_lang="js", test_cases=[])
+    artifact = Artifact(code=code, sample=sample)
+    state = ControllerState(prefix=code)
+    context = OracleContext()
+    output = oracle.run(state, artifact, context)
+    assert output.verdict == Verdict.FAIL
+    assert any(d.error_code == "TS2304" for d in output.diagnostics)

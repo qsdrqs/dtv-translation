@@ -82,6 +82,12 @@ class TscOracle(Oracle):
         )
 
 
+class TscProgramOracle(TscOracle):
+    name = "tsc_program"
+    required_granularity = Granularity.PROGRAM
+    rollback_scope = RollbackScope.PROGRAM
+
+
 def _decide_verdict(exit_code: int, diagnostics: tuple[Diagnostic, ...], timed_out: bool) -> Verdict:
     if timed_out:
         return Verdict.FAIL
