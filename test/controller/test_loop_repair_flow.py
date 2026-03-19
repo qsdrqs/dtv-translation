@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from c_rust.feedback import RUST_FEEDBACK_LANG
 from controller.loop import ControllerOp, run_dtv_loop, select_oracles_by_granularity
 from core.budget import Budget
 from core.llm_output import AssistantContent, FenceParserSnapshot, FenceState, OutputExtractorState
@@ -794,6 +795,7 @@ def test_failed_context_survives_inconclusive_verify() -> None:
         feedback_state=feedback_state,
         rollback_manager=rollback_manager,
         policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
         max_steps=6,
     )
 
@@ -822,6 +824,7 @@ def test_llm_token_accounting_counts_generate_and_feedback_only() -> None:
         feedback_state=feedback_state,
         rollback_manager=rollback_manager,
         policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
         max_steps=8,
     )
 
@@ -859,6 +862,7 @@ def test_continue_then_generate_raises_when_feedback_payload_exists() -> None:
             feedback_state=feedback_state,
             rollback_manager=rollback_manager,
             policy=policy,
+            feedback_lang_config=RUST_FEEDBACK_LANG,
             max_steps=7,
         )
 
@@ -880,6 +884,7 @@ def test_failed_context_survives_no_oracle_verify() -> None:
         feedback_state=feedback_state,
         rollback_manager=rollback_manager,
         policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
         max_steps=6,
     )
 
@@ -903,6 +908,7 @@ def test_feedback_prompt_can_omit_failed_snippet() -> None:
         feedback_state=feedback_state,
         rollback_manager=rollback_manager,
         policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
         repair_feedback_format_config=RepairFeedbackFormatConfig(include_failed_snippet=False),
         max_steps=6,
     )
@@ -931,6 +937,7 @@ def test_structured_feedback_mechanism_b_applies_parsed_patch() -> None:
         feedback_state=feedback_state,
         rollback_manager=rollback_manager,
         policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
         max_steps=8,
     )
 
@@ -976,6 +983,7 @@ second;
         feedback_state=feedback_state,
         rollback_manager=rollback_manager,
         policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
         max_steps=7,
     )
 
@@ -1014,6 +1022,7 @@ fn main() {
         feedback_state=feedback_state,
         rollback_manager=rollback_manager,
         policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
         max_steps=7,
     )
 
@@ -1061,6 +1070,7 @@ def test_scope_aware_feedback_retains_per_oracle_entries_until_owner_clears() ->
         feedback_state=feedback_state,
         rollback_manager=rollback_manager,
         policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
         max_steps=16,
     )
 
@@ -1113,6 +1123,7 @@ def test_feedback_b_filters_diagnostics_to_current_repair_scope() -> None:
         feedback_state=feedback_state,
         rollback_manager=rollback_manager,
         policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
         max_steps=16,
     )
 
@@ -1160,6 +1171,7 @@ def test_generate_without_feedback_a_does_not_inject_active_feedback() -> None:
         feedback_state=feedback_state,
         rollback_manager=rollback_manager,
         policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
         max_steps=12,
     )
 
@@ -1207,6 +1219,7 @@ def test_generate_keeps_feedback_anchor_position_after_feedback_a() -> None:
         feedback_state=feedback_state,
         rollback_manager=rollback_manager,
         policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
         max_steps=16,
     )
 
@@ -1257,6 +1270,7 @@ def test_generate_skips_inline_feedback_after_feedback_b() -> None:
         feedback_state=feedback_state,
         rollback_manager=rollback_manager,
         policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
         max_steps=16,
     )
 
@@ -1296,6 +1310,7 @@ def test_stmt_failure_lifted_to_func_persists_feedback_through_stmt_commit() -> 
         feedback_state=feedback_state,
         rollback_manager=rollback_manager,
         policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
         max_steps=12,
     )
 

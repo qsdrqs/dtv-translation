@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import pytest
 
+from c_rust.feedback import RUST_FEEDBACK_LANG
 from core.llm_output import AssistantContent, FenceParserSnapshot, FenceState, OutputExtractorState
 from core.types import TestCase, TranslationSample
 from controller.loop import ControllerOp, run_dtv_loop, select_oracles_by_granularity
@@ -402,6 +403,7 @@ def test_function_oracle_receives_closed_function_name() -> None:
         feedback_state=feedback_state,
         rollback_manager=rollback_manager,
         policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
         max_steps=6,
     )
 
@@ -432,6 +434,7 @@ def test_commit_prefers_group_stack_over_events() -> None:
         feedback_state=feedback_state,
         rollback_manager=rollback_manager,
         policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
         max_steps=4,
     )
 
@@ -480,6 +483,7 @@ def test_rollback_restores_inside_parser_state_for_all_scopes(scope: RollbackSco
         feedback_state=feedback_state,
         rollback_manager=rollback_manager,
         policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
         max_steps=5,
     )
 
@@ -534,6 +538,7 @@ def test_program_rollback_then_generate_raises_with_feedback_payload() -> None:
             feedback_state=feedback_state,
             rollback_manager=rollback_manager,
             policy=policy,
+            feedback_lang_config=RUST_FEEDBACK_LANG,
             max_steps=6,
         )
 

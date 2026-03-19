@@ -23,9 +23,18 @@ class TscResult:
 
 
 class TscDriver:
-    def __init__(self, tsc_path: str = "tsc") -> None:
+    def __init__(
+        self,
+        tsc_path: str = "tsc",
+        type_roots: tuple[str, ...] | None = None,
+    ) -> None:
         self.tsc_path = _resolve_tsc_path(tsc_path)
         _check_tsc_version(self.tsc_path)
+        if type_roots is not None:
+            self.type_roots = type_roots
+        else:
+            discovered = _find_type_roots()
+            self.type_roots = (discovered,) if discovered else ()
 
     def check(self, ctx: OracleContext) -> TscResult:
         if ctx.workdir is None or ctx.artifact is None:
@@ -35,6 +44,10 @@ class TscDriver:
         source_path = workdir / "check.ts"
         source_path.write_text(artifact.code, encoding="utf-8")
 
+        type_roots_args: tuple[str, ...] = ()
+        if self.type_roots:
+            type_roots_args = ("--typeRoots", ",".join(self.type_roots))
+
         cmd = (
             self.tsc_path,
             "--noEmit",
@@ -42,6 +55,8 @@ class TscDriver:
             "--strict",
             "--target", "ES2020",
             "--lib", "ES2020,DOM",
+            "--skipLibCheck",
+            *type_roots_args,
             str(source_path),
         )
 
@@ -106,3 +121,13 @@ def _check_tsc_version(tsc_path: str) -> None:
         )
     except (OSError, subprocess.CalledProcessError) as exc:
         raise RuntimeError(f"failed to execute tsc --version: {exc}") from exc
+
+
+def _find_type_roots() -> str | None:
+    current = Path(__file__).resolve().parent
+    while current != current.parent:
+        candidate = current / "node_modules" / "@types"
+        if candidate.is_dir():
+            return str(candidate)
+        current = current.parent
+    return None

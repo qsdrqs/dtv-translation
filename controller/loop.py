@@ -34,6 +34,7 @@ from core.types import (
 )
 from feedback.formatter import RepairFeedbackFormatConfig, render_repair_feedback
 from feedback.feedback import FeedbackState
+from feedback.language import FeedbackLanguageConfig
 from feedback.output_parser import parse_feedback_output, validate_patch_scope
 from feedback.plan import FeedbackPlan, build_feedback_plan
 from feedback.repair_context import RepairContext
@@ -707,6 +708,7 @@ def _handle_feedback(
     budget: Budget,
     feedback_state: FeedbackState,
     repair_feedback_format_config: RepairFeedbackFormatConfig | None,
+    feedback_lang_config: FeedbackLanguageConfig,
     trace: list[TraceEvent],
 ) -> None:
     if (
@@ -731,6 +733,7 @@ def _handle_feedback(
         requested_mode=op.feedback_mode,
         repair_context=repair_context,
         repair_feedback_format_config=repair_feedback_format_config,
+        lang_config=feedback_lang_config,
     )
     feedback_strategy = _feedback_strategy_for_mechanism(feedback_plan.mechanism)
     feedback_gen = _select_feedback_generator(
@@ -755,11 +758,11 @@ def _handle_feedback(
     if feedback_gen is generator:
         generator.restore_output_extractor_state(runtime.repair_base_extractor_state)
     if feedback_plan.channel == GenerationChannel.PATCH:
-        parse_result = parse_feedback_output(result.delta_text)
+        parse_result = parse_feedback_output(result.delta_text, feedback_lang_config)
         scope = runtime.repair_scope or RollbackScope.STMT
         scope_error = None
         if parse_result.patch is not None:
-            scope_error = validate_patch_scope(parse_result.patch, scope)
+            scope_error = validate_patch_scope(parse_result.patch, scope, feedback_lang_config)
         runtime.pending_patch = parse_result.patch
         runtime.feedback_parser_error = parse_result.error or scope_error
         if runtime.feedback_parser_error is not None:
@@ -879,11 +882,12 @@ def run_dtv_loop(
     feedback_state: FeedbackState,
     rollback_manager: RollbackManager,
     policy: Policy,
+    feedback_lang_config: FeedbackLanguageConfig,
     feedback_generator: Generator | None = None,
     repair_feedback_format_config: RepairFeedbackFormatConfig | None = None,
     max_steps: int | None = 100,
     max_new_length: int = 1024,
-    prompt_prefix: str = "Translate the following C code into Rust, keep the same function order:",
+    prompt_prefix: str = "",
     oracle_runner: OracleRunner | None = None,
 ) -> tuple[str, list[TraceEvent]]:
     """
@@ -1015,6 +1019,7 @@ def run_dtv_loop(
                 budget,
                 feedback_state,
                 repair_feedback_format_config,
+                feedback_lang_config,
                 trace,
             )
             runtime.state.step += 1

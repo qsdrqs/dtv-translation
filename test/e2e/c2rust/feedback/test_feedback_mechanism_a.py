@@ -7,6 +7,7 @@ from typing import ClassVar
 import pytest
 import torch
 
+from c_rust.feedback import RUST_FEEDBACK_LANG
 from c_rust.oracles import ProgramOracle, RustcOracle
 from c_rust.render import CRustRenderer
 from controller.adapters import GeneratorAdapter
@@ -214,6 +215,7 @@ def _run_feedback_case(
         feedback_state=feedback_state,
         rollback_manager=rollback_manager,
         policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
         feedback_generator=feedback_generator,
         max_steps=20,
         max_new_length=4096,

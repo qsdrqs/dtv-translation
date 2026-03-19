@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from c_rust.feedback import RUST_FEEDBACK_LANG
 from c_rust.oracles import RustcOracle
 from c_rust.render import CRustRenderer
 from controller.loop import ControllerOp, run_dtv_loop, select_oracles_by_granularity
@@ -198,6 +199,7 @@ def test_loop_commits_with_rustc_oracle() -> None:
         feedback_state=feedback_state,
         rollback_manager=rollback_manager,
         policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
         max_steps=4,
     )
 
@@ -230,6 +232,7 @@ def test_loop_rolls_back_when_rustc_fail() -> None:
         feedback_state=feedback_state,
         rollback_manager=rollback_manager,
         policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
         max_steps=4,
     )
 
@@ -269,6 +272,7 @@ fn foo() -> i32 {
         feedback_state=feedback_state,
         rollback_manager=rollback_manager,
         policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
         max_steps=6,
     )
 
@@ -297,6 +301,7 @@ def test_loop_incomplete_use_item_returns_continue_without_oracle_runs() -> None
         feedback_state=feedback_state,
         rollback_manager=rollback_manager,
         policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
         max_steps=3,
     )
 

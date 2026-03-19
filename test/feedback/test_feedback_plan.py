@@ -9,6 +9,7 @@ from core.types import (
     RollbackScope,
     Verdict,
 )
+from c_rust.feedback import RUST_FEEDBACK_LANG
 from feedback.feedback import FeedbackState
 from feedback.plan import build_feedback_plan, render_feedback_prompt
 from feedback.repair_context import RepairContext
@@ -73,7 +74,7 @@ def test_render_feedback_prompt_includes_parser_error_context() -> None:
         parser_error_context="multiple fenced code blocks found",
     )
 
-    prompt = render_feedback_prompt(repair_context)
+    prompt = render_feedback_prompt(repair_context, RUST_FEEDBACK_LANG)
 
     assert prompt == """The previous generated next code snippet was:
 
@@ -130,6 +131,7 @@ def test_build_feedback_plan_maps_mechanism_a_to_continuation() -> None:
         requested_mode=FeedbackMode.INLINE,
         repair_context=repair_context,
         repair_feedback_format_config=None,
+        lang_config=RUST_FEEDBACK_LANG,
     )
 
     assert plan.mode == FeedbackMode.INLINE
@@ -157,6 +159,7 @@ def test_build_feedback_plan_maps_mechanism_b_to_patch_fenced() -> None:
         requested_mode=FeedbackMode.INLINE,
         repair_context=repair_context,
         repair_feedback_format_config=None,
+        lang_config=RUST_FEEDBACK_LANG,
     )
 
     assert plan.mode == FeedbackMode.FENCED

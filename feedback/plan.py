@@ -5,10 +5,10 @@ from dataclasses import dataclass
 from core.types import FeedbackMechanism, FeedbackMode, GenerationChannel
 from feedback.formatter import RepairFeedbackFormatConfig, render_repair_feedback
 from core.types import RollbackScope
+from feedback.language import FeedbackLanguageConfig
 from feedback.repair_context import RepairContext
 
 
-_GOAL = "Produce a minimal Rust patch that resolves the listed failures."
 _CONSTRAINTS = (
     "Keep unchanged code outside the failed snippet.",
     "Return code only. Do not add prose.",
@@ -30,13 +30,14 @@ def build_feedback_plan(
     requested_mode: FeedbackMode | None,
     repair_context: RepairContext,
     repair_feedback_format_config: RepairFeedbackFormatConfig | None,
+    lang_config: FeedbackLanguageConfig,
 ) -> FeedbackPlan:
     if mechanism == FeedbackMechanism.B:
         return FeedbackPlan(
             mechanism=mechanism,
             mode=FeedbackMode.FENCED,
             channel=GenerationChannel.PATCH,
-            prompt=render_feedback_prompt(repair_context),
+            prompt=render_feedback_prompt(repair_context, lang_config),
         )
     mode = requested_mode or FeedbackMode.INLINE
     return FeedbackPlan(
@@ -47,7 +48,13 @@ def build_feedback_plan(
     )
 
 
-def render_feedback_prompt(repair_context: RepairContext) -> str:
+def render_feedback_prompt(
+    repair_context: RepairContext,
+    lang_config: FeedbackLanguageConfig,
+) -> str:
+    lang = lang_config.name
+    fence_tag = max(lang_config.fence_tags, key=len)
+    goal = f"Produce a minimal {lang} patch that resolves the listed failures."
     diagnostics_block = _render_diagnostics(repair_context)
     constraints_block = "\n".join(f"- {line}" for line in _CONSTRAINTS)
     parser_error_section = ""
@@ -56,7 +63,7 @@ def render_feedback_prompt(repair_context: RepairContext) -> str:
 
 Previous parse error:
 - {repair_context.parser_error_context}"""
-    scope_rules = _scope_rules(repair_context.repair_scope)
+    scope_rules = _scope_rules(repair_context.repair_scope, lang_config)
     scope_rules_block = "\n".join(f"- {rule}" for rule in scope_rules)
     return f"""The previous generated next code snippet was:
 
@@ -68,7 +75,7 @@ It error with diagnostics:
 {diagnostics_block}
 
 Your goal:
-- {_GOAL}
+- {goal}
 
 repair scope:
 - {repair_context.repair_scope.value}
@@ -80,8 +87,8 @@ scope rules:
 {scope_rules_block}
 
 output contract:
-Return exactly one Rust code block:
-```rust
+Return exactly one {lang} code block:
+```{fence_tag}
 <Your patch here>
 ```
 """
@@ -101,11 +108,16 @@ def _render_diagnostics(repair_context: RepairContext) -> str:
     return "\n".join(lines)
 
 
-def _scope_rules(scope: RollbackScope) -> tuple[str, ...]:
+def _scope_rules(
+    scope: RollbackScope,
+    lang_config: FeedbackLanguageConfig,
+) -> tuple[str, ...]:
+    lang = lang_config.name
+    example = lang_config.example_function_wrapper
     if scope == RollbackScope.STMT:
         return (
             "Replace only the failed snippet.",
-            "Do not return full function wrappers (for example, `fn main() { ... }`).",
+            f"Do not return full function wrappers (for example, {example}).",
         )
     if scope == RollbackScope.BLOCK:
         return (
@@ -119,5 +131,5 @@ def _scope_rules(scope: RollbackScope) -> tuple[str, ...]:
         )
     return (
         "Patch the full program as needed.",
-        "Return one coherent Rust code block only.",
+        f"Return one coherent {lang} code block only.",
     )

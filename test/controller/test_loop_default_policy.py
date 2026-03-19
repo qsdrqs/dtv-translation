@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import pytest
 
+from c_rust.feedback import RUST_FEEDBACK_LANG
 from controller.loop import run_dtv_loop
 from controller.policy import DefaultPolicy, DefaultPolicyConfig
 from core.budget import Budget
@@ -321,6 +322,7 @@ def _run_loop(generator, renderer, oracles, policy, max_steps: int) -> tuple[str
         feedback_state=feedback_state,
         rollback_manager=rollback_manager,
         policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
         max_steps=max_steps,
     )
 

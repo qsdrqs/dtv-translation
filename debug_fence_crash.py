@@ -17,6 +17,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from c_rust.feedback import RUST_FEEDBACK_LANG
 from core.llm_output import AssistantContent, FenceReopenError, FenceState, OutputExtractorState
 from core.types import GenerateContext, GenerateMessage, GenerationChannel
 from run_ab_experiment import (
@@ -177,6 +178,7 @@ def main() -> None:
             feedback_state=feedback_state,
             rollback_manager=rollback_manager,
             policy=policy,
+            feedback_lang_config=RUST_FEEDBACK_LANG,
             repair_feedback_format_config=RepairFeedbackFormatConfig(include_failed_snippet=False),
             max_steps=None,
             max_new_length=MAX_NEW_LENGTH,

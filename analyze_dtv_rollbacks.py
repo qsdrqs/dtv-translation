@@ -8,6 +8,7 @@ from collections import defaultdict, deque
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from c_rust.feedback import RUST_FEEDBACK_LANG
 from feedback.output_parser import parse_feedback_output
 
 
@@ -382,7 +383,7 @@ def enrich_with_feedback_and_patch(
             rollback_assistant = input_chat.last_non_empty_assistant()
 
         delta = suffix_delta(last_assistant_input, output_assistant)
-        parse_result = parse_feedback_output(delta)
+        parse_result = parse_feedback_output(delta, RUST_FEEDBACK_LANG)
         applied_patch = parse_result.patch if parse_result.patch is not None else None
 
         event.rollback_prefix = extract_rust_code(rollback_assistant)

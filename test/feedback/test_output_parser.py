@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from core.types import RollbackScope
+from c_rust.feedback import RUST_FEEDBACK_LANG
 from feedback.output_parser import (
     FeedbackFenceStreamParser,
     parse_feedback_output,
@@ -14,7 +15,8 @@ def test_parse_feedback_output_single_fence_success() -> None:
 fn main() {
     println!(\"ok\");
 }
-```"""
+```""",
+        RUST_FEEDBACK_LANG,
     )
 
     assert result.patch == """fn main() {
@@ -31,7 +33,8 @@ let x = 1;
 ```
 ```rust
 let y = 2;
-```"""
+```""",
+        RUST_FEEDBACK_LANG,
     )
 
     assert result.patch is None
@@ -40,7 +43,7 @@ let y = 2;
 
 
 def test_parse_feedback_output_rejects_empty_output() -> None:
-    result = parse_feedback_output("   \n\n")
+    result = parse_feedback_output("   \n\n", RUST_FEEDBACK_LANG)
 
     assert result.patch is None
     assert result.error == "empty model output"
@@ -51,7 +54,8 @@ def test_parse_feedback_output_accepts_plain_text_fallback() -> None:
     result = parse_feedback_output(
         """fn main() {
     println!(\"ok\");
-}"""
+}""",
+        RUST_FEEDBACK_LANG,
     )
 
     assert result.patch == """fn main() {
@@ -65,7 +69,8 @@ def test_parse_feedback_output_rejects_non_rust_fence() -> None:
     result = parse_feedback_output(
         """```python
 print(\"hi\")
-```"""
+```""",
+        RUST_FEEDBACK_LANG,
     )
 
     assert result.patch is None
@@ -79,13 +84,14 @@ def test_validate_patch_scope_stmt_rejects_function_wrapper() -> None:
     let x: i32 = 1;
 }""",
         RollbackScope.STMT,
+        RUST_FEEDBACK_LANG,
     )
 
     assert error == "scope validator: stmt-scope patch cannot include top-level items (function_item)"
 
 
 def test_validate_patch_scope_stmt_accepts_statement_patch() -> None:
-    error = validate_patch_scope("let x: i32 = 1;", RollbackScope.STMT)
+    error = validate_patch_scope("let x: i32 = 1;", RollbackScope.STMT, RUST_FEEDBACK_LANG)
 
     assert error is None
 
@@ -96,6 +102,7 @@ def test_validate_patch_scope_program_allows_function_wrapper() -> None:
     let x: i32 = 1;
 }""",
         RollbackScope.PROGRAM,
+        RUST_FEEDBACK_LANG,
     )
 
     assert error is None
@@ -110,6 +117,7 @@ def test_validate_patch_scope_func_allows_single_function() -> None:
     if d < r { d } else { r }
 }""",
         RollbackScope.FUNC,
+        RUST_FEEDBACK_LANG,
     )
 
     assert error is None
@@ -124,6 +132,7 @@ fn main() {
     let x = helper();
 }""",
         RollbackScope.FUNC,
+        RUST_FEEDBACK_LANG,
     )
 
     assert error is None
@@ -138,6 +147,7 @@ fn main() {
     let x: i32 = 1;
 }""",
         RollbackScope.FUNC,
+        RUST_FEEDBACK_LANG,
     )
 
     assert error == (
@@ -148,7 +158,7 @@ fn main() {
 
 def test_validate_patch_scope_func_accepts_statements_only() -> None:
     """FUNC patch with only statements (no function wrapper) should pass."""
-    error = validate_patch_scope("let x: i32 = 1;", RollbackScope.FUNC)
+    error = validate_patch_scope("let x: i32 = 1;", RollbackScope.FUNC, RUST_FEEDBACK_LANG)
 
     assert error is None
 
@@ -160,6 +170,7 @@ def test_validate_patch_scope_block_still_rejects_function() -> None:
     let x: i32 = 1;
 }""",
         RollbackScope.BLOCK,
+        RUST_FEEDBACK_LANG,
     )
 
     assert error == "scope validator: block-scope patch cannot include top-level items (function_item)"

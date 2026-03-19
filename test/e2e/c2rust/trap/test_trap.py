@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from c_rust.feedback import RUST_FEEDBACK_LANG
 from c_rust.oracles import FunctionOracle, ProgramOracle, RustcOracle
 from c_rust.render import CRustRenderer
 from controller.adapters import GeneratorAdapter
@@ -89,6 +90,7 @@ def test_trap_end_to_end() -> None:
         feedback_state=feedback_state,
         rollback_manager=rollback_manager,
         policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
         max_steps=len(source_text) + 64,
         max_new_length=1024,
         prompt_prefix=prompt,

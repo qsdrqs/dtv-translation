@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from c_rust.feedback import RUST_FEEDBACK_LANG
 from controller.adapters import GeneratorAdapter
 from controller.loop import ControllerOp, run_dtv_loop, select_oracles_by_granularity
 from controller.policy import DefaultPolicy
@@ -70,6 +71,7 @@ def main() -> None:
         feedback_state=feedback_state,
         rollback_manager=rollback_manager,
         policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
         max_steps=5,
         prompt_prefix="",
     )

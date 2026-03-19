@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from c_rust.feedback import RUST_FEEDBACK_LANG
 from controller.loop import ControllerOp, run_dtv_loop
 from core.budget import Budget
 from core.llm_output import FenceParserSnapshot, FenceState, OutputExtractorState
@@ -81,6 +82,7 @@ def test_run_loop_no_fence_eos_delegates_to_policy() -> None:
         feedback_state=feedback_state,
         rollback_manager=rollback_manager,
         policy=_GenerateOnlyPolicy(),
+        feedback_lang_config=RUST_FEEDBACK_LANG,
         max_steps=2,
     )
 

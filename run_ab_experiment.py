@@ -34,6 +34,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Protocol, cast
 
+from c_rust.feedback import RUST_FEEDBACK_LANG
 from c_rust.oracles import FunctionOracle, RustcOracle, RustcProgramOracle
 from c_rust.oracles.program_diff_test_oracle.execution_driver import compile_and_run
 from c_rust.render import CRustRenderer
@@ -514,6 +515,7 @@ def run_single(
             feedback_state=feedback_state,
             rollback_manager=rollback_manager,
             policy=policy,
+            feedback_lang_config=RUST_FEEDBACK_LANG,
             repair_feedback_format_config=RepairFeedbackFormatConfig(include_failed_snippet=False),
             max_steps=MAX_STEPS,
             max_new_length=MAX_NEW_LENGTH,

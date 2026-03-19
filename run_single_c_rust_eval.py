@@ -4,6 +4,7 @@ import json
 import sys
 from pathlib import Path
 
+from c_rust.feedback import RUST_FEEDBACK_LANG
 from c_rust.oracles import FunctionOracle, ProgramOracle, RustcOracle
 from c_rust.render import CRustRenderer
 from controller.adapters import GeneratorAdapter
@@ -160,6 +161,7 @@ fn main() {
         feedback_state=feedback_state,
         rollback_manager=rollback_manager,
         policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
         repair_feedback_format_config=RepairFeedbackFormatConfig(include_failed_snippet=False),
         max_steps=500,
         max_new_length=MAX_NEW_LENGTH,

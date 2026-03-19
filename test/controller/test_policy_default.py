@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from c_rust.feedback import RUST_FEEDBACK_LANG
 from controller.loop import PolicyContext, run_dtv_loop
 from controller.policy import DefaultPolicy, DefaultPolicyConfig
 from core.budget import Budget
@@ -490,6 +491,7 @@ def test_default_policy_feedback_escalates_to_mechanism_b_after_no_progress() ->
         feedback_state=FeedbackState(),
         rollback_manager=RollbackManager(),
         policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
         max_steps=16,
     )
 

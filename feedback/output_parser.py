@@ -1,32 +1,51 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
+from typing import cast
 
-from tree_sitter_language_pack import get_parser
+from tree_sitter_language_pack import SupportedLanguage, get_parser
 
 from core.types import RollbackScope
+from feedback.language import FeedbackLanguageConfig
 
 
-_FENCED_BLOCK_RE = re.compile(r"```(?P<lang>[^\n`]*)\n(?P<body>.*?)```", re.DOTALL)
-_ANY_COMPLETE_FENCE_RE = re.compile(r"```[^\n`]*\n.*?```", re.DOTALL)
-_RUST_LANGS = {"rust", "rs"}
-_RUST_PARSER = get_parser("rust")
-_TOP_LEVEL_ITEM_TYPES = {
-    "function_item",
-    "const_item",
-    "static_item",
-    "struct_item",
-    "enum_item",
-    "union_item",
-    "trait_item",
-    "impl_item",
-    "mod_item",
-    "type_item",
-    "extern_crate_declaration",
-    "use_declaration",
-    "macro_definition",
-}
+@dataclass(frozen=True)
+class _FenceMatch:
+    lang: str
+    body: str
+    start: int
+    end: int
+
+
+def _find_fenced_blocks(text: str) -> list[_FenceMatch]:
+    """Find all complete ```lang\\n...``` blocks in *text*."""
+    results: list[_FenceMatch] = []
+    pos = 0
+    while pos < len(text):
+        open_idx = text.find("```", pos)
+        if open_idx == -1:
+            break
+        lang_start = open_idx + 3
+        newline_idx = text.find("\n", lang_start)
+        if newline_idx == -1:
+            break
+        lang = text[lang_start:newline_idx]
+        # Language tag must not contain backticks (e.g. reject ````).
+        if "`" in lang:
+            pos = lang_start
+            continue
+        body_start = newline_idx + 1
+        close_idx = text.find("```", body_start)
+        if close_idx == -1:
+            break
+        results.append(_FenceMatch(
+            lang=lang,
+            body=text[body_start:close_idx],
+            start=open_idx,
+            end=close_idx + 3,
+        ))
+        pos = close_idx + 3
+    return results
 
 
 @dataclass(frozen=True)
@@ -64,15 +83,31 @@ class FeedbackFenceStreamParser:
 
 
 def _has_complete_fence(text: str) -> bool:
-    return _ANY_COMPLETE_FENCE_RE.search(text) is not None
+    pos = 0
+    while pos < len(text):
+        open_idx = text.find("```", pos)
+        if open_idx == -1:
+            return False
+        lang_start = open_idx + 3
+        newline_idx = text.find("\n", lang_start)
+        if newline_idx == -1:
+            return False
+        if "`" in text[lang_start:newline_idx]:
+            pos = lang_start
+            continue
+        return text.find("```", newline_idx + 1) != -1
+    return False
 
 
-def parse_feedback_output(text: str) -> ParseResult:
+def parse_feedback_output(
+    text: str,
+    lang_config: FeedbackLanguageConfig,
+) -> ParseResult:
     stripped = text.strip()
     if not stripped:
         return ParseResult(patch=None, error="empty model output", used_fence=False)
 
-    matches = list(_FENCED_BLOCK_RE.finditer(stripped))
+    matches = _find_fenced_blocks(stripped)
     if matches:
         if len(matches) > 1:
             return ParseResult(
@@ -81,22 +116,22 @@ def parse_feedback_output(text: str) -> ParseResult:
                 used_fence=True,
             )
         match = matches[0]
-        lang = match.group("lang").strip().lower()
-        if lang not in _RUST_LANGS:
+        lang = match.lang.strip().lower()
+        if lang not in lang_config.fence_tags:
             return ParseResult(
                 patch=None,
-                error="fenced code block language must be rust",
+                error=f"fenced code block language must be {lang_config.name.lower()}",
                 used_fence=True,
             )
-        prefix = stripped[: match.start()].strip()
-        suffix = stripped[match.end() :].strip()
+        prefix = stripped[: match.start].strip()
+        suffix = stripped[match.end :].strip()
         if prefix or suffix:
             return ParseResult(
                 patch=None,
                 error="fenced output must contain only one code block",
                 used_fence=True,
             )
-        patch = match.group("body").strip()
+        patch = match.body.strip()
         if not patch:
             return ParseResult(
                 patch=None,
@@ -114,28 +149,35 @@ def parse_feedback_output(text: str) -> ParseResult:
     return ParseResult(patch=stripped, error=None, used_fence=False)
 
 
-def validate_patch_scope(patch: str, scope: RollbackScope) -> str | None:
+def validate_patch_scope(
+    patch: str,
+    scope: RollbackScope,
+    lang_config: FeedbackLanguageConfig,
+) -> str | None:
     if scope == RollbackScope.PROGRAM:
         return None
 
-    tree = _RUST_PARSER.parse(patch.encode("utf-8"))
+    lang = lang_config.name
+    parser = get_parser(cast(SupportedLanguage, lang_config.tree_sitter_lang))
+    tree = parser.parse(patch.encode("utf-8"))
     root = tree.root_node
     if root.has_error:
-        return "scope validator: patch is not valid Rust syntax"
+        return f"scope validator: patch is not valid {lang} syntax"
 
     named_children = [child for child in root.children if child.is_named]
     if not named_children:
-        return "scope validator: patch has no Rust syntax nodes"
+        return f"scope validator: patch has no {lang} syntax nodes"
 
-    # FUNC scope: allow the repaired function itself, but reject unrelated
-    # top-level declarations (e.g. extra use/struct/impl items).
+    func_type = lang_config.function_item_type
+    top_types = lang_config.top_level_item_types
+
     if scope == RollbackScope.FUNC:
         non_func_top = sorted(
             {
                 child.type
                 for child in named_children
-                if (child.type in _TOP_LEVEL_ITEM_TYPES or child.type.endswith("_item"))
-                and child.type != "function_item"
+                if (child.type in top_types or child.type.endswith("_item"))
+                and child.type != func_type
             }
         )
         if non_func_top:
@@ -150,7 +192,7 @@ def validate_patch_scope(patch: str, scope: RollbackScope) -> str | None:
         {
             child.type
             for child in named_children
-            if child.type in _TOP_LEVEL_ITEM_TYPES or child.type.endswith("_item")
+            if child.type in top_types or child.type.endswith("_item")
         }
     )
     if disallowed:
