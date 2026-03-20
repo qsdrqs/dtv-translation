@@ -1,6 +1,13 @@
 from __future__ import annotations
 
 from feedback.language import FeedbackLanguageConfig
+from js_ts.render.scan import closing_suffix as _ts_closing_suffix
+
+
+def _ts_close(text: str) -> str:
+    result = _ts_closing_suffix(text)
+    return result.suffix if result.ok else ""
+
 
 TS_FEEDBACK_LANG = FeedbackLanguageConfig(
     name="TypeScript",
@@ -18,4 +25,5 @@ TS_FEEDBACK_LANG = FeedbackLanguageConfig(
     }),
     function_item_type="function_declaration",
     example_function_wrapper="`function main() { ... }`",
+    closing_suffix_fn=_ts_close,
 )

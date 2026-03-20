@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from core.types import RollbackScope
 from c_rust.feedback import RUST_FEEDBACK_LANG
+from js_ts.feedback import TS_FEEDBACK_LANG
 from feedback.output_parser import (
     FeedbackFenceStreamParser,
     parse_feedback_output,
+    snippet_contains_function,
     validate_patch_scope,
 )
 
@@ -174,6 +176,128 @@ def test_validate_patch_scope_block_still_rejects_function() -> None:
     )
 
     assert error == "scope validator: block-scope patch cannot include top-level items (function_item)"
+
+
+def test_snippet_contains_function_detects_incomplete_ts_function() -> None:
+    snippet = """\
+function trap(height: number[]): number {
+    const n = height.length;"""
+    assert snippet_contains_function(snippet, TS_FEEDBACK_LANG) is True
+
+
+def test_snippet_contains_function_detects_incomplete_rust_function() -> None:
+    snippet = """\
+fn trap(height: &[i32]) -> i32 {
+    let n = height.len();"""
+    assert snippet_contains_function(snippet, RUST_FEEDBACK_LANG) is True
+
+
+def test_snippet_contains_function_rejects_bare_statement() -> None:
+    assert snippet_contains_function("let x: i32 = 1;", RUST_FEEDBACK_LANG) is False
+    assert snippet_contains_function("const x: number = 1;", TS_FEEDBACK_LANG) is False
+
+
+def test_validate_patch_scope_stmt_accepts_incomplete_ts_prefix_when_rollback_has_func() -> None:
+    patch = """\
+function trap(height: number[]): number {
+    const n: number = height.length;"""
+    rollback_snippet = """\
+function trap(height: number[]): number {
+    const n = height.length;"""
+    error = validate_patch_scope(
+        patch,
+        RollbackScope.STMT,
+        TS_FEEDBACK_LANG,
+        rollback_snippet=rollback_snippet,
+    )
+    assert error is None
+
+
+def test_validate_patch_scope_stmt_rejects_early_closed_ts_prefix() -> None:
+    patch = """\
+function trap(height: number[]): number {
+    const n: number = height.length;
+}"""
+    rollback_snippet = """\
+function trap(height: number[]): number {
+    const n = height.length;"""
+    error = validate_patch_scope(
+        patch,
+        RollbackScope.STMT,
+        TS_FEEDBACK_LANG,
+        rollback_snippet=rollback_snippet,
+    )
+    assert error is not None
+
+
+def test_validate_patch_scope_stmt_still_rejects_function_without_rollback_snippet() -> None:
+    patch = """\
+function trap(height: number[]): number {
+    const n: number = height.length;"""
+    error = validate_patch_scope(patch, RollbackScope.STMT, TS_FEEDBACK_LANG)
+    assert error is not None
+
+
+def test_validate_patch_scope_stmt_still_rejects_function_when_rollback_has_no_func() -> None:
+    patch = """\
+function trap(height: number[]): number {
+    const n: number = height.length;"""
+    error = validate_patch_scope(
+        patch,
+        RollbackScope.STMT,
+        TS_FEEDBACK_LANG,
+        rollback_snippet="const n = height.length;",
+    )
+    assert error is not None
+
+
+def test_validate_patch_scope_stmt_accepts_incomplete_rust_prefix_when_rollback_has_func() -> None:
+    patch = """\
+fn main() {
+    let x: i32 = 1;"""
+    rollback_snippet = """\
+fn main() {
+    let x = 1;"""
+    error = validate_patch_scope(
+        patch,
+        RollbackScope.STMT,
+        RUST_FEEDBACK_LANG,
+        rollback_snippet=rollback_snippet,
+    )
+    assert error is None
+
+
+def test_validate_patch_scope_stmt_rejects_early_closed_rust_prefix() -> None:
+    patch = """\
+fn main() {
+    let x: i32 = 1;
+}"""
+    rollback_snippet = """\
+fn main() {
+    let x = 1;"""
+    error = validate_patch_scope(
+        patch,
+        RollbackScope.STMT,
+        RUST_FEEDBACK_LANG,
+        rollback_snippet=rollback_snippet,
+    )
+    assert error is not None
+
+
+def test_validate_patch_scope_block_not_affected_by_rollback_snippet() -> None:
+    patch = """\
+fn main() {
+    let x: i32 = 1;"""
+    rollback_snippet = """\
+fn main() {
+    let x = 1;"""
+    error = validate_patch_scope(
+        patch,
+        RollbackScope.BLOCK,
+        RUST_FEEDBACK_LANG,
+        rollback_snippet=rollback_snippet,
+    )
+    assert error is not None
 
 
 def test_feedback_fence_stream_parser_detects_complete_fence() -> None:

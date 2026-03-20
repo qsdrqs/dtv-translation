@@ -3,7 +3,7 @@
 ## Project: Decoding Time Verification (DTV) for Code Translation
 
 1. no trailing spaces, no lines with only spaces
-2. keep this file up to date (last updated: 2026-02-13)
+2. keep this file up to date (last updated: 2026-03-19)
 3. Except for explicit reasons, do not use non-ASCII characters in the codebase or documentation.
 4. Although redundant comments are generally discouraged, necessary comments should be written at complex logic to explain the logic.
 5. Except for explicit reasons, always add imports at the beginning of the file. For explicit reasons, like slow imports, add a comment explaining why the import is not at the top.
@@ -74,9 +74,13 @@ This repo intentionally uses a flat top-level layout (no `src/`):
   - Renderers should emit `Artifact.group_stack`: enclosing `{FUNC,BLOCK,...}` kinds at the prefix end (outer -> inner).
   - The controller syncs `rollback_manager` via `sync_groups(artifact.group_stack)` before committing the stmt checkpoint.
   - `Artifact.group_events` remains as a legacy fallback (do not rely on boundary-to-boundary deltas for correctness).
+- Prefix invariant:
+  - Every committed checkpoint, rollback target, and applied repair patch must remain a legal prefix of some correct full program.
+  - Standalone syntax validity is not sufficient. A patch that closes a function or block early is invalid if that closed form can no longer be continued into the intended correct program.
 
 ### Renderer
 - Legal prefix: a prefix is legal only if some completion can make the full program valid. If a construct is closed and non-exhaustive (for example, a closed `match` block without a wildcard arm), that prefix is illegal for the renderer.
+- This legal-prefix rule is a repo-wide invariant, not just a renderer detail. Feedback validation, checkpoint commits, and repair application must preserve the same property.
 
 ### How to Run
 - Unit tests: `./.venv/bin/python -m pytest -q`

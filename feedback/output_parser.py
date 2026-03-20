@@ -149,17 +149,43 @@ def parse_feedback_output(
     return ParseResult(patch=stripped, error=None, used_fence=False)
 
 
+def snippet_contains_function(
+    snippet: str,
+    lang_config: FeedbackLanguageConfig,
+) -> bool:
+    """Check whether *snippet* contains a function declaration/item.
+
+    The snippet may be incomplete (e.g. a function header + first statement
+    without a closing brace).  The renderer's ``closing_suffix_fn`` is used
+    to close the code so that tree-sitter can identify the function node.
+    """
+    suffix = lang_config.closing_suffix_fn(snippet)
+    closed = snippet + suffix
+    parser = get_parser(cast(SupportedLanguage, lang_config.tree_sitter_lang))
+    tree = parser.parse(closed.encode("utf-8"))
+    root = tree.root_node
+    func_type = lang_config.function_item_type
+    return any(
+        child.type == func_type
+        for child in root.children
+        if child.is_named
+    )
+
+
 def validate_patch_scope(
     patch: str,
     scope: RollbackScope,
     lang_config: FeedbackLanguageConfig,
+    *,
+    rollback_snippet: str | None = None,
 ) -> str | None:
     if scope == RollbackScope.PROGRAM:
         return None
 
     lang = lang_config.name
+    patch_suffix = lang_config.closing_suffix_fn(patch)
     parser = get_parser(cast(SupportedLanguage, lang_config.tree_sitter_lang))
-    tree = parser.parse(patch.encode("utf-8"))
+    tree = parser.parse((patch + patch_suffix).encode("utf-8"))
     root = tree.root_node
     if root.has_error:
         return f"scope validator: patch is not valid {lang} syntax"
@@ -188,11 +214,37 @@ def validate_patch_scope(
             )
         return None
 
+    # STMT / BLOCK scope.
+    # When the rollback snippet itself contains a function header (e.g. the
+    # first checkpoint bundles "function header + 1st statement"), the model
+    # must include the function header in its repair patch.  Allow the
+    # function item type in that case.
+    allowed_in_stmt: set[str] = set()
+    rollback_suffix = None
+    if (
+        scope == RollbackScope.STMT
+        and rollback_snippet is not None
+        and snippet_contains_function(rollback_snippet, lang_config)
+    ):
+        rollback_suffix = lang_config.closing_suffix_fn(rollback_snippet)
+        # Compare renderer closing suffixes, not just a closed/open boolean.
+        # The suffix is the exact structural boundary the prefix still owes.
+        # Keeping it identical is sufficient for this special case: it allows
+        # a legal incomplete first-stmt repair prefix, but rejects repairs that
+        # close the function/block early or open extra structure.
+        if patch_suffix != rollback_suffix:
+            return (
+                "scope validator: stmt-scope patch must preserve the rollback"
+                " prefix boundary"
+            )
+        allowed_in_stmt.add(func_type)
+
     disallowed = sorted(
         {
             child.type
             for child in named_children
-            if child.type in top_types or child.type.endswith("_item")
+            if (child.type in top_types or child.type.endswith("_item"))
+            and child.type not in allowed_in_stmt
         }
     )
     if disallowed:

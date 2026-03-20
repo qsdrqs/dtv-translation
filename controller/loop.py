@@ -762,7 +762,12 @@ def _handle_feedback(
         scope = runtime.repair_scope or RollbackScope.STMT
         scope_error = None
         if parse_result.patch is not None:
-            scope_error = validate_patch_scope(parse_result.patch, scope, feedback_lang_config)
+            scope_error = validate_patch_scope(
+                parse_result.patch,
+                scope,
+                feedback_lang_config,
+                rollback_snippet=bad_snippet,
+            )
         runtime.pending_patch = parse_result.patch
         runtime.feedback_parser_error = parse_result.error or scope_error
         if runtime.feedback_parser_error is not None:

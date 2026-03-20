@@ -53,19 +53,27 @@ Last updated: 2026-03-19
   ```
 - Model output: `function trap(height: number[]): number { const n = height.length;` -- identical to before, no type annotation added.
 
-### Root cause (hypotheses, needs ablation to isolate)
-- **Task framing**: A stays in the same assistant turn ("continue code"), model is not in "follow instruction" mode. B switches to a user turn which triggers instruction following.
-- **Content gap**: B provides goal + constraints + scope rules + output contract. A provides only diagnostics in a code comment. The current A vs B comparison is confounded.
-- **Comment format**: `/* ... */` is treated as informational by models trained on code. The model's "skip comments" prior may dominate.
-- **Context mismatch**: The repair comment exists during generation but not in the final code -- the model conditions on "ghost context."
-- NOT concluded as a fundamental flaw of Mechanism A. The design space has not been explored.
-- This is NOT specific to JS->TS or lint errors. The same pattern (model ignoring Mechanism A feedback) is observed in C->Rust with compilation errors (see known_issues_c_rust.md Issues 4 and 5).
+### Status: UNABLE TO FIX (at 4B model scale)
 
-### Critical constraint
-Mechanism A cannot be abandoned. It is the only repair path that preserves DTV at higher rollback scopes (BLOCK/FUNC/PROGRAM). Mechanism B generates entire blocks/functions in one shot, bypassing token-by-token verification.
+### Root cause (confirmed by ablation)
+The model treats `/* ... */` block comments as informational noise during code generation and does not act on their content. This is not an attention deficit -- it is the model's learned semantic role for block comments in code.
 
-### Research plan
-See `.sisyphus/plans/feedback-mechanism-a-ablation.md` for a controlled ablation plan to isolate the failure factors.
+Ablation experiments (see `ablation/` directory) systematically ruled out:
+- **Content richness**: Giving A the same rich content as Mechanism B (goal, constraints, scope rules) -- still ignored (0/5).
+- **Comment wording**: 9 different wording styles tested (imperative, diff hunk, FIXME tag, checklist, contrastive, structured, etc.) -- all 0/5 or 1/5 with sampling (temperature=0.6).
+- **Attention boosting**: Directly increasing attention weights on feedback tokens via forward hooks -- low boost ignored, high boost (5-10) causes degenerate output. No usable sweet spot.
+
+The only approach that works is placing repair instructions in a **user turn** (Mechanism B), which switches the model from "continue code" mode to "follow instruction" mode. But Mechanism B bypasses DTV at higher scopes.
+
+### Implication
+- STMT scope: Use Mechanism B (acceptable -- small patches).
+- BLOCK/FUNC/PROGRAM scope: Mechanism A is required for DTV but does not work at 4B scale. Larger models or fine-tuning may change this.
+- This is NOT specific to JS->TS or lint errors. The same pattern is observed in C->Rust (see known_issues_c_rust.md Issues 4 and 5).
+
+### Ablation data
+- `.sisyphus/plans/feedback-mechanism-a-ablation.md` -- experiment plan
+- `ablation/batch_results.md` -- 9 wording variants, 5 runs each
+- `ablation/attn_boost_results.md` -- attention boost at 0/2/5/10, 2 variants
 
 ## Issue: Renderer-closed code triggers spurious eslint diagnostics
 

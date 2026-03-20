@@ -1,6 +1,13 @@
 from __future__ import annotations
 
+from c_rust.render.scan import closing_suffix as _rust_closing_suffix
 from feedback.language import FeedbackLanguageConfig
+
+
+def _rust_close(text: str) -> str:
+    result = _rust_closing_suffix(text)
+    return result.suffix if result.ok else ""
+
 
 RUST_FEEDBACK_LANG = FeedbackLanguageConfig(
     name="Rust",
@@ -23,4 +30,5 @@ RUST_FEEDBACK_LANG = FeedbackLanguageConfig(
     }),
     function_item_type="function_item",
     example_function_wrapper="`fn main() { ... }`",
+    closing_suffix_fn=_rust_close,
 )

@@ -111,6 +111,28 @@ Return exactly one Rust code block:
 """
 
 
+def test_render_feedback_prompt_stmt_scope_forbids_function_wrapper_for_normal_stmt() -> None:
+    state = FeedbackState()
+    state.on_verify([
+        OracleOutput(
+            oracle_name="rustc",
+            verdict=Verdict.FAIL,
+            diagnostics=(
+                Diagnostic(message="expected `i32`, found `&str`", severity="error"),
+            ),
+            rollback_scope=RollbackScope.STMT,
+        )
+    ],
+    selected_scope=RollbackScope.STMT,)
+
+    repair_context = RepairContext.from_feedback_state(state, bad_snippet='let x: i32 = "1";')
+
+    prompt = render_feedback_prompt(repair_context, RUST_FEEDBACK_LANG)
+
+    assert "Do not return full function wrappers" in prompt
+    assert "The repair target includes a function header" not in prompt
+
+
 def test_build_feedback_plan_maps_mechanism_a_to_continuation() -> None:
     state = FeedbackState()
     state.on_verify([
