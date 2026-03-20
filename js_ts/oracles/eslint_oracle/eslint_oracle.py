@@ -11,7 +11,11 @@ from core.types import (
     Verdict,
 )
 from js_ts.oracles.eslint_oracle.eslint_driver import EslintDriver
-from js_ts.oracles.eslint_oracle.eslint_parser import has_errors, parse_eslint_messages
+from js_ts.oracles.eslint_oracle.eslint_parser import (
+    filter_post_prefix_diagnostics,
+    has_errors,
+    parse_eslint_messages,
+)
 
 
 class EslintOracle(Oracle):
@@ -24,10 +28,10 @@ class EslintOracle(Oracle):
         self.driver = EslintDriver()
 
     def run(self, state: ControllerState, artifact: Artifact, context: OracleContext) -> OracleOutput:
-        del state
         del context
         result = self.driver.check(artifact.code, timeout_s=self.timeout_s)
         diagnostics = parse_eslint_messages(result.messages)
+        diagnostics = filter_post_prefix_diagnostics(diagnostics, state.prefix)
         verdict = Verdict.FAIL if has_errors(diagnostics) else Verdict.PASS
         return OracleOutput(
             oracle_name=self.name,

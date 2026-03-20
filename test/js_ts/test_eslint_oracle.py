@@ -12,17 +12,28 @@ from core.types import (
     Granularity,
     OracleContext,
     OracleOutput,
+    RenderStatus,
     RollbackScope,
     Verdict,
 )
 from core.types.diff_testing import TranslationSample
 from js_ts.oracles.eslint_oracle.eslint_driver import EslintDriver
 from js_ts.oracles.eslint_oracle.eslint_oracle import EslintOracle
-from js_ts.oracles.eslint_oracle.eslint_parser import parse_eslint_messages
+from js_ts.oracles.eslint_oracle.eslint_parser import (
+    filter_post_prefix_diagnostics,
+    parse_eslint_messages,
+)
+from js_ts.render import JSToTSRenderer
 
 
 UNTYPED_CODE = "function foo(x) { return x; }\n"
 TYPED_CODE = "function foo(x: number): number { return x; }\nconst y: number = 1;\n"
+MODEL_PREFIX_BEFORE_RENDERER_CLOSING = """\
+import * as readline from 'readline';
+
+function trap(height: number[]): number {
+  const n = height.length;
+"""
 
 
 def _require_eslint() -> None:
@@ -42,13 +53,21 @@ def _make_oracle() -> EslintOracle:
     return EslintOracle()
 
 
-def _run_oracle(code: str) -> OracleOutput:
+def _run_oracle(code: str, prefix: str | None = None) -> OracleOutput:
     oracle = _make_oracle()
     sample = TranslationSample(source_code="", source_lang="js", test_cases=[])
     artifact = Artifact(code=code, sample=sample)
-    state = ControllerState(prefix=code)
+    state = ControllerState(prefix=code if prefix is None else prefix)
     context = OracleContext()
     return oracle.run(state, artifact, context)
+
+
+def _render_prefix(prefix: str) -> Artifact:
+    renderer = JSToTSRenderer()
+    result = renderer.try_render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    return result.artifact
 
 
 def test_driver_returns_violations_on_untyped_code() -> None:
@@ -112,6 +131,77 @@ def test_parser_extracts_line_col_as_span() -> None:
     ])
     assert diagnostics[0].span == (3, 7)
     assert diagnostics[0].severity == "warning"
+
+
+def test_filter_post_prefix_diagnostics_drops_renderer_only_diagnostic() -> None:
+    diagnostics = parse_eslint_messages([
+        {
+            "ruleId": "@typescript-eslint/no-explicit-any",
+            "severity": 2,
+            "message": "Unexpected any. Specify a different type.",
+            "line": 5,
+            "column": 23,
+        }
+    ])
+    filtered = filter_post_prefix_diagnostics(diagnostics, MODEL_PREFIX_BEFORE_RENDERER_CLOSING)
+    assert filtered == ()
+
+
+def test_filter_post_prefix_diagnostics_keeps_diagnostic_inside_prefix() -> None:
+    diagnostics = parse_eslint_messages([
+        {
+            "ruleId": "@typescript-eslint/typedef",
+            "severity": 2,
+            "message": "Expected n to have a type annotation.",
+            "line": 4,
+            "column": 9,
+        }
+    ])
+    filtered = filter_post_prefix_diagnostics(diagnostics, MODEL_PREFIX_BEFORE_RENDERER_CLOSING)
+    assert filtered == diagnostics
+
+
+def test_filter_post_prefix_diagnostics_keeps_prefix_error_and_drops_renderer_noise() -> None:
+    diagnostics = parse_eslint_messages([
+        {
+            "ruleId": "@typescript-eslint/typedef",
+            "severity": 2,
+            "message": "Expected n to have a type annotation.",
+            "line": 4,
+            "column": 9,
+        },
+        {
+            "ruleId": "@typescript-eslint/no-explicit-any",
+            "severity": 2,
+            "message": "Unexpected any. Specify a different type.",
+            "line": 5,
+            "column": 23,
+        },
+    ])
+    filtered = filter_post_prefix_diagnostics(diagnostics, MODEL_PREFIX_BEFORE_RENDERER_CLOSING)
+    assert filtered == (
+        Diagnostic(
+            message="[@typescript-eslint/typedef] Expected n to have a type annotation.",
+            severity="error",
+            span=(4, 9),
+            error_code="@typescript-eslint/typedef",
+        ),
+    )
+
+
+def test_oracle_ignores_renderer_closing_diagnostic_beyond_prefix() -> None:
+    prefix = """\
+function sumPair(): number {
+  const total: number = 1;
+"""
+    artifact = _render_prefix(prefix)
+
+    assert "return undefined as any;" in artifact.code
+
+    output = _run_oracle(artifact.code, prefix=prefix)
+
+    assert output.verdict == Verdict.PASS
+    assert all(d.error_code != "@typescript-eslint/no-explicit-any" for d in output.diagnostics)
 
 
 def test_oracle_fail_on_missing_annotations() -> None:

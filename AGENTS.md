@@ -3,12 +3,13 @@
 ## Project: Decoding Time Verification (DTV) for Code Translation
 
 1. no trailing spaces, no lines with only spaces
-2. keep this file up to date (last updated: 2026-03-19)
+2. keep this file up to date (last updated: 2026-03-20)
 3. Except for explicit reasons, do not use non-ASCII characters in the codebase or documentation.
 4. Although redundant comments are generally discouraged, necessary comments should be written at complex logic to explain the logic.
 5. Except for explicit reasons, always add imports at the beginning of the file. For explicit reasons, like slow imports, add a comment explaining why the import is not at the top.
 6. In tests, the only allowed mock is LLM output. All other behaviors must be exercised with real tools (for example, real `rustc`, `gcc`, `tsc`, filesystem, and subprocess execution).
 7. In tests, prefer multi-line strings and assert the whole string directly whenever practical.
+8. Do not add future-proofing, speculative generalization, or branches for unrequested future scenarios. Implement only the current validated scope unless the user explicitly asks for broader behavior.
 
 ### Goal
 Implement Decoding Time Verification (DTV): integrate deterministic program verifiers into the decoding loop
