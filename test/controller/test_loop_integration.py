@@ -495,7 +495,7 @@ def test_rollback_restores_inside_parser_state_for_all_scopes(scope: RollbackSco
     assert restored.extract.saw_fence
 
 
-def test_program_rollback_then_generate_raises_with_feedback_payload() -> None:
+def test_program_rollback_then_generate_abandons_feedback_payload() -> None:
     generator = _TrackingGenerator(
         [
             GenerateResult(
@@ -529,19 +529,26 @@ def test_program_rollback_then_generate_raises_with_feedback_payload() -> None:
     rollback_manager = RollbackManager()
     policy = _ProgramRollbackThenGeneratePolicy()
 
-    with pytest.raises(RuntimeError, match="Action.GENERATE cannot include feedback payload"):
-        run_dtv_loop(
-            generator=generator,
-            renderer=renderer,
-            oracles=oracles,
-            budget=budget,
-            feedback_state=feedback_state,
-            rollback_manager=rollback_manager,
-            policy=policy,
-            feedback_lang_config=RUST_FEEDBACK_LANG,
-            max_steps=6,
-        )
+    output, trace = run_dtv_loop(
+        generator=generator,
+        renderer=renderer,
+        oracles=oracles,
+        budget=budget,
+        feedback_state=feedback_state,
+        rollback_manager=rollback_manager,
+        policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
+        max_steps=6,
+    )
 
+    assert output == "good\n"
+    assert [event.action for event in trace] == [
+        Action.GENERATE,
+        Action.VERIFY,
+        Action.ROLLBACK,
+        Action.GENERATE,
+        Action.TERMINATE,
+    ]
     assert rollback_manager.fence_anchor is not None
     assert rollback_manager.fence_anchor.assistant_prefix.pre_fence == "Here is the Rust translation:\n"
     assert generator.reset_calls == 0

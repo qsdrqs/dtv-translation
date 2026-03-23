@@ -495,7 +495,11 @@ def test_default_policy_feedback_escalates_to_mechanism_b_after_no_progress() ->
         max_steps=16,
     )
 
-    assert generator.feedback_mechanisms[:2] == [FeedbackMechanism.A, FeedbackMechanism.B]
+    assert generator.feedback_mechanisms[:3] == [
+        FeedbackMechanism.A,
+        FeedbackMechanism.A,
+        FeedbackMechanism.B,
+    ]
 
 
 def test_default_policy_feedback_stays_on_b_per_key_by_default() -> None:

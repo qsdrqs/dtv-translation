@@ -9,6 +9,14 @@ _FUNC_TYPES = frozenset({
     "generator_function_declaration",
 })
 
+# Only true top-level function declarations split top-level code into blocks.
+# Arrow functions assigned to variables (lexical_declaration > arrow_function)
+# and method definitions (inside classes) do not split.
+_TOPLEVEL_FUNC_SEPARATOR_TYPES = frozenset({
+    "function_declaration",
+    "generator_function_declaration",
+})
+
 
 def ts_group_stack(
     tree,
@@ -51,6 +59,13 @@ def ts_group_stack(
         cur = cur.parent
 
     frames.reverse()
+
+    has_func = any(f.kind == Granularity.FUNC for f in frames)
+    if not has_func:
+        toplevel_frame = _toplevel_block_frame(root, prefix_end_byte)
+        if toplevel_frame is not None:
+            frames.insert(0, toplevel_frame)
+
     return tuple(frames)
 
 
@@ -64,6 +79,19 @@ def _function_name(node, source_bytes: bytes) -> str | None:
     if name_node is None:
         return None
     return source_bytes[name_node.start_byte:name_node.end_byte].decode("utf-8")
+
+
+def _toplevel_block_frame(root, prefix_end_byte: int) -> GroupStackFrame | None:
+    if root.type != "program":
+        return None
+    block_start = 0
+    for child in root.children:
+        if child.type in _TOPLEVEL_FUNC_SEPARATOR_TYPES and child.end_byte <= prefix_end_byte:
+            block_start = child.end_byte
+    return GroupStackFrame(
+        kind=Granularity.BLOCK,
+        group_id=f"toplevel_block@{block_start}",
+    )
 
 
 def _is_function_body_block(node) -> bool:

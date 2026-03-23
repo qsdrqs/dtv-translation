@@ -69,6 +69,14 @@ class PolicyContext:
     fence_state: FenceState
 
 
+@dataclass(frozen=True)
+class RepairRegion:
+    scope: RollbackScope
+    base_prefix: str
+    base_assistant_prefix: AssistantContent
+    base_extractor_state: OutputExtractorState | None
+
+
 @dataclass
 class ControllerRuntime:
     state: ControllerState
@@ -86,12 +94,33 @@ class ControllerRuntime:
     failed_assistant_prefix: AssistantContent | None = None
     failed_extractor_state: OutputExtractorState | None = None
     pending_patch: str | None = None
-    repair_base_prefix: str | None = None
-    repair_base_assistant_prefix: AssistantContent | None = None
-    repair_base_extractor_state: OutputExtractorState | None = None
-    repair_scope: RollbackScope | None = None
+    repair_regions: list[RepairRegion] = field(default_factory=list)
     feedback_parser_error: str | None = None
     last_feedback_mechanism: FeedbackMechanism | None = None
+
+    @property
+    def current_region(self) -> RepairRegion | None:
+        return self.repair_regions[-1] if self.repair_regions else None
+
+    @property
+    def repair_scope(self) -> RollbackScope | None:
+        region = self.current_region
+        return region.scope if region else None
+
+    @property
+    def repair_base_prefix(self) -> str | None:
+        region = self.current_region
+        return region.base_prefix if region else None
+
+    @property
+    def repair_base_assistant_prefix(self) -> AssistantContent | None:
+        region = self.current_region
+        return region.base_assistant_prefix if region else None
+
+    @property
+    def repair_base_extractor_state(self) -> OutputExtractorState | None:
+        region = self.current_region
+        return region.base_extractor_state if region else None
 
 
 class Policy(Protocol):
@@ -237,16 +266,26 @@ def _failed_snippet(base_prefix: str, failed_prefix: str) -> str:
     return failed_prefix
 
 
-def _clear_repair_context(runtime: ControllerRuntime) -> None:
+def _snippet_for_scope(runtime: ControllerRuntime, scope: RollbackScope) -> str:
+    for region in reversed(runtime.repair_regions):
+        if region.scope == scope:
+            return runtime.state.prefix[len(region.base_prefix) :]
+    return "(empty)"
+
+
+def _clear_transient_repair(runtime: ControllerRuntime) -> None:
+    """Clear per-attempt failure state. Does NOT touch the region stack."""
     runtime.failed_prefix = None
     runtime.failed_assistant_prefix = None
     runtime.failed_extractor_state = None
     runtime.pending_patch = None
-    runtime.repair_base_prefix = None
-    runtime.repair_base_assistant_prefix = None
-    runtime.repair_base_extractor_state = None
-    runtime.repair_scope = None
     runtime.feedback_parser_error = None
+
+
+def _pop_repair_regions(runtime: ControllerRuntime, committed_scope: Granularity) -> None:
+    """Pop all regions whose scope <= committed_scope."""
+    while runtime.repair_regions and runtime.repair_regions[-1].scope <= committed_scope:
+        runtime.repair_regions.pop()
 
 
 def _fence_start_only(content: AssistantContent | None) -> AssistantContent:
@@ -357,21 +396,21 @@ def _append_trace(
 def _render_generate_feedback_assistant(
     assistant_prefix: AssistantContent,
     feedback_state: FeedbackState,
+    runtime: ControllerRuntime,
 ) -> str:
     scoped_feedback = feedback_state.scoped_active_snapshot()
     if not scoped_feedback:
         return assistant_prefix.render()
 
-    format_config = RepairFeedbackFormatConfig(include_failed_snippet=False)
     blocks: list[tuple[int | None, str]] = []
     for scope, anchor, outputs in scoped_feedback:
+        snippet = _snippet_for_scope(runtime, scope)
         feedback_text = render_repair_feedback(
             RepairContext(
-                failed_snippet="(empty)",
+                failed_snippet=snippet,
                 repair_scope=scope,
                 outputs=outputs,
             ),
-            format_config=format_config,
         )
         blocks.append((anchor, feedback_text))
 
@@ -407,15 +446,14 @@ def _handle_generate(
     context.extract_fence = True
     context.channel = GenerationChannel.CONTINUATION
     active_outputs = feedback_state.active_snapshot()
-    repair_payload_active = (
-        runtime.failed_prefix is not None and runtime.repair_base_prefix is not None
-    )
     if (
         feedback_enabled
         and active_outputs
-        and repair_payload_active
+        and runtime.failed_prefix is not None
+        and runtime.current_region is not None
     ):
-        raise RuntimeError("Action.GENERATE cannot include feedback payload; use Action.FEEDBACK")
+        runtime.repair_regions.pop()
+        _clear_transient_repair(runtime)
     if runtime.extractor_state is None:
         runtime.extractor_state = generator.capture_output_extractor_state()
     _assert_extractor_consistency(runtime)
@@ -425,12 +463,12 @@ def _handle_generate(
     if (
         feedback_enabled
         and active_outputs
-        and not repair_payload_active
+        and not (runtime.failed_prefix is not None and runtime.current_region is not None)
         and runtime.last_feedback_mechanism == FeedbackMechanism.A
     ):
         update_last_assistant(
             messages,
-            _render_generate_feedback_assistant(runtime.assistant_prefix, feedback_state),
+            _render_generate_feedback_assistant(runtime.assistant_prefix, feedback_state, runtime),
         )
     context.messages = messages
     result = generator.generate_step(context)
@@ -576,9 +614,10 @@ def _handle_verify(
                 runtime.failed_assistant_prefix = runtime.assistant_prefix
                 runtime.failed_extractor_state = runtime.extractor_state
             elif all(out.verdict == Verdict.PASS for out in outputs):
-                _clear_repair_context(runtime)
+                _clear_transient_repair(runtime)
     else:
-        _clear_repair_context(runtime)
+        _clear_transient_repair(runtime)
+        runtime.repair_regions.clear()
     runtime.last_action = Action.VERIFY
 
     _append_trace(
@@ -615,7 +654,9 @@ def _handle_commit(
     )
     if feedback_enabled:
         feedback_state.on_commit(runtime.last_verification_granularity)
-    _clear_repair_context(runtime)
+    if runtime.last_verification_granularity is not None:
+        _pop_repair_regions(runtime, runtime.last_verification_granularity)
+    _clear_transient_repair(runtime)
     runtime.last_action = Action.COMMIT
     logger.info(
         "commit: step=%s verification_granularity=%s prefix_len=%s",
@@ -666,14 +707,21 @@ def _handle_rollback(
     if feedback_enabled:
         feedback_state.on_rollback(op.rollback_scope)
         feedback_state.bind_failures_to_scope(list(runtime.last_outputs), op.rollback_scope)
+        while runtime.repair_regions and runtime.repair_regions[-1].scope <= op.rollback_scope:
+            runtime.repair_regions.pop()
+        runtime.repair_regions.append(
+            RepairRegion(
+                scope=op.rollback_scope,
+                base_prefix=runtime.state.prefix,
+                base_assistant_prefix=runtime.assistant_prefix,
+                base_extractor_state=runtime.extractor_state,
+            )
+        )
         runtime.pending_patch = None
-        runtime.repair_base_prefix = runtime.state.prefix
-        runtime.repair_base_assistant_prefix = runtime.assistant_prefix
-        runtime.repair_base_extractor_state = runtime.extractor_state
-        runtime.repair_scope = op.rollback_scope
         feedback_state.set_scope_anchor(op.rollback_scope, len(runtime.state.prefix))
     else:
-        _clear_repair_context(runtime)
+        runtime.repair_regions.clear()
+        _clear_transient_repair(runtime)
     runtime.last_render_status = None
     runtime.last_artifact = None
     runtime.last_outputs = ()
@@ -719,7 +767,8 @@ def _handle_feedback(
     ):
         raise RuntimeError("FEEDBACK requires failed_prefix and repair base prefix.")
     mechanism = op.feedback_mechanism or FeedbackMechanism.A
-    bad_snippet = _failed_snippet(runtime.repair_base_prefix, runtime.failed_prefix)
+    outermost_base = runtime.repair_regions[0].base_prefix
+    bad_snippet = _failed_snippet(outermost_base, runtime.failed_prefix)
     scope_filter = runtime.repair_scope if mechanism == FeedbackMechanism.B else None
     repair_context = RepairContext.from_feedback_state(
         feedback_state,
@@ -817,7 +866,7 @@ def _handle_apply_patch(
     runtime.state.prefix = f"{runtime.repair_base_prefix}{runtime.pending_patch}"
     runtime.assistant_prefix = runtime.repair_base_assistant_prefix.with_code(runtime.state.prefix)
     runtime.extractor_state = runtime.repair_base_extractor_state
-    _clear_repair_context(runtime)
+    _clear_transient_repair(runtime)
     runtime.last_render_status = None
     runtime.last_artifact = None
     runtime.last_outputs = ()
@@ -867,6 +916,8 @@ def _handle_terminate(
 ) -> None:
     if feedback_enabled:
         feedback_state.on_terminate()
+    runtime.repair_regions.clear()
+    _clear_transient_repair(runtime)
     runtime.last_action = Action.TERMINATE
     logger.info("terminate: step=%s", runtime.state.step)
     _append_trace(
@@ -898,7 +949,7 @@ def run_dtv_loop(
     """
     State machine (MVP):
     - State vars: prefix, last_stop_reason, last_render_status, last_artifact, last_outputs,
-      failed_prefix, repair_base_prefix, pending_patch.
+      failed_prefix, repair_regions, pending_patch.
     - Actions: GENERATE, VERIFY(granularity), COMMIT, ROLLBACK(scope), FEEDBACK, APPLY_PATCH,
       CONTINUE, TERMINATE.
     - VERIFY performs render + oracle runs; render CONTINUE/FAIL yields no oracle outputs.

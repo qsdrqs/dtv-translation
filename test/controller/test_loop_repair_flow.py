@@ -844,7 +844,7 @@ def test_llm_token_accounting_counts_generate_and_feedback_only() -> None:
     assert apply_patch_event.budget_snapshot["gen_tokens_used"] == 8
 
 
-def test_continue_then_generate_raises_when_feedback_payload_exists() -> None:
+def test_continue_then_generate_abandons_feedback_payload() -> None:
     generator = _SequenceGenerator(["bad stmt\n", "fix\n"])
     renderer = _OkRenderer()
     oracles = [_OracleFail()]
@@ -853,18 +853,26 @@ def test_continue_then_generate_raises_when_feedback_payload_exists() -> None:
     rollback_manager = RollbackManager()
     policy = _ContinueGeneratePolicy()
 
-    with pytest.raises(RuntimeError, match="Action.GENERATE cannot include feedback payload"):
-        run_dtv_loop(
-            generator=generator,
-            renderer=renderer,
-            oracles=oracles,
-            budget=budget,
-            feedback_state=feedback_state,
-            rollback_manager=rollback_manager,
-            policy=policy,
-            feedback_lang_config=RUST_FEEDBACK_LANG,
-            max_steps=7,
-        )
+    output, trace = run_dtv_loop(
+        generator=generator,
+        renderer=renderer,
+        oracles=oracles,
+        budget=budget,
+        feedback_state=feedback_state,
+        rollback_manager=rollback_manager,
+        policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
+        max_steps=5,
+    )
+
+    assert output == "fix\n"
+    assert [event.action for event in trace] == [
+        Action.GENERATE,
+        Action.VERIFY,
+        Action.ROLLBACK,
+        Action.CONTINUE,
+        Action.GENERATE,
+    ]
 
 
 def test_failed_context_survives_no_oracle_verify() -> None:
@@ -1279,6 +1287,204 @@ def test_generate_skips_inline_feedback_after_feedback_b() -> None:
     generate_prompt = generator.seen_assistant_messages[2]
     assert "The previous generated next code snippet was:" in feedback_user_prompt
     assert "/* repair feedback:" not in generate_prompt
+
+
+class _BlockRollbackThenCommitThenRefeedbackPolicy:
+    def __init__(self) -> None:
+        self.stage = 0
+
+    def next_action(self, ctx) -> ControllerOp:
+        _ = ctx
+        actions = [
+            ControllerOp(Action.GENERATE),                                      # 0: generate "bad"
+            ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT),  # 1: verify -> fail
+            ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.BLOCK),  # 2: block rollback
+            ControllerOp(Action.FEEDBACK, feedback_mechanism=FeedbackMechanism.A),  # 3: feedback A
+            ControllerOp(Action.APPLY_PATCH),                                   # 4: apply patch
+            ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT),  # 5: verify -> pass
+            ControllerOp(Action.COMMIT),                                        # 6: commit (STMT)
+            ControllerOp(Action.GENERATE),                                      # 7: generate "bad again"
+            ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT),  # 8: verify -> fail
+            ControllerOp(Action.FEEDBACK, feedback_mechanism=FeedbackMechanism.A),  # 9: feedback A again
+            ControllerOp(Action.TERMINATE),
+        ]
+        if self.stage >= len(actions):
+            return ControllerOp(Action.TERMINATE)
+        op = actions[self.stage]
+        self.stage += 1
+        return op
+
+    def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
+        if selection_granularity is None:
+            raise ValueError("selection_granularity is required")
+        return select_oracles_by_granularity(
+            artifact,
+            budget,
+            available,
+            selection_granularity=selection_granularity,
+        )
+
+
+def test_block_rollback_repair_context_survives_stmt_commit() -> None:
+    generator = _TrackingSequenceGenerator(
+        [
+            "bad stmt\n",
+            "patched stmt\n",
+            "still bad stmt\n",
+            "final fix\n",
+        ]
+    )
+    renderer = _OkRenderer()
+    oracle = _ScopeSequencedOracle(
+        name="oracle",
+        required_granularity=Granularity.STMT,
+        rollback_scope=RollbackScope.STMT,
+        verdicts=[Verdict.FAIL, Verdict.PASS, Verdict.FAIL],
+        message="const assignment error",
+    )
+    budget = Budget(gen_tokens_budget=24)
+    feedback_state = FeedbackState()
+    rollback_manager = RollbackManager()
+    policy = _BlockRollbackThenCommitThenRefeedbackPolicy()
+
+    _, trace = run_dtv_loop(
+        generator=generator,
+        renderer=renderer,
+        oracles=[oracle],
+        budget=budget,
+        feedback_state=feedback_state,
+        rollback_manager=rollback_manager,
+        policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
+        max_steps=14,
+    )
+
+    # The second FEEDBACK (step 9) must succeed, proving repair context
+    # survived the STMT commit after BLOCK rollback.
+    feedback_events = [e for e in trace if e.action == Action.FEEDBACK]
+    assert len(feedback_events) == 2, (
+        f"Expected 2 FEEDBACK events (before and after STMT commit), "
+        f"got {len(feedback_events)}"
+    )
+
+    # Step 7 GENERATE must see inline feedback with a real snippet
+    # (the code generated since the BLOCK region base), not "(empty)".
+    generate_after_commit = generator.seen_assistant_messages[2]
+    assert "failed snippet:" in generate_after_commit
+    assert "patched stmt" in generate_after_commit
+
+
+class _DualHintPolicy:
+    def __init__(self) -> None:
+        self.stage = 0
+
+    def next_action(self, ctx) -> ControllerOp:
+        _ = ctx
+        actions = [
+            ControllerOp(Action.GENERATE),                                      # 0: gen "bad1"
+            ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT),  # 1: fail (hint1)
+            ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.BLOCK),  # 2: block rollback
+            ControllerOp(Action.FEEDBACK, feedback_mechanism=FeedbackMechanism.A),  # 3: feedback hint1
+            ControllerOp(Action.APPLY_PATCH),                                   # 4: apply
+            ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT),  # 5: pass
+            ControllerOp(Action.COMMIT),                                        # 6: commit STMT
+            ControllerOp(Action.GENERATE),                                      # 7: gen "bad2"
+            ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT),  # 8: fail (hint2)
+            ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.STMT),   # 9: stmt rollback
+            ControllerOp(Action.FEEDBACK, feedback_mechanism=FeedbackMechanism.A),  # 10: feedback hint2
+            ControllerOp(Action.APPLY_PATCH),                                   # 11: apply
+            ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT),  # 12: pass
+            ControllerOp(Action.COMMIT),                                        # 13: commit STMT
+            ControllerOp(Action.TERMINATE),
+        ]
+        if self.stage >= len(actions):
+            return ControllerOp(Action.TERMINATE)
+        op = actions[self.stage]
+        self.stage += 1
+        return op
+
+    def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
+        if selection_granularity is None:
+            raise ValueError("selection_granularity is required")
+        return select_oracles_by_granularity(
+            artifact,
+            budget,
+            available,
+            selection_granularity=selection_granularity,
+        )
+
+
+def test_dual_hint_block_survives_stmt_repair_cycle() -> None:
+    generator = _TrackingSequenceGenerator(
+        [
+            "bad1\n",       # step 0: initial gen
+            "fix1\n",       # step 3: feedback patch for hint1
+            "bad2\n",       # step 7: gen new stmt
+            "fix2\n",       # step 10: feedback patch for hint2
+        ]
+    )
+    renderer = _OkRenderer()
+    block_oracle = _ScopeSequencedOracle(
+        name="block_oracle",
+        required_granularity=Granularity.STMT,
+        rollback_scope=RollbackScope.BLOCK,
+        verdicts=[Verdict.FAIL, Verdict.PASS, Verdict.FAIL, Verdict.PASS],
+        message="block-level error",
+    )
+    stmt_oracle = _ScopeSequencedOracle(
+        name="stmt_oracle",
+        required_granularity=Granularity.STMT,
+        rollback_scope=RollbackScope.STMT,
+        verdicts=[Verdict.PASS, Verdict.PASS, Verdict.FAIL, Verdict.PASS],
+        message="stmt-level error",
+    )
+    budget = Budget(gen_tokens_budget=32)
+    feedback_state = FeedbackState()
+    rollback_manager = RollbackManager()
+    policy = _DualHintPolicy()
+
+    _, trace = run_dtv_loop(
+        generator=generator,
+        renderer=renderer,
+        oracles=[block_oracle, stmt_oracle],
+        budget=budget,
+        feedback_state=feedback_state,
+        rollback_manager=rollback_manager,
+        policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
+        max_steps=20,
+    )
+
+    feedback_events = [e for e in trace if e.action == Action.FEEDBACK]
+    assert len(feedback_events) == 2
+
+    commit_events = [e for e in trace if e.action == Action.COMMIT]
+    assert len(commit_events) == 2
+
+    # Both FEEDBACK events must have produced non-empty patches,
+    # proving the repair context was available for both the BLOCK
+    # repair (step 3) and the nested STMT repair (step 10).
+    for fe in feedback_events:
+        assert fe.notes == "" or "rejected" not in fe.notes
+
+    # The second COMMIT (step 13) must not carry block_oracle FAIL
+    # in its oracle outputs (block_oracle passed at step 12).
+    # But the BLOCK repair region must have survived both STMT commits,
+    # which is proven by the second FEEDBACK succeeding at step 10 -
+    # it could only work if repair_base_prefix from the BLOCK region
+    # was still alive after the first STMT commit at step 6.
+    last_commit = commit_events[-1]
+    assert last_commit.oracle_outputs is not None
+    assert all(o.verdict == Verdict.PASS for o in last_commit.oracle_outputs)
+
+    # Step 10 FEEDBACK(A) snippet must include "fix1" (committed earlier
+    # inside the BLOCK region), not just "bad2" (the latest STMT failure).
+    # seen_assistant_messages[3] is the 4th generate_step call (step 10 FEEDBACK).
+    feedback_hint2_prompt = generator.seen_assistant_messages[3]
+    snippet_start = feedback_hint2_prompt.index("failed snippet:")
+    snippet_section = feedback_hint2_prompt[snippet_start:]
+    assert "fix1" in snippet_section
+    assert "bad2" in snippet_section
 
 
 def test_stmt_failure_lifted_to_func_persists_feedback_through_stmt_commit() -> None:
