@@ -9,6 +9,7 @@ from core.types import (
     Artifact,
     ControllerState,
     Diagnostic,
+    DiagnosticSpan,
     Granularity,
     OracleContext,
     OracleOutput,
@@ -98,9 +99,9 @@ def test_parser_converts_to_diagnostics() -> None:
     ])
     assert diagnostics == (
         Diagnostic(
-            message="[@typescript-eslint/typedef] Expected x to have a type annotation.",
+            message="Expected x to have a type annotation.",
             severity="error",
-            span=(1, 14),
+            spans=(DiagnosticSpan(line=1, col=14, is_primary=True),),
             error_code="@typescript-eslint/typedef",
         ),
     )
@@ -129,7 +130,8 @@ def test_parser_extracts_line_col_as_span() -> None:
             "column": 7,
         }
     ])
-    assert diagnostics[0].span == (3, 7)
+    primary = next(s for s in diagnostics[0].spans if s.is_primary)
+    assert (primary.line, primary.col) == (3, 7)
     assert diagnostics[0].severity == "warning"
 
 
@@ -181,9 +183,9 @@ def test_filter_post_prefix_diagnostics_keeps_prefix_error_and_drops_renderer_no
     filtered = filter_post_prefix_diagnostics(diagnostics, MODEL_PREFIX_BEFORE_RENDERER_CLOSING)
     assert filtered == (
         Diagnostic(
-            message="[@typescript-eslint/typedef] Expected n to have a type annotation.",
+            message="Expected n to have a type annotation.",
             severity="error",
-            span=(4, 9),
+            spans=(DiagnosticSpan(line=4, col=9, is_primary=True),),
             error_code="@typescript-eslint/typedef",
         ),
     )

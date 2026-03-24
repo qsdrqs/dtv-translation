@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from core.types import Diagnostic
+from core.types import Diagnostic, DiagnosticSpan
 
 
 def parse_eslint_messages(messages: list[dict]) -> tuple[Diagnostic, ...]:
@@ -10,9 +10,13 @@ def parse_eslint_messages(messages: list[dict]) -> tuple[Diagnostic, ...]:
         severity = "error" if message["severity"] == 2 else "warning"
         diagnostics.append(
             Diagnostic(
-                message=f"[{rule_id}] {message['message']}",
+                message=message["message"],
                 severity=severity,
-                span=(message["line"], message["column"]),
+                spans=(DiagnosticSpan(
+                    line=message["line"],
+                    col=message["column"],
+                    is_primary=True,
+                ),),
                 error_code=rule_id,
             )
         )
@@ -30,8 +34,22 @@ def filter_post_prefix_diagnostics(
     prefix_end = _prefix_end_span(prefix)
     return tuple(
         diag for diag in diagnostics
-        if diag.span is None or _span_starts_before(diag.span, prefix_end)
+        if not _has_primary_span(diag) or _primary_starts_before(diag, prefix_end)
     )
+
+
+def _has_primary_span(diag: Diagnostic) -> bool:
+    return any(s.is_primary for s in diag.spans)
+
+
+def _primary_starts_before(diag: Diagnostic, limit: tuple[int, int]) -> bool:
+    primary = next((s for s in diag.spans if s.is_primary), None)
+    if primary is None:
+        return True
+    limit_line, limit_column = limit
+    if primary.line != limit_line:
+        return primary.line < limit_line
+    return primary.col < limit_column
 
 
 def _prefix_end_span(prefix: str) -> tuple[int, int]:
@@ -44,11 +62,3 @@ def _prefix_end_span(prefix: str) -> tuple[int, int]:
             continue
         column += 1
     return (line, column)
-
-
-def _span_starts_before(span: tuple[int, int], limit: tuple[int, int]) -> bool:
-    line, column = span
-    limit_line, limit_column = limit
-    if line != limit_line:
-        return line < limit_line
-    return column < limit_column

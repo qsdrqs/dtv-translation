@@ -32,6 +32,7 @@ from core.types import (
     TraceEvent,
     Verdict,
 )
+from feedback.annotation import annotate_snippet
 from feedback.formatter import RepairFeedbackFormatConfig, render_repair_feedback
 from feedback.feedback import FeedbackState
 from feedback.language import FeedbackLanguageConfig
@@ -260,6 +261,10 @@ def _truncate(s: str, max_chars: int) -> str:
     return s[:max_chars] + f"...<truncated {len(s) - max_chars} chars>"
 
 
+def _snippet_start_line(base_prefix: str) -> int:
+    return base_prefix.count("\n") + 1
+
+
 def _failed_snippet(base_prefix: str, failed_prefix: str) -> str:
     if failed_prefix.startswith(base_prefix):
         return failed_prefix[len(base_prefix) :]
@@ -397,6 +402,7 @@ def _render_generate_feedback_assistant(
     assistant_prefix: AssistantContent,
     feedback_state: FeedbackState,
     runtime: ControllerRuntime,
+    comment_prefix: str = "//",
 ) -> str:
     scoped_feedback = feedback_state.scoped_active_snapshot()
     if not scoped_feedback:
@@ -405,6 +411,10 @@ def _render_generate_feedback_assistant(
     blocks: list[tuple[int | None, str]] = []
     for scope, anchor, outputs in scoped_feedback:
         snippet = _snippet_for_scope(runtime, scope)
+        all_diags = tuple(d for o in outputs for d in o.diagnostics)
+        region = next((r for r in reversed(runtime.repair_regions) if r.scope == scope), None)
+        start_line = _snippet_start_line(region.base_prefix) if region else 1
+        snippet = annotate_snippet(snippet, start_line, all_diags, comment_prefix)
         feedback_text = render_repair_feedback(
             RepairContext(
                 failed_snippet=snippet,
@@ -442,6 +452,7 @@ def _handle_generate(
     feedback_enabled: bool,
     rollback_manager: RollbackManager,
     trace: list[TraceEvent],
+    comment_prefix: str = "//",
 ) -> None:
     context.extract_fence = True
     context.channel = GenerationChannel.CONTINUATION
@@ -468,7 +479,9 @@ def _handle_generate(
     ):
         update_last_assistant(
             messages,
-            _render_generate_feedback_assistant(runtime.assistant_prefix, feedback_state, runtime),
+            _render_generate_feedback_assistant(
+                runtime.assistant_prefix, feedback_state, runtime, comment_prefix,
+            ),
         )
     context.messages = messages
     result = generator.generate_step(context)
@@ -768,6 +781,7 @@ def _handle_feedback(
         raise RuntimeError("FEEDBACK requires failed_prefix and repair base prefix.")
     mechanism = op.feedback_mechanism or FeedbackMechanism.A
     outermost_base = runtime.repair_regions[0].base_prefix
+    # Feedback B lists diagnostics explicitly; annotation would be redundant.
     bad_snippet = _failed_snippet(outermost_base, runtime.failed_prefix)
     scope_filter = runtime.repair_scope if mechanism == FeedbackMechanism.B else None
     repair_context = RepairContext.from_feedback_state(
@@ -1018,6 +1032,7 @@ def run_dtv_loop(
                 feedback_enabled,
                 rollback_manager,
                 trace,
+                comment_prefix=feedback_lang_config.comment_prefix,
             )
             runtime.state.step += 1
             continue

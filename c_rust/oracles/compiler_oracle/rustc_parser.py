@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from core.types import Diagnostic
+from core.types import Diagnostic, DiagnosticSpan
 from c_rust.oracles.compiler_oracle.rustc_driver import RustcResult
 
 
@@ -54,14 +54,19 @@ def _parse_json_line(line: str) -> tuple[Diagnostic | None, bool]:
 
     severity = payload.get("level", "error")
     error_code = _extract_error_code(payload)
-    span = _extract_span(payload)
-    hints = _extract_hints(payload)
+    primary_span = _extract_primary_span(payload)
+    hints, related_spans = _extract_children_info(payload)
+    spans: tuple[DiagnosticSpan, ...] = ()
+    if primary_span is not None:
+        spans = (primary_span,) + related_spans
+    elif related_spans:
+        spans = related_spans
 
     return (
         Diagnostic(
             message=message,
             severity=severity,
-            span=span,
+            spans=spans,
             error_code=error_code,
             hints=hints,
         ),
@@ -78,7 +83,7 @@ def _extract_error_code(payload: dict[str, Any]) -> str | None:
     return None
 
 
-def _extract_span(payload: dict[str, Any]) -> tuple[int, int] | None:
+def _extract_primary_span(payload: dict[str, Any]) -> DiagnosticSpan | None:
     spans = payload.get("spans")
     if not isinstance(spans, list) or not spans:
         return None
@@ -91,31 +96,54 @@ def _extract_span(payload: dict[str, Any]) -> tuple[int, int] | None:
         primary = spans[0]
     if not isinstance(primary, dict):
         return None
-    byte_start = primary.get("byte_start")
-    byte_end = primary.get("byte_end")
-    if isinstance(byte_start, int) and isinstance(byte_end, int):
-        return (byte_start, byte_end)
+    line_start = primary.get("line_start")
+    column_start = primary.get("column_start")
+    if isinstance(line_start, int):
+        return DiagnosticSpan(
+            line=line_start,
+            col=column_start if isinstance(column_start, int) else 0,
+            is_primary=True,
+        )
     return None
 
 
-def _extract_hints(payload: dict[str, Any]) -> tuple[str, ...]:
+def _extract_children_info(
+    payload: dict[str, Any],
+) -> tuple[tuple[str, ...], tuple[DiagnosticSpan, ...]]:
     hints: list[str] = []
+    related: list[DiagnosticSpan] = []
     children = payload.get("children")
-    _collect_help_messages(children, hints)
-    return tuple(hints)
+    _collect_children(children, hints, related)
+    return tuple(hints), tuple(related)
 
 
-def _collect_help_messages(children: Any, hints: list[str]) -> None:
+def _collect_children(
+    children: Any,
+    hints: list[str],
+    related: list[DiagnosticSpan],
+) -> None:
     if not isinstance(children, list):
         return
     for child in children:
         if not isinstance(child, dict):
             continue
         level = child.get("level")
-        message = child.get("message")
-        if level == "help" and isinstance(message, str):
-            text = message.strip()
-            if text:
-                hints.append(text)
+        message = child.get("message", "")
+        msg_text = message.strip() if isinstance(message, str) else ""
+        if level == "help" and msg_text:
+            hints.append(msg_text)
+        child_spans = child.get("spans")
+        if isinstance(child_spans, list):
+            for cs in child_spans:
+                if not isinstance(cs, dict):
+                    continue
+                line_start = cs.get("line_start")
+                column_start = cs.get("column_start")
+                if isinstance(line_start, int):
+                    related.append(DiagnosticSpan(
+                        line=line_start,
+                        col=column_start if isinstance(column_start, int) else 0,
+                        message=msg_text,
+                    ))
         nested_children = child.get("children")
-        _collect_help_messages(nested_children, hints)
+        _collect_children(nested_children, hints, related)

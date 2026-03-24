@@ -47,16 +47,20 @@ def _node_path() -> str:
     return node
 
 
+_TSC_CHECK_SCRIPT = str(
+    Path(__file__).resolve().parent.parent.parent
+    / "js_ts" / "oracles" / "compiler_oracle" / "tsc_check.js"
+)
+
+
 def check_typescript(code: str) -> TscCheckResult:
-    tsc = _tsc_path()
+    node = _node_path()
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
         src = tmp / "check.ts"
         src.write_text(code, encoding="utf-8")
         proc = subprocess.run(
-            [tsc, "--noEmit", "--pretty", "false", "--strict",
-             "--target", "ES2020", "--lib", "ES2020,DOM",
-             "--skipLibCheck", str(src)],
+            [node, _TSC_CHECK_SCRIPT, str(src)],
             capture_output=True,
             text=True,
             check=False,

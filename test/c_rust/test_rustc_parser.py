@@ -19,8 +19,6 @@ fn foo() -> i32 {
     "hi"
 }
 """
-    byte_start = code.index('"hi"')
-    byte_end = byte_start + len('"hi"')
     compile = compile_rust(code, error_format="json")
     result = RustcResult(
         stdout=compile.stdout,
@@ -44,9 +42,9 @@ fn foo() -> i32 {
     assert tuple(diag.severity for diag in diagnostics) == ("error", "error", "failure-note")
 
     diag = diagnostics[0]
-    assert diag.span is not None
-    assert diag.span[0] <= byte_start
-    assert diag.span[1] >= byte_end
+    primary = next((s for s in diag.spans if s.is_primary), None)
+    assert primary is not None
+    assert primary.line == 2  # "hi" is on line 2
 
 
 def test_rustc_parser_extracts_help_hints() -> None:

@@ -6,7 +6,7 @@ import pytest
 
 from c_rust.oracles.compiler_oracle.rustc_driver import RustcResult
 from c_rust.oracles.compiler_oracle.rustc_parser import has_errors, parse_rustc_diagnostics
-from core.types import Diagnostic, OracleOutput, RollbackScope, Verdict
+from core.types import Diagnostic, DiagnosticSpan, OracleOutput, RollbackScope, Verdict
 from feedback.formatter import RepairFeedbackFormatConfig, build_repair_feedback
 from feedback.feedback import FeedbackState
 from test.c_rust.utils import compile_rust
@@ -136,8 +136,9 @@ fn main() {
                 header.append(f"code={diag.error_code}")
             if diag.hint_scope is not None:
                 header.append(f"hint_scope={diag.hint_scope.value}")
-            if diag.span is not None:
-                header.append(f"span={diag.span[0]}:{diag.span[1]}")
+            primary = next((s for s in diag.spans if s.is_primary), None)
+            if primary is not None:
+                header.append(f"span={primary.line}:{primary.col}")
             hints = tuple(hint.strip() for hint in diag.hints if hint.strip())
             hints_block = ""
             if hints:
@@ -187,8 +188,9 @@ fn main() {
                 header.append(f"code={diag.error_code}")
             if diag.hint_scope is not None:
                 header.append(f"hint_scope={diag.hint_scope.value}")
-            if diag.span is not None:
-                header.append(f"span={diag.span[0]}:{diag.span[1]}")
+            primary = next((s for s in diag.spans if s.is_primary), None)
+            if primary is not None:
+                header.append(f"span={primary.line}:{primary.col}")
             hints = tuple(hint.strip() for hint in diag.hints if hint.strip())
             hints_block = ""
             if hints:
@@ -400,8 +402,9 @@ fn main() {
                 header.append(f"code={diag.error_code}")
             if diag.hint_scope is not None:
                 header.append(f"hint_scope={diag.hint_scope.value}")
-            if diag.span is not None:
-                header.append(f"span={diag.span[0]}:{diag.span[1]}")
+            primary = next((s for s in diag.spans if s.is_primary), None)
+            if primary is not None:
+                header.append(f"span={primary.line}:{primary.col}")
             hints = tuple(hint.strip() for hint in diag.hints if hint.strip())
             hints_block = ""
             if hints:
@@ -430,7 +433,7 @@ def test_build_repair_feedback_uses_existing_diagnostic_fields() -> None:
             Diagnostic(
                 message="test_2: Exit code mismatch (C=0, Rust=1)",
                 severity="error",
-                span=(10, 20),
+                spans=(DiagnosticSpan(line=10, col=20, is_primary=True),),
                 error_code="EXIT_CODE_MISMATCH",
                 hint_scope=RollbackScope.FUNC,
                 hints=("check return value handling",),

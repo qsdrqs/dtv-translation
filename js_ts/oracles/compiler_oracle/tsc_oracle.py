@@ -32,9 +32,9 @@ class TscOracle(Oracle):
     required_granularity = Granularity.STMT
     rollback_scope = RollbackScope.STMT
 
-    def __init__(self, timeout_s: float | None = 10.0, tsc_path: str = "tsc") -> None:
+    def __init__(self, timeout_s: float | None = 10.0, node_path: str = "node") -> None:
         self.timeout_s = timeout_s
-        self.driver = TscDriver(tsc_path=tsc_path)
+        self.driver = TscDriver(node_path=node_path)
 
     def run(self, state: ControllerState, artifact: Artifact, context: OracleContext) -> OracleOutput:
         sample = artifact.sample

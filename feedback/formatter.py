@@ -62,12 +62,13 @@ message: {diag.message}{hints_block}"""
 
 def _build_header(oracle_name: str, diag: Diagnostic) -> str:
     hint_scope = _format_scope(diag.hint_scope)
+    primary = next((s for s in diag.spans if s.is_primary), None)
     fields = [
         f"oracle={oracle_name}",
         f"severity={diag.severity}",
         *([f"code={diag.error_code}"] if diag.error_code else []),
         *([f"hint_scope={hint_scope}"] if hint_scope is not None else []),
-        *([f"span={diag.span[0]}:{diag.span[1]}"] if diag.span is not None else []),
+        *([f"span={primary.line}:{primary.col}"] if primary is not None else []),
     ]
     return " ".join(fields)
 

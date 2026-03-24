@@ -17,3 +17,4 @@ class FeedbackLanguageConfig:
     function_item_type: str
     example_function_wrapper: str
     closing_suffix_fn: Callable[[str], str] = field(default=_noop_closing_suffix)
+    comment_prefix: str = "//"

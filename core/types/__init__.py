@@ -24,7 +24,7 @@ from .enums import (
     Verdict,
 )
 from .generation import GenerateContext, GenerateMessage, GenerateResult, StopReason
-from .oracle import Diagnostic, OracleContext, OracleOutput
+from .oracle import Diagnostic, DiagnosticSpan, OracleContext, OracleOutput
 
 __all__ = [
     "Action",
@@ -32,6 +32,7 @@ __all__ = [
     "ComparisonResult",
     "ControllerState",
     "Diagnostic",
+    "DiagnosticSpan",
     "FeedbackMechanism",
     "FeedbackMode",
     "GenerationChannel",

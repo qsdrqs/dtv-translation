@@ -395,6 +395,7 @@ def run_naive_minimal(
     prompt: str,
     generator: GeneratorAdapter,
     token_budget: int,
+    accumulate_history: bool = False,
 ) -> NaiveLoopResult:
     budget = Budget(gen_tokens_budget=token_budget)
     messages: list[GenerateMessage] = [
@@ -438,8 +439,16 @@ def run_naive_minimal(
             break
 
         repair_prompt = _build_repair_prompt(compiler_output)
-        messages.append(GenerateMessage(role="user", content=repair_prompt, stop=True))
-        messages.append(GenerateMessage(role="assistant", content="", stop=False))
+        if accumulate_history:
+            messages.append(GenerateMessage(role="user", content=repair_prompt, stop=True))
+            messages.append(GenerateMessage(role="assistant", content="", stop=False))
+        else:
+            messages = [
+                GenerateMessage(role="user", content=prompt, stop=True),
+                GenerateMessage(role="assistant", content=raw_output, stop=True),
+                GenerateMessage(role="user", content=repair_prompt, stop=True),
+                GenerateMessage(role="assistant", content="", stop=False),
+            ]
 
     return NaiveLoopResult(
         final_prefix=final_prefix,

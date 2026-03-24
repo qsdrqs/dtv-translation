@@ -9,27 +9,27 @@ import time
 
 from core.types import OracleContext
 
+_TSC_CHECK_SCRIPT = Path(__file__).resolve().parent / "tsc_check.js"
+
 
 @dataclass(frozen=True)
 class TscResult:
-    """Captured result of invoking tsc."""
     stdout: str
     stderr: str
     exit_code: int
-    elapsed_ms: int  # Wall-clock compile time in milliseconds.
-    command: tuple[str, ...]  # Exact command line invoked.
-    source_path: Path  # TypeScript source file written to disk.
-    timed_out: bool = False  # True if the compiler timed out.
+    elapsed_ms: int
+    command: tuple[str, ...]
+    source_path: Path
+    timed_out: bool = False
 
 
 class TscDriver:
     def __init__(
         self,
-        tsc_path: str = "tsc",
+        node_path: str = "node",
         type_roots: tuple[str, ...] | None = None,
     ) -> None:
-        self.tsc_path = _resolve_tsc_path(tsc_path)
-        _check_tsc_version(self.tsc_path)
+        self.node_path = _resolve_node_path(node_path)
         if type_roots is not None:
             self.type_roots = type_roots
         else:
@@ -49,15 +49,10 @@ class TscDriver:
             type_roots_args = ("--typeRoots", ",".join(self.type_roots))
 
         cmd = (
-            self.tsc_path,
-            "--noEmit",
-            "--pretty", "false",
-            "--strict",
-            "--target", "ES2020",
-            "--lib", "ES2020,DOM",
-            "--skipLibCheck",
-            *type_roots_args,
+            self.node_path,
+            str(_TSC_CHECK_SCRIPT),
             str(source_path),
+            *type_roots_args,
         )
 
         start = time.monotonic()
@@ -70,11 +65,11 @@ class TscDriver:
                 timeout=ctx.timeout_s,
             )
         except FileNotFoundError as exc:
-            raise RuntimeError(f"tsc not found: {self.tsc_path}") from exc
+            raise RuntimeError(f"node not found: {self.node_path}") from exc
         except subprocess.TimeoutExpired as exc:
             elapsed_ms = int((time.monotonic() - start) * 1000)
             stdout_str: str = exc.stdout.decode("utf-8") if isinstance(exc.stdout, bytes) else (str(exc.stdout) if exc.stdout else "")
-            stderr_str: str = exc.stderr.decode("utf-8") if isinstance(exc.stderr, bytes) else (str(exc.stderr) if exc.stderr else "")
+            stderr_str: str = exc.stderr.decode("utf-8") if isinstance(exc.stderr, bytes) else (str(exc.stderr) if exc.stdout else "")
             return TscResult(
                 stdout=stdout_str,
                 stderr=stderr_str,
@@ -85,7 +80,7 @@ class TscDriver:
                 timed_out=True,
             )
         except OSError as exc:
-            raise RuntimeError(f"tsc invocation failed: {exc}") from exc
+            raise RuntimeError(f"tsc_check invocation failed: {exc}") from exc
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
         return TscResult(
@@ -99,28 +94,11 @@ class TscDriver:
         )
 
 
-def _resolve_tsc_path(tsc_path: str) -> str:
-    candidate = Path(tsc_path)
-    if candidate.is_absolute() or candidate.parent != Path("."):
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return str(candidate)
-        raise RuntimeError(f"tsc not found or not executable: {tsc_path}")
-    resolved = shutil.which(tsc_path)
+def _resolve_node_path(node_path: str) -> str:
+    resolved = shutil.which(node_path)
     if not resolved:
-        raise RuntimeError(f"tsc not found on PATH: {tsc_path}")
+        raise RuntimeError(f"node not found on PATH: {node_path}")
     return resolved
-
-
-def _check_tsc_version(tsc_path: str) -> None:
-    try:
-        subprocess.run(
-            (tsc_path, "--version"),
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except (OSError, subprocess.CalledProcessError) as exc:
-        raise RuntimeError(f"failed to execute tsc --version: {exc}") from exc
 
 
 def _find_type_roots() -> str | None:

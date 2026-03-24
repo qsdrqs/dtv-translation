@@ -71,7 +71,8 @@ def test_parse_span_is_line_col() -> None:
     result = _tsc_result_from_check('const x: number = "hello";')
     diagnostics = parse_tsc_diagnostics(result)
     assert len(diagnostics) == 1
-    assert diagnostics[0].span == (1, 7)
+    primary = next(s for s in diagnostics[0].spans if s.is_primary)
+    assert (primary.line, primary.col) == (1, 7)
 
 
 # filter_partial_noise

@@ -1,45 +1,41 @@
 from __future__ import annotations
 
-import re
+import json
+from typing import Any
 
-from core.types import Diagnostic
+from core.types import Diagnostic, DiagnosticSpan
 from js_ts.oracles.compiler_oracle.tsc_driver import TscResult
 
 
 _ERROR_LEVELS = {"error"}
 
-# tsc output: filepath(line,col): severity TScode: message
-_TSC_DIAG_RE = re.compile(
-    r"^.+\((\d+),(\d+)\):\s+(error|warning)\s+(TS\d+):\s+(.+)$"
-)
-
-# Error codes that are expected noise when compiling partial programs.
-# At sub-PROGRAM granularity the model has not finished generating all
-# definitions, so "cannot find name/module" is not a real error.
 _PARTIAL_COMPILATION_NOISE: frozenset[str] = frozenset({
-    "TS2304",  # Cannot find name
-    "TS2552",  # Cannot find name (did you mean?)
-    "TS2307",  # Cannot find module
+    "TS2304",
+    "TS2552",
+    "TS2307",
 })
 
 
 def parse_tsc_diagnostics(result: TscResult) -> tuple[Diagnostic, ...]:
+    try:
+        entries = json.loads(result.stdout)
+    except (json.JSONDecodeError, ValueError):
+        if result.exit_code != 0:
+            raw = (result.stdout + result.stderr).strip()
+            if raw:
+                return (Diagnostic(message=raw, severity="error"),)
+        return ()
+
+    if not isinstance(entries, list):
+        return ()
+
     diagnostics: list[Diagnostic] = []
-
-    for stream in (result.stdout, result.stderr):
-        for line in stream.splitlines():
-            stripped = line.strip()
-            if not stripped:
-                continue
-            diag = _parse_line(stripped)
-            if diag is not None:
-                diagnostics.append(diag)
-
-    if not diagnostics and result.exit_code != 0:
-        raw = (result.stdout + result.stderr).strip()
-        if raw:
-            diagnostics.append(Diagnostic(message=raw, severity="error"))
-
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        diag = _parse_entry(entry)
+        if diag is not None:
+            diagnostics.append(diag)
     return tuple(diagnostics)
 
 
@@ -65,18 +61,47 @@ def filter_partial_noise(
     return filtered
 
 
-def _parse_line(line: str) -> Diagnostic | None:
-    m = _TSC_DIAG_RE.match(line)
-    if m is None:
+def _parse_entry(entry: dict[str, Any]) -> Diagnostic | None:
+    message = entry.get("message")
+    if not isinstance(message, str) or not message:
         return None
-    line_no = int(m.group(1))
-    col = int(m.group(2))
-    severity = m.group(3)
-    error_code = m.group(4)
-    message = m.group(5)
+
+    severity = entry.get("severity", "error")
+    error_code = entry.get("code")
+    if isinstance(error_code, int):
+        error_code = f"TS{error_code}"
+    elif not isinstance(error_code, str):
+        error_code = None
+
+    spans: list[DiagnosticSpan] = []
+    line = entry.get("line")
+    col = entry.get("col")
+    if isinstance(line, int):
+        spans.append(DiagnosticSpan(
+            line=line,
+            col=col if isinstance(col, int) else 0,
+            is_primary=True,
+        ))
+
+    related = entry.get("relatedInformation")
+    if isinstance(related, list):
+        for ri in related:
+            if not isinstance(ri, dict):
+                continue
+            ri_line = ri.get("line")
+            if not isinstance(ri_line, int):
+                continue
+            ri_col = ri.get("col")
+            ri_message = ri.get("message", "")
+            spans.append(DiagnosticSpan(
+                line=ri_line,
+                col=ri_col if isinstance(ri_col, int) else 0,
+                message=ri_message if isinstance(ri_message, str) else "",
+            ))
+
     return Diagnostic(
         message=message,
-        severity=severity,
-        span=(line_no, col),
+        severity=severity if isinstance(severity, str) else "error",
+        spans=tuple(spans),
         error_code=error_code,
     )

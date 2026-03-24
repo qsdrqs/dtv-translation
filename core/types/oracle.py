@@ -9,10 +9,18 @@ from .enums import Granularity, RollbackScope, Verdict
 
 
 @dataclass(frozen=True)
+class DiagnosticSpan:
+    line: int
+    col: int = 0
+    message: str = ""
+    is_primary: bool = False
+
+
+@dataclass(frozen=True)
 class Diagnostic:
     message: str
     severity: str = "error"
-    span: tuple[int, int] | None = None
+    spans: tuple[DiagnosticSpan, ...] = ()
     error_code: str | None = None
     hint_scope: RollbackScope | None = None
     hints: tuple[str, ...] = ()
