@@ -6,7 +6,7 @@ import pytest
 
 from c_rust.oracles.compiler_oracle.rustc_driver import RustcResult
 from c_rust.oracles.compiler_oracle.rustc_parser import has_errors, parse_rustc_diagnostics
-from core.types import Diagnostic, DiagnosticSpan, OracleOutput, RollbackScope, Verdict
+from core.types import Diagnostic, DiagnosticSpan, OracleOutput, Granularity, Verdict
 from feedback.formatter import RepairFeedbackFormatConfig, build_repair_feedback
 from feedback.feedback import FeedbackState
 from test.c_rust.utils import compile_rust
@@ -37,7 +37,7 @@ def _compile_oracle_output(code: str) -> OracleOutput:
         oracle_name="rustc",
         verdict=verdict,
         diagnostics=diagnostics,
-        rollback_scope=RollbackScope.STMT,
+        rollback_scope=Granularity.STMT,
     )
 
 
@@ -123,7 +123,7 @@ fn main() {
             oracle_name="rustc",
             verdict=Verdict.FAIL,
             diagnostics=diagnostics,
-            rollback_scope=RollbackScope.STMT,
+            rollback_scope=Granularity.STMT,
         )
     ])
 
@@ -175,7 +175,7 @@ fn main() {
             oracle_name="rustc",
             verdict=Verdict.FAIL,
             diagnostics=diagnostics,
-            rollback_scope=RollbackScope.STMT,
+            rollback_scope=Granularity.STMT,
         )
     ])
 
@@ -212,7 +212,7 @@ diagnostics:
 
 
 def test_feedback_scope_aligned_selection_filters_by_scope() -> None:
-    from core.types import RollbackScope
+    from core.types import Granularity
 
     stmt_diagnostics = _compile_diagnostics(
         """\
@@ -227,7 +227,7 @@ fn main() {
         oracle_name="rustc",
         verdict=Verdict.FAIL,
         diagnostics=stmt_diagnostics,
-        rollback_scope=RollbackScope.STMT,
+        rollback_scope=Granularity.STMT,
     )
 
     func_diagnostics = _compile_diagnostics(
@@ -242,18 +242,18 @@ fn foo() -> i32 {
         oracle_name="func_oracle",
         verdict=Verdict.FAIL,
         diagnostics=func_diagnostics,
-        rollback_scope=RollbackScope.FUNC,
+        rollback_scope=Granularity.FUNC,
     )
 
     feedback_state = FeedbackState()
-    feedback_state.on_verify([stmt_output, func_output], selected_scope=RollbackScope.STMT)
+    feedback_state.on_verify([stmt_output, func_output], selected_scope=Granularity.STMT)
 
     encoded = feedback_state.encode()
     assert encoded.splitlines() == _prefixed_error_messages("rustc", stmt_diagnostics)
 
 
 def test_feedback_scope_aligned_includes_all_same_scope_oracles() -> None:
-    from core.types import RollbackScope
+    from core.types import Granularity
 
     stmt_diag_1 = _compile_diagnostics(
         """\
@@ -267,7 +267,7 @@ fn main() {
         oracle_name="oracle_a",
         verdict=Verdict.FAIL,
         diagnostics=stmt_diag_1,
-        rollback_scope=RollbackScope.STMT,
+        rollback_scope=Granularity.STMT,
     )
 
     stmt_diag_2 = _compile_diagnostics(
@@ -281,11 +281,11 @@ fn main() {
         oracle_name="oracle_b",
         verdict=Verdict.FAIL,
         diagnostics=stmt_diag_2,
-        rollback_scope=RollbackScope.STMT,
+        rollback_scope=Granularity.STMT,
     )
 
     feedback_state = FeedbackState()
-    feedback_state.on_verify([stmt_output_1, stmt_output_2], selected_scope=RollbackScope.STMT)
+    feedback_state.on_verify([stmt_output_1, stmt_output_2], selected_scope=Granularity.STMT)
 
     encoded = feedback_state.encode()
     assert encoded.splitlines() == (
@@ -305,12 +305,12 @@ def test_feedback_raises_when_fail_has_no_error_fatal_diagnostics() -> None:
         oracle_name="rustc",
         verdict=Verdict.FAIL,
         diagnostics=warning_only,
-        rollback_scope=RollbackScope.STMT,
+        rollback_scope=Granularity.STMT,
     )
 
     feedback_state = FeedbackState()
     with pytest.raises(ValueError, match="FAIL output has no error/fatal diagnostics"):
-        feedback_state.on_verify([fail_output], selected_scope=RollbackScope.STMT)
+        feedback_state.on_verify([fail_output], selected_scope=Granularity.STMT)
 
 
 def test_feedback_ignores_fail_outputs_outside_selected_scope() -> None:
@@ -325,11 +325,11 @@ fn foo() -> i32 {
         oracle_name="func_oracle",
         verdict=Verdict.FAIL,
         diagnostics=func_diagnostics,
-        rollback_scope=RollbackScope.FUNC,
+        rollback_scope=Granularity.FUNC,
     )
 
     feedback_state = FeedbackState()
-    feedback_state.on_verify([func_output], selected_scope=RollbackScope.STMT)
+    feedback_state.on_verify([func_output], selected_scope=Granularity.STMT)
     assert feedback_state.encode() == ""
 
 
@@ -346,7 +346,7 @@ fn main() {
         oracle_name="rustc",
         verdict=Verdict.FAIL,
         diagnostics=stmt_diagnostics,
-        rollback_scope=RollbackScope.STMT,
+        rollback_scope=Granularity.STMT,
     )
 
     func_diagnostics = _compile_diagnostics(
@@ -360,11 +360,11 @@ fn foo() -> i32 {
         oracle_name="func_oracle",
         verdict=Verdict.FAIL,
         diagnostics=func_diagnostics,
-        rollback_scope=RollbackScope.FUNC,
+        rollback_scope=Granularity.FUNC,
     )
 
     feedback_state = FeedbackState()
-    feedback_state.on_verify([stmt_output, func_output], selected_scope=RollbackScope.STMT)
+    feedback_state.on_verify([stmt_output, func_output], selected_scope=Granularity.STMT)
 
     hint = feedback_state.best_fix_hint()
     expected_hint = _first_hint(stmt_diagnostics)
@@ -387,11 +387,11 @@ fn main() {
         oracle_name="rustc",
         verdict=Verdict.FAIL,
         diagnostics=stmt_diagnostics,
-        rollback_scope=RollbackScope.STMT,
+        rollback_scope=Granularity.STMT,
     )
 
     feedback_state = FeedbackState()
-    feedback_state.on_verify([stmt_output], selected_scope=RollbackScope.STMT)
+    feedback_state.on_verify([stmt_output], selected_scope=Granularity.STMT)
 
     prompt = build_repair_feedback(feedback_state, "")
     diagnostic_blocks: list[str] = []
@@ -435,14 +435,14 @@ def test_build_repair_feedback_uses_existing_diagnostic_fields() -> None:
                 severity="error",
                 spans=(DiagnosticSpan(line=10, col=20, is_primary=True),),
                 error_code="EXIT_CODE_MISMATCH",
-                hint_scope=RollbackScope.FUNC,
+                hint_scope=Granularity.FUNC,
                 hints=("check return value handling",),
             ),
         ),
-        rollback_scope=RollbackScope.FUNC,
+        rollback_scope=Granularity.FUNC,
     )
     feedback_state = FeedbackState()
-    feedback_state.on_verify([fail_output], selected_scope=RollbackScope.FUNC)
+    feedback_state.on_verify([fail_output], selected_scope=Granularity.FUNC)
     prompt = build_repair_feedback(feedback_state, "let result = buggy_call();")
     assert prompt == """/* repair feedback:
 failed snippet:
@@ -466,10 +466,10 @@ def test_build_repair_feedback_can_omit_failed_snippet() -> None:
                 severity="error",
             ),
         ),
-        rollback_scope=RollbackScope.FUNC,
+        rollback_scope=Granularity.FUNC,
     )
     feedback_state = FeedbackState()
-    feedback_state.on_verify([fail_output], selected_scope=RollbackScope.FUNC)
+    feedback_state.on_verify([fail_output], selected_scope=Granularity.FUNC)
     prompt = build_repair_feedback(
         feedback_state,
         "let result = buggy_call();",
@@ -483,7 +483,7 @@ message: test failure
 
 
 def test_feedback_preserves_deterministic_oracle_and_diagnostic_order() -> None:
-    from core.types import Diagnostic, RollbackScope
+    from core.types import Diagnostic, Granularity
 
     oracle_a_diagnostics = (
         Diagnostic(message="error from oracle_a diagnostic 1", severity="error"),
@@ -493,7 +493,7 @@ def test_feedback_preserves_deterministic_oracle_and_diagnostic_order() -> None:
         oracle_name="oracle_a",
         verdict=Verdict.FAIL,
         diagnostics=oracle_a_diagnostics,
-        rollback_scope=RollbackScope.STMT,
+        rollback_scope=Granularity.STMT,
     )
 
     oracle_b_diagnostics = (
@@ -504,11 +504,11 @@ def test_feedback_preserves_deterministic_oracle_and_diagnostic_order() -> None:
         oracle_name="oracle_b",
         verdict=Verdict.FAIL,
         diagnostics=oracle_b_diagnostics,
-        rollback_scope=RollbackScope.STMT,
+        rollback_scope=Granularity.STMT,
     )
 
     feedback_state = FeedbackState()
-    feedback_state.on_verify([oracle_a, oracle_b], selected_scope=RollbackScope.STMT)
+    feedback_state.on_verify([oracle_a, oracle_b], selected_scope=Granularity.STMT)
 
     encoded = feedback_state.encode()
     lines = encoded.strip().split("\n")

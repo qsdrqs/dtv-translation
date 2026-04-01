@@ -16,7 +16,7 @@ from core.types import (
     Granularity,
     RenderResult,
     RenderStatus,
-    RollbackScope,
+    Granularity,
     StopReason,
     Verdict,
 )
@@ -111,7 +111,7 @@ class _SingleStepPolicy:
             return ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT)
         if ctx.last_action == Action.VERIFY:
             if any(out.verdict == Verdict.FAIL for out in ctx.last_outputs):
-                return ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.STMT)
+                return ControllerOp(Action.ROLLBACK, rollback_scope=Granularity.STMT)
             if ctx.last_outputs and all(out.verdict == Verdict.PASS for out in ctx.last_outputs):
                 return ControllerOp(Action.COMMIT)
             return ControllerOp(Action.CONTINUE)
@@ -143,7 +143,7 @@ class _TwoStepPolicy:
             if self.phase == 0:
                 self.phase += 1
                 return ControllerOp(Action.COMMIT)
-            return ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.STMT)
+            return ControllerOp(Action.ROLLBACK, rollback_scope=Granularity.STMT)
         if ctx.last_action == Action.COMMIT:
             return ControllerOp(Action.GENERATE)
         if ctx.last_action == Action.ROLLBACK:

@@ -13,7 +13,6 @@ from core.types import (
     Granularity,
     OracleContext,
     OracleOutput,
-    RollbackScope,
     Verdict,
 )
 from js_ts.oracles.compiler_oracle.tsc_driver import TscDriver
@@ -30,7 +29,7 @@ logger = get_logger(__name__)
 class TscOracle(Oracle):
     name = "tsc"
     required_granularity = Granularity.STMT
-    rollback_scope = RollbackScope.STMT
+    rollback_scope = Granularity.STMT
 
     def __init__(self, timeout_s: float | None = 10.0, node_path: str = "node") -> None:
         self.timeout_s = timeout_s
@@ -85,7 +84,7 @@ class TscOracle(Oracle):
 class TscProgramOracle(TscOracle):
     name = "tsc_program"
     required_granularity = Granularity.PROGRAM
-    rollback_scope = RollbackScope.PROGRAM
+    rollback_scope = Granularity.PROGRAM
 
 
 def _decide_verdict(exit_code: int, diagnostics: tuple[Diagnostic, ...], timed_out: bool) -> Verdict:

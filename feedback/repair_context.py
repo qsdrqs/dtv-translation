@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from core.types import OracleOutput, RollbackScope
+from core.types import OracleOutput, Granularity
 from feedback.feedback import FeedbackState
 
 
 @dataclass(frozen=True)
 class RepairContext:
     failed_snippet: str
-    repair_scope: RollbackScope
+    repair_scope: Granularity
     outputs: tuple[OracleOutput, ...]
     parser_error_context: str | None = None
 
@@ -19,8 +19,8 @@ class RepairContext:
         feedback_state: FeedbackState,
         bad_snippet: str,
         *,
-        repair_scope: RollbackScope = RollbackScope.STMT,
-        scope_filter: RollbackScope | None = None,
+        repair_scope: Granularity = Granularity.STMT,
+        scope_filter: Granularity | None = None,
         parser_error_context: str | None = None,
     ) -> RepairContext:
         snippet = bad_snippet.strip() or "(empty)"

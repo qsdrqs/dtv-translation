@@ -14,7 +14,6 @@ from core.types import (
     Granularity,
     OracleContext,
     OracleOutput,
-    RollbackScope,
     Verdict,
 )
 from core.types import Mismatch, TestCase, TranslationSample
@@ -31,7 +30,7 @@ class ProgramOracle(Oracle):
 
     name = "program_diff"
     required_granularity = Granularity.PROGRAM
-    rollback_scope = RollbackScope.PROGRAM
+    rollback_scope = Granularity.PROGRAM
 
     def __init__(
         self,
@@ -219,7 +218,7 @@ def _compare_executions(
             c_value=len(c_results),
             rust_value=len(rust_results),
             message=f"Result count mismatch: C={len(c_results)}, Rust={len(rust_results)}, tests={len(test_cases)}",
-            suggested_scope=RollbackScope.PROGRAM,
+            suggested_scope=Granularity.PROGRAM,
         ))
         return mismatches
 
@@ -234,7 +233,7 @@ def _compare_executions(
                 c_value="timeout",
                 rust_value="N/A",
                 message=f"{test_id}: C execution timed out",
-                suggested_scope=RollbackScope.PROGRAM,
+                suggested_scope=Granularity.PROGRAM,
             ))
             continue
 
@@ -244,7 +243,7 @@ def _compare_executions(
                 c_value="N/A",
                 rust_value="timeout",
                 message=f"{test_id}: Rust execution timed out",
-                suggested_scope=RollbackScope.PROGRAM,
+                suggested_scope=Granularity.PROGRAM,
             ))
             continue
 
@@ -262,7 +261,7 @@ def _compare_executions(
                     f"(C={c_result.exit_code}, Rust={rust_result.exit_code})"
                     f"{stderr_note}"
                 ),
-                suggested_scope=RollbackScope.PROGRAM,
+                suggested_scope=Granularity.PROGRAM,
             ))
 
         if c_result.stdout != rust_result.stdout:
@@ -271,7 +270,7 @@ def _compare_executions(
                 c_value=c_result.stdout,
                 rust_value=rust_result.stdout,
                 message=f"{test_id}: stdout mismatch",
-                suggested_scope=RollbackScope.PROGRAM,
+                suggested_scope=Granularity.PROGRAM,
             ))
 
         # NOTE: We do not compare stderr for now.

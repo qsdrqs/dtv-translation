@@ -14,7 +14,7 @@ from core.types import (
     OracleContext,
     OracleOutput,
     RenderStatus,
-    RollbackScope,
+    Granularity,
     Verdict,
 )
 from core.types.diff_testing import TranslationSample
@@ -224,4 +224,4 @@ def test_oracle_attributes() -> None:
     oracle = _make_oracle()
     assert oracle.name == "eslint"
     assert oracle.required_granularity == Granularity.STMT
-    assert oracle.rollback_scope == RollbackScope.STMT
+    assert oracle.rollback_scope == Granularity.STMT

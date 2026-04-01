@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from .enums import RollbackScope
+from .enums import Granularity
 
 
 @dataclass(frozen=True)
@@ -55,7 +55,7 @@ class Mismatch:
     c_value: Any
     rust_value: Any
     message: str
-    suggested_scope: RollbackScope | None = None
+    suggested_scope: Granularity | None = None
 
 
 @dataclass

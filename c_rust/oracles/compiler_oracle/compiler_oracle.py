@@ -13,7 +13,6 @@ from core.types import (
     Granularity,
     OracleContext,
     OracleOutput,
-    RollbackScope,
     Verdict,
 )
 from c_rust.oracles.compiler_oracle.rustc_driver import RustcDriver
@@ -37,7 +36,7 @@ _PARTIAL_COMPILATION_NOISE: frozenset[str] = frozenset({
 class RustcOracle(Oracle):
     name = "rustc"
     required_granularity = Granularity.STMT
-    rollback_scope = RollbackScope.STMT
+    rollback_scope = Granularity.STMT
 
     def __init__(self, timeout_s: float | None = 10.0, rustc_path: str = "rustc") -> None:
         self.timeout_s = timeout_s
@@ -126,7 +125,7 @@ def _decide_verdict(exit_code: int, diagnostics: tuple, timed_out: bool) -> Verd
 class RustcProgramOracle(RustcOracle):
     name = "rustc_program"
     required_granularity = Granularity.PROGRAM
-    rollback_scope = RollbackScope.PROGRAM
+    rollback_scope = Granularity.PROGRAM
 
 
 def _extract_sample(artifact: Artifact) -> Any | None:

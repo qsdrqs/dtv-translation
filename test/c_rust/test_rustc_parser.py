@@ -198,11 +198,11 @@ fn main() {
 
 
 def test_program_oracle_attributes() -> None:
-    from core.types import Granularity, RollbackScope
+    from core.types import Granularity
     oracle = RustcProgramOracle()
     assert oracle.name == "rustc_program"
     assert oracle.required_granularity == Granularity.PROGRAM
-    assert oracle.rollback_scope == RollbackScope.PROGRAM
+    assert oracle.rollback_scope == Granularity.PROGRAM
 
 
 def test_program_oracle_noise_not_filtered() -> None:
@@ -212,7 +212,6 @@ def test_program_oracle_noise_not_filtered() -> None:
         ControllerState,
         Granularity,
         OracleContext,
-        RollbackScope,
         Verdict,
     )
     from core.types.diff_testing import TranslationSample

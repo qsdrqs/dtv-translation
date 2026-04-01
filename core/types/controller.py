@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from .enums import Action, Granularity, RenderStatus, RollbackScope
+from .enums import Action, Granularity, RenderStatus
 from .generation import StopReason
 from .oracle import OracleOutput
 
@@ -21,7 +21,7 @@ class TraceEvent:
     action: Action
     verification_granularity: Granularity | None = None
     render_status: RenderStatus | None = None
-    rollback_scope: RollbackScope | None = None
+    rollback_scope: Granularity | None = None
     patch_applied: bool = False
     budget_snapshot: dict[str, Any] = field(default_factory=dict)
     oracle_outputs: tuple[OracleOutput, ...] = ()

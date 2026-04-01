@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass, replace
 from typing import Any
 
-from core.types import ExecutionTraceEvent, Mismatch, RollbackScope, TraceEventKind
+from core.types import ExecutionTraceEvent, Mismatch, Granularity, TraceEventKind
 
 
 def parse_trace_events(stderr: str) -> list[ExecutionTraceEvent]:
@@ -52,7 +52,7 @@ class TraceComparisonStats:
 def find_first_mismatch(
     c_trace: list[ExecutionTraceEvent],
     rust_trace: list[ExecutionTraceEvent],
-    scope: RollbackScope = RollbackScope.FUNC,
+    scope: Granularity = Granularity.FUNC,
 ) -> tuple[Mismatch | None, TraceComparisonStats]:
     """Find first mismatch using longest common prefix."""
     stats = TraceComparisonStats()
@@ -116,7 +116,7 @@ def _compare_event_payload(
     rust_event: ExecutionTraceEvent,
     stats: TraceComparisonStats,
     position: int,
-    scope: RollbackScope,
+    scope: Granularity,
 ) -> Mismatch | None:
     if c_event.kind == TraceEventKind.FUNC_ENTER:
         return _compare_field_list(
@@ -154,7 +154,7 @@ def _compare_field_list(
     rust_list: list[dict[str, Any]] | None,
     stats: TraceComparisonStats,
     position: int,
-    scope: RollbackScope,
+    scope: Granularity,
     field_name: str,
 ) -> Mismatch | None:
     if c_list is None and rust_list is None:
@@ -205,7 +205,7 @@ def _compare_slice_arg_lengths(
     rust_list: list[dict[str, Any]],
     stats: TraceComparisonStats,
     position: int,
-    scope: RollbackScope,
+    scope: Granularity,
 ) -> Mismatch | None:
     if len(c_list) == 2 and len(rust_list) == 1:
         c_ptr, c_len = c_list
@@ -239,7 +239,7 @@ def _compare_field_object(
     rust_obj: dict[str, Any] | None,
     stats: TraceComparisonStats,
     position: int,
-    scope: RollbackScope,
+    scope: Granularity,
     field_name: str,
 ) -> Mismatch | None:
     if c_obj is None and rust_obj is None:
@@ -260,7 +260,7 @@ def _compare_field_item(
     rust_item: dict[str, Any],
     stats: TraceComparisonStats,
     position: int,
-    scope: RollbackScope,
+    scope: Granularity,
     field_name: str,
 ) -> Mismatch | None:
     stats.total_fields += 1

@@ -7,7 +7,6 @@ from core.types import (
     Granularity,
     OracleContext,
     OracleOutput,
-    RollbackScope,
     Verdict,
 )
 from js_ts.oracles.eslint_oracle.eslint_driver import EslintDriver
@@ -21,7 +20,7 @@ from js_ts.oracles.eslint_oracle.eslint_parser import (
 class EslintOracle(Oracle):
     name = "eslint"
     required_granularity = Granularity.STMT
-    rollback_scope = RollbackScope.STMT
+    rollback_scope = Granularity.STMT
 
     def __init__(self, timeout_s: float = 10.0) -> None:
         self.timeout_s = timeout_s

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .artifact import Artifact, GroupStackFrame
-from .enums import Granularity, RollbackScope, Verdict
+from .enums import Granularity, Verdict
 
 
 @dataclass(frozen=True)
@@ -22,7 +22,7 @@ class Diagnostic:
     severity: str = "error"
     spans: tuple[DiagnosticSpan, ...] = ()
     error_code: str | None = None
-    hint_scope: RollbackScope | None = None
+    hint_scope: Granularity | None = None
     hints: tuple[str, ...] = ()
 
 
@@ -32,7 +32,7 @@ class OracleOutput:
     verdict: Verdict
     diagnostics: tuple[Diagnostic, ...] = ()
     realized_cost: int = 0
-    rollback_scope: RollbackScope | None = None
+    rollback_scope: Granularity | None = None
 
 
 @dataclass(frozen=True)

@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Sequence
 
 from core.llm_output import AssistantContent, OutputExtractorState
-from core.types import Granularity, GroupEvent, GroupEventAction, GroupStackFrame, RollbackScope
+from core.types import Granularity, GroupEvent, GroupEventAction, GroupStackFrame
 
 
 @dataclass
@@ -148,27 +148,27 @@ class RollbackManager:
             return checkpoint
         return self.fence_anchor
 
-    def _target_start_for_scope(self, scope: RollbackScope) -> int | None:
-        if scope == RollbackScope.BLOCK:
+    def _target_start_for_scope(self, scope: Granularity) -> int | None:
+        if scope == Granularity.BLOCK:
             for frame in reversed(self.group_stack):
                 if frame.kind == Granularity.BLOCK:
                     return frame.start_stmt
             return None
-        if scope == RollbackScope.FUNC:
+        if scope == Granularity.FUNC:
             for frame in reversed(self.group_stack):
                 if frame.kind == Granularity.FUNC:
                     return frame.start_stmt
             return None
         return None
 
-    def rollback(self, scope: RollbackScope) -> Checkpoint:
-        if scope == RollbackScope.PROGRAM:
+    def rollback(self, scope: Granularity) -> Checkpoint:
+        if scope == Granularity.PROGRAM:
             self.stmt_checkpoints.clear()
             self.group_stack.clear()
             return self._apply_fence_anchor_floor(
                 Checkpoint(code_prefix="", assistant_prefix=AssistantContent.empty(), extractor_state=None)
             )
-        if scope == RollbackScope.STMT:
+        if scope == Granularity.STMT:
             return self._apply_fence_anchor_floor(self._last_checkpoint())
         target_start = self._target_start_for_scope(scope)
         if target_start is None:

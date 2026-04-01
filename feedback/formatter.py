@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from core.types import Diagnostic, RollbackScope
+from core.types import Diagnostic, Granularity
 from feedback.feedback import FeedbackState
 from feedback.repair_context import RepairContext
 
@@ -73,7 +73,7 @@ def _build_header(oracle_name: str, diag: Diagnostic) -> str:
     return " ".join(fields)
 
 
-def _format_scope(scope: RollbackScope | None) -> str | None:
+def _format_scope(scope: Granularity | None) -> str | None:
     if scope is None:
         return None
     return scope.value

@@ -7,7 +7,7 @@ from controller.policy import DefaultPolicy
 from controller.stop_criteria import DTVStoppingCriteria, RUST_PROFILE
 from core.llm_output import FenceParser
 from core.budget import Budget
-from core.types import Action, Artifact, Granularity, RenderResult, RenderStatus, RollbackScope, Verdict
+from core.types import Action, Artifact, Granularity, RenderResult, RenderStatus, Verdict
 from feedback.feedback import FeedbackState
 from rollback.manager import RollbackManager
 
@@ -28,7 +28,7 @@ class DemoPolicy:
             return ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT)
         if ctx.last_action == Action.VERIFY:
             if any(out.verdict == Verdict.FAIL for out in ctx.last_outputs):
-                return ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.STMT)
+                return ControllerOp(Action.ROLLBACK, rollback_scope=Granularity.STMT)
             if ctx.last_outputs and all(out.verdict == Verdict.PASS for out in ctx.last_outputs):
                 return ControllerOp(Action.COMMIT)
             return ControllerOp(Action.CONTINUE)

@@ -3,7 +3,7 @@ from __future__ import annotations
 from tree_sitter_language_pack import get_parser
 
 from core.llm_output import AssistantContent
-from core.types import Granularity, GroupStackFrame, RollbackScope
+from core.types import Granularity, GroupStackFrame
 from js_ts.render.groups import ts_group_stack
 from rollback.manager import RollbackManager
 
@@ -248,7 +248,7 @@ def test_block_rollback_after_function_returns_to_function_end() -> None:
 
     assert any(f.kind == Granularity.BLOCK for f in m.group_stack)
 
-    out = m.rollback(RollbackScope.BLOCK)
+    out = m.rollback(Granularity.BLOCK)
     # BLOCK rollback truncates to start_stmt=2, keeping checkpoints 0 and 1.
     # prefix_func_end was committed after the top-level block opened (cursor
     # was already at top level when the function's closing } was committed),

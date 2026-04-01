@@ -18,7 +18,6 @@ from core.types import (
     Granularity,
     OracleContext,
     OracleOutput,
-    RollbackScope,
     Verdict,
 )
 from c_rust.oracles.function_diff_test_oracle.c_instrumenter import (
@@ -61,7 +60,7 @@ class FunctionOracle(Oracle):
 
     name = "function_diff"
     required_granularity = Granularity.FUNC
-    rollback_scope = RollbackScope.FUNC
+    rollback_scope = Granularity.FUNC
 
     def __init__(
         self,
@@ -471,7 +470,7 @@ def _run_tests_and_compare(
                         f"(C={c_exec.exit_code}, Rust={rust_exec.exit_code})"
                     ),
                     error_code="EXIT_CODE_MISMATCH",
-                    hint_scope=RollbackScope.FUNC,
+                    hint_scope=Granularity.FUNC,
                 ),),
                 realized_cost=cost,
             )
@@ -496,7 +495,7 @@ def _run_tests_and_compare(
         mismatch, stats = find_first_mismatch(
             c_trace,
             rust_trace,
-            scope=RollbackScope.FUNC,
+            scope=Granularity.FUNC,
         )
         coverage.add(stats)
         if mismatch:
@@ -507,7 +506,7 @@ def _run_tests_and_compare(
                     Diagnostic(
                         message=f"{test_id}: {mismatch.message}",
                         error_code="TRACE_MISMATCH",
-                        hint_scope=mismatch.suggested_scope or RollbackScope.FUNC,
+                        hint_scope=mismatch.suggested_scope or Granularity.FUNC,
                     ),
                     _coverage_diagnostic(coverage),
                 ),
@@ -637,6 +636,5 @@ def _run_compile(
             elapsed_ms=elapsed_ms,
             compilation_failed=True,
         )
-
 
 

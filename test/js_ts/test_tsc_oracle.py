@@ -7,7 +7,7 @@ from core.types import (
     Granularity,
     OracleContext,
     OracleOutput,
-    RollbackScope,
+    Granularity,
     Verdict,
 )
 from core.types.diff_testing import TranslationSample
@@ -34,7 +34,7 @@ def test_oracle_attributes() -> None:
     oracle = _make_oracle()
     assert oracle.name == "tsc"
     assert oracle.required_granularity == Granularity.STMT
-    assert oracle.rollback_scope == RollbackScope.STMT
+    assert oracle.rollback_scope == Granularity.STMT
 
 
 # verdict
@@ -103,7 +103,7 @@ def test_program_oracle_attributes() -> None:
     oracle = TscProgramOracle()
     assert oracle.name == "tsc_program"
     assert oracle.required_granularity == Granularity.PROGRAM
-    assert oracle.rollback_scope == RollbackScope.PROGRAM
+    assert oracle.rollback_scope == Granularity.PROGRAM
 
 
 def test_program_oracle_noise_not_filtered() -> None:

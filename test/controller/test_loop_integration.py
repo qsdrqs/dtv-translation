@@ -22,7 +22,7 @@ from core.types import (
     OracleOutput,
     RenderResult,
     RenderStatus,
-    RollbackScope,
+    Granularity,
     StopReason,
     Verdict,
 )
@@ -207,7 +207,7 @@ class _TrackingGenerator:
 class _ScopeFailOracle:
     required_granularity = Granularity.PROGRAM
 
-    def __init__(self, scope: RollbackScope) -> None:
+    def __init__(self, scope: Granularity) -> None:
         self.name = f"fail_{scope.value}"
         self.rollback_scope = scope
 
@@ -225,7 +225,7 @@ class _ScopeFailOracle:
 
 
 class _RollbackScopePolicy:
-    def __init__(self, scope: RollbackScope) -> None:
+    def __init__(self, scope: Granularity) -> None:
         self.scope = scope
         self.stage = 0
 
@@ -256,7 +256,7 @@ class _RollbackScopePolicy:
 class _ProgramFailOracle:
     name = "program_diff"
     required_granularity = Granularity.PROGRAM
-    rollback_scope = RollbackScope.PROGRAM
+    rollback_scope = Granularity.PROGRAM
 
     def run(self, state, artifact, context) -> OracleOutput:
         _ = state
@@ -284,7 +284,7 @@ class _ProgramRollbackThenGeneratePolicy:
             return ControllerOp(Action.VERIFY, verification_granularity=Granularity.PROGRAM)
         if self.stage == 2:
             self.stage = 3
-            return ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.PROGRAM)
+            return ControllerOp(Action.ROLLBACK, rollback_scope=Granularity.PROGRAM)
         if self.stage == 3:
             self.stage = 4
             return ControllerOp(Action.GENERATE)
@@ -309,7 +309,7 @@ class _SingleStepPolicy:
             return ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT)
         if ctx.last_action == Action.VERIFY:
             if any(out.verdict == Verdict.FAIL for out in ctx.last_outputs):
-                return ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.STMT)
+                return ControllerOp(Action.ROLLBACK, rollback_scope=Granularity.STMT)
             if ctx.last_outputs and all(out.verdict == Verdict.PASS for out in ctx.last_outputs):
                 return ControllerOp(Action.COMMIT)
             return ControllerOp(Action.CONTINUE)
@@ -331,7 +331,7 @@ class _SingleStepPolicy:
 class _PassOracle:
     name = "pass"
     required_granularity = Granularity.STMT
-    rollback_scope = RollbackScope.STMT
+    rollback_scope = Granularity.STMT
 
     def run(self, state, artifact, context) -> OracleOutput:
         _ = state
@@ -343,7 +343,7 @@ class _PassOracle:
 class _FunctionNameOracle:
     name = "function_diff"
     required_granularity = Granularity.FUNC
-    rollback_scope = RollbackScope.FUNC
+    rollback_scope = Granularity.FUNC
 
     def __init__(self, expected: str) -> None:
         self.expected = expected
@@ -446,13 +446,13 @@ def test_commit_prefers_group_stack_over_events() -> None:
 @pytest.mark.parametrize(
     "scope",
     [
-        RollbackScope.STMT,
-        RollbackScope.BLOCK,
-        RollbackScope.FUNC,
-        RollbackScope.PROGRAM,
+        Granularity.STMT,
+        Granularity.BLOCK,
+        Granularity.FUNC,
+        Granularity.PROGRAM,
     ],
 )
-def test_rollback_restores_inside_parser_state_for_all_scopes(scope: RollbackScope) -> None:
+def test_rollback_restores_inside_parser_state_for_all_scopes(scope: Granularity) -> None:
     generator = _TrackingGenerator(
         [
             GenerateResult(
