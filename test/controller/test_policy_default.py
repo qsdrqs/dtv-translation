@@ -17,7 +17,7 @@ from core.types import (
     OracleOutput,
     RenderResult,
     RenderStatus,
-    RollbackScope,
+    Granularity,
     StopReason,
     Verdict,
 )
@@ -37,7 +37,7 @@ def _ctx(
     failed_prefix: str | None = None,
     pending_patch: str | None = None,
     repair_base_prefix: str | None = None,
-    repair_scope: RollbackScope | None = None,
+    repair_scope: Granularity | None = None,
     fence_state: FenceState = FenceState.DONE,
 ) -> PolicyContext:
     return PolicyContext(
@@ -64,7 +64,7 @@ def _outputs(*verdicts: Verdict) -> tuple[OracleOutput, ...]:
     )
 
 
-def _fail_outputs(*, scope: RollbackScope = RollbackScope.STMT) -> tuple[OracleOutput, ...]:
+def _fail_outputs(*, scope: Granularity = Granularity.STMT) -> tuple[OracleOutput, ...]:
     return (
         OracleOutput(
             oracle_name="oracle_0",
@@ -83,7 +83,7 @@ class _AlwaysOkRenderer:
 class _AlwaysFailOracle:
     name = "oracle"
     required_granularity = Granularity.STMT
-    rollback_scope = RollbackScope.STMT
+    rollback_scope = Granularity.STMT
 
     def run(self, state, artifact, context) -> OracleOutput:
         _ = state
@@ -220,7 +220,7 @@ def test_default_policy_no_oracle_selected_commits_when_enabled() -> None:
 
 
 def test_default_policy_fail_rolls_back() -> None:
-    policy = DefaultPolicy(DefaultPolicyConfig(enable_rollback=True, default_fail_scope=RollbackScope.STMT))
+    policy = DefaultPolicy(DefaultPolicyConfig(enable_rollback=True, default_fail_scope=Granularity.STMT))
     ctx = _ctx(
         prefix="let x = 1;",
         last_action=Action.VERIFY,
@@ -230,84 +230,74 @@ def test_default_policy_fail_rolls_back() -> None:
     )
     op = policy.next_action(ctx)
     assert op.action == Action.ROLLBACK
-    assert op.rollback_scope == RollbackScope.STMT
-
-
-def test_default_policy_stmt_stall_escalates_to_block_after_retry_budget() -> None:
-    policy = DefaultPolicy(
-        DefaultPolicyConfig(
-            enable_rollback=True,
-            default_fail_scope=RollbackScope.STMT,
-            stmt_stall_max_retries_before_escalation=3,
-        )
-    )
-
-    for _ in range(3):
-        ctx = _ctx(
-            prefix="bad;",
-            last_action=Action.VERIFY,
-            last_render_status=RenderStatus.OK,
-            last_outputs=_fail_outputs(scope=RollbackScope.STMT),
-        )
-        ctx.rollback.open_group(Granularity.FUNC)
-        ctx.rollback.open_group(Granularity.BLOCK)
-        op = policy.next_action(ctx)
-        assert op.action == Action.ROLLBACK
-        assert op.rollback_scope == RollbackScope.STMT
-
-    ctx = _ctx(
-        prefix="bad;",
-        last_action=Action.VERIFY,
-        last_render_status=RenderStatus.OK,
-        last_outputs=_fail_outputs(scope=RollbackScope.STMT),
-    )
-    ctx.rollback.open_group(Granularity.FUNC)
-    ctx.rollback.open_group(Granularity.BLOCK)
-    op = policy.next_action(ctx)
-
-    assert op.action == Action.ROLLBACK
-    assert op.rollback_scope == RollbackScope.BLOCK
+    assert op.rollback_scope == Granularity.STMT
 
 
 def test_default_policy_stmt_stall_escalates_to_func_without_active_block() -> None:
-    policy = DefaultPolicy(
-        DefaultPolicyConfig(
-            enable_rollback=True,
-            default_fail_scope=RollbackScope.STMT,
-            stmt_stall_max_retries_before_escalation=3,
-        )
-    )
+    policy = DefaultPolicy(DefaultPolicyConfig(
+        enable_feedback=True,
+        enable_rollback=True,
+        default_fail_scope=Granularity.STMT,
+        stmt_stall_max_retries_before_escalation=3,
+        feedback_default_mechanism=FeedbackMechanism.A,
+    ))
 
-    for _ in range(3):
+    def _verify_fail_rollback_with_groups(*, groups):
         ctx = _ctx(
             prefix="bad;",
             last_action=Action.VERIFY,
             last_render_status=RenderStatus.OK,
-            last_outputs=_fail_outputs(scope=RollbackScope.STMT),
+            last_outputs=_fail_outputs(scope=Granularity.STMT),
         )
-        ctx.rollback.open_group(Granularity.FUNC)
-        op = policy.next_action(ctx)
+        for g in groups:
+            ctx.rollback.open_group(g)
+        return policy.next_action(ctx)
+
+    for i in range(3):
+        # VERIFY FAIL -> ROLLBACK STMT (stall retries 1, 2, 3)
+        op = _verify_fail_rollback_with_groups(groups=[Granularity.FUNC])
         assert op.action == Action.ROLLBACK
-        assert op.rollback_scope == RollbackScope.STMT
+        assert op.rollback_scope == Granularity.STMT, f"iteration {i}"
 
-    ctx = _ctx(
-        prefix="bad;",
-        last_action=Action.VERIFY,
-        last_render_status=RenderStatus.OK,
-        last_outputs=_fail_outputs(scope=RollbackScope.STMT),
-    )
-    ctx.rollback.open_group(Granularity.FUNC)
-    op = policy.next_action(ctx)
+        ctx = _ctx(
+            prefix="base;",
+            last_action=Action.ROLLBACK,
+            failed_prefix="bad;",
+            repair_base_prefix="base;",
+            repair_scope=Granularity.STMT,
+        )
+        op = policy.next_action(ctx)
+        assert op.action == Action.FEEDBACK
 
+        ctx = _ctx(
+            pending_patch="still_bad;",
+            repair_base_prefix="base;",
+            repair_scope=Granularity.STMT,
+        )
+        op = policy.next_action(ctx)
+        assert op.action == Action.APPLY_PATCH
+
+        ctx = _ctx(
+            prefix="base;still_bad;",
+            last_action=Action.APPLY_PATCH,
+            repair_base_prefix="base;",
+            repair_scope=Granularity.STMT,
+        )
+        op = policy.next_action(ctx)
+        assert op.action == Action.VERIFY
+
+    # 4th VERIFY FAIL: no active BLOCK -> escalate to FUNC
+    op = _verify_fail_rollback_with_groups(groups=[Granularity.FUNC])
     assert op.action == Action.ROLLBACK
-    assert op.rollback_scope == RollbackScope.FUNC
+    assert op.rollback_scope == Granularity.FUNC
 
 
 def test_default_policy_stmt_stall_counter_resets_after_pass() -> None:
     policy = DefaultPolicy(
         DefaultPolicyConfig(
+            enable_feedback=False,
             enable_rollback=True,
-            default_fail_scope=RollbackScope.STMT,
+            default_fail_scope=Granularity.STMT,
             stmt_stall_max_retries_before_escalation=1,
         )
     )
@@ -316,13 +306,13 @@ def test_default_policy_stmt_stall_counter_resets_after_pass() -> None:
         prefix="bad;",
         last_action=Action.VERIFY,
         last_render_status=RenderStatus.OK,
-        last_outputs=_fail_outputs(scope=RollbackScope.STMT),
+        last_outputs=_fail_outputs(scope=Granularity.STMT),
     )
     first_fail.rollback.open_group(Granularity.FUNC)
     first_fail.rollback.open_group(Granularity.BLOCK)
     first_op = policy.next_action(first_fail)
     assert first_op.action == Action.ROLLBACK
-    assert first_op.rollback_scope == RollbackScope.STMT
+    assert first_op.rollback_scope == Granularity.STMT
 
     pass_ctx = _ctx(
         prefix="good;",
@@ -337,13 +327,233 @@ def test_default_policy_stmt_stall_counter_resets_after_pass() -> None:
         prefix="bad;",
         last_action=Action.VERIFY,
         last_render_status=RenderStatus.OK,
-        last_outputs=_fail_outputs(scope=RollbackScope.STMT),
+        last_outputs=_fail_outputs(scope=Granularity.STMT),
     )
     second_fail.rollback.open_group(Granularity.FUNC)
     second_fail.rollback.open_group(Granularity.BLOCK)
     second_op = policy.next_action(second_fail)
     assert second_op.action == Action.ROLLBACK
-    assert second_op.rollback_scope == RollbackScope.STMT
+    assert second_op.rollback_scope == Granularity.STMT
+
+
+# feedback + stall detection integration
+# Production path: FEEDBACK -> APPLY_PATCH -> VERIFY FAIL -> ROLLBACK -> FEEDBACK -> ...
+# Stall detection must work through this path, not just the no-feedback path.
+
+def test_verify_fail_after_apply_patch_returns_rollback_not_feedback() -> None:
+    policy = DefaultPolicy(DefaultPolicyConfig(
+        enable_feedback=True,
+        enable_rollback=True,
+    ))
+
+    # Initial VERIFY FAIL: no repair context -> ROLLBACK
+    ctx = _ctx(
+        prefix="bad;",
+        last_action=Action.VERIFY,
+        last_render_status=RenderStatus.OK,
+        last_outputs=_fail_outputs(scope=Granularity.STMT),
+    )
+    ctx.rollback.open_group(Granularity.FUNC)
+    op = policy.next_action(ctx)
+    assert op.action == Action.ROLLBACK
+    assert op.rollback_scope == Granularity.STMT
+
+    # After ROLLBACK: repair context set -> FEEDBACK
+    ctx = _ctx(
+        prefix="base;",
+        last_action=Action.ROLLBACK,
+        failed_prefix="bad;",
+        repair_base_prefix="base;",
+        repair_scope=Granularity.STMT,
+    )
+    op = policy.next_action(ctx)
+    assert op.action == Action.FEEDBACK
+
+    # FEEDBACK produced patch -> APPLY_PATCH
+    ctx = _ctx(
+        pending_patch="patched;",
+        repair_base_prefix="base;",
+        repair_scope=Granularity.STMT,
+    )
+    op = policy.next_action(ctx)
+    assert op.action == Action.APPLY_PATCH
+
+    # After APPLY_PATCH -> VERIFY
+    ctx = _ctx(
+        prefix="base;patched;",
+        last_action=Action.APPLY_PATCH,
+        repair_base_prefix="base;",
+        repair_scope=Granularity.STMT,
+    )
+    op = policy.next_action(ctx)
+    assert op.action == Action.VERIFY
+
+    # VERIFY FAIL with repair context:
+    # Must ROLLBACK (through _select_fail_scope), not skip to FEEDBACK.
+    ctx = _ctx(
+        prefix="base;patched;",
+        last_action=Action.VERIFY,
+        last_render_status=RenderStatus.OK,
+        last_outputs=_fail_outputs(scope=Granularity.STMT),
+        failed_prefix="base;patched;",
+        repair_base_prefix="base;",
+        repair_scope=Granularity.STMT,
+    )
+    ctx.rollback.open_group(Granularity.FUNC)
+    op = policy.next_action(ctx)
+    assert op.action == Action.ROLLBACK
+    assert op.rollback_scope == Granularity.STMT
+
+
+def test_stmt_stall_escalates_through_feedback_repair_loop() -> None:
+    policy = DefaultPolicy(DefaultPolicyConfig(
+        enable_feedback=True,
+        enable_rollback=True,
+        default_fail_scope=Granularity.STMT,
+        stmt_stall_max_retries_before_escalation=3,
+        feedback_default_mechanism=FeedbackMechanism.A,
+    ))
+
+    for i in range(3):
+        # VERIFY FAIL -> ROLLBACK STMT (stall retries 1, 2, 3)
+        ctx = _ctx(
+            prefix="bad;",
+            last_action=Action.VERIFY,
+            last_render_status=RenderStatus.OK,
+            last_outputs=_fail_outputs(scope=Granularity.STMT),
+            # First iteration: no repair context (initial failure).
+            # Later iterations: repair context from prior ROLLBACK.
+            failed_prefix="bad;" if i > 0 else None,
+            repair_base_prefix="base;" if i > 0 else None,
+            repair_scope=Granularity.STMT if i > 0 else None,
+        )
+        ctx.rollback.open_group(Granularity.FUNC)
+        ctx.rollback.open_group(Granularity.BLOCK)
+        op = policy.next_action(ctx)
+        assert op.action == Action.ROLLBACK
+        assert op.rollback_scope == Granularity.STMT, f"iteration {i}: expected STMT"
+
+        # After ROLLBACK -> FEEDBACK
+        ctx = _ctx(
+            prefix="base;",
+            last_action=Action.ROLLBACK,
+            failed_prefix="bad;",
+            repair_base_prefix="base;",
+            repair_scope=Granularity.STMT,
+        )
+        op = policy.next_action(ctx)
+        assert op.action == Action.FEEDBACK
+
+        ctx = _ctx(
+            pending_patch="still_bad;",
+            repair_base_prefix="base;",
+            repair_scope=Granularity.STMT,
+        )
+        op = policy.next_action(ctx)
+        assert op.action == Action.APPLY_PATCH
+
+        ctx = _ctx(
+            prefix="base;still_bad;",
+            last_action=Action.APPLY_PATCH,
+            repair_base_prefix="base;",
+            repair_scope=Granularity.STMT,
+        )
+        op = policy.next_action(ctx)
+        assert op.action == Action.VERIFY
+
+    # 4th VERIFY FAIL: stall should escalate to BLOCK
+    ctx = _ctx(
+        prefix="bad;",
+        last_action=Action.VERIFY,
+        last_render_status=RenderStatus.OK,
+        last_outputs=_fail_outputs(scope=Granularity.STMT),
+        failed_prefix="bad;",
+        repair_base_prefix="base;",
+        repair_scope=Granularity.STMT,
+    )
+    ctx.rollback.open_group(Granularity.FUNC)
+    ctx.rollback.open_group(Granularity.BLOCK)
+    op = policy.next_action(ctx)
+    assert op.action == Action.ROLLBACK
+    assert op.rollback_scope == Granularity.BLOCK
+
+
+def test_repair_schedule_survives_rollback_within_feedback_loop() -> None:
+    policy = DefaultPolicy(DefaultPolicyConfig(
+        enable_feedback=True,
+        enable_rollback=True,
+        feedback_default_mechanism=FeedbackMechanism.A,
+        feedback_max_a_rounds_per_key=2,
+    ))
+
+    # Initial VERIFY FAIL -> ROLLBACK (no repair context)
+    ctx = _ctx(
+        prefix="bad;",
+        last_action=Action.VERIFY,
+        last_render_status=RenderStatus.OK,
+        last_outputs=_fail_outputs(scope=Granularity.STMT),
+    )
+    ctx.rollback.open_group(Granularity.FUNC)
+    op = policy.next_action(ctx)
+    assert op.action == Action.ROLLBACK
+
+    # Two rounds of FEEDBACK A (exhausting A budget for this repair_key)
+    for _ in range(2):
+        # ROLLBACK / VERIFY FAIL -> FEEDBACK A
+        ctx = _ctx(
+            prefix="base;",
+            last_action=Action.ROLLBACK,
+            failed_prefix="bad;",
+            repair_base_prefix="base;",
+            repair_scope=Granularity.STMT,
+        )
+        op = policy.next_action(ctx)
+        assert op.action == Action.FEEDBACK
+
+        ctx = _ctx(
+            pending_patch="still_bad;",
+            repair_base_prefix="base;",
+            repair_scope=Granularity.STMT,
+        )
+        op = policy.next_action(ctx)
+        assert op.action == Action.APPLY_PATCH
+
+        ctx = _ctx(
+            prefix="base;still_bad;",
+            last_action=Action.APPLY_PATCH,
+            repair_base_prefix="base;",
+            repair_scope=Granularity.STMT,
+        )
+        op = policy.next_action(ctx)
+        assert op.action == Action.VERIFY
+
+        # VERIFY FAIL -> ROLLBACK (with stall tracking)
+        ctx = _ctx(
+            prefix="bad;",
+            last_action=Action.VERIFY,
+            last_render_status=RenderStatus.OK,
+            last_outputs=_fail_outputs(scope=Granularity.STMT),
+            failed_prefix="bad;",
+            repair_base_prefix="base;",
+            repair_scope=Granularity.STMT,
+        )
+        ctx.rollback.open_group(Granularity.FUNC)
+        op = policy.next_action(ctx)
+        assert op.action == Action.ROLLBACK
+
+    # After 2 A rounds exhausted + ROLLBACK, next FEEDBACK should be B
+    # (proves repair_key survived the ROLLBACK pop+push: schedule state
+    # remembers a_rounds=2, so A is exhausted and B is selected).
+    ctx = _ctx(
+        prefix="base;",
+        last_action=Action.ROLLBACK,
+        failed_prefix="bad;",
+        repair_base_prefix="base;",
+        repair_scope=Granularity.STMT,
+    )
+    op = policy.next_action(ctx)
+    assert op.action == Action.FEEDBACK
+    assert op.feedback_mechanism == FeedbackMechanism.B
 
 
 def test_default_policy_generate_boundary_triggers_verify() -> None:
@@ -467,7 +677,7 @@ def test_default_policy_feedback_starts_with_mechanism_a() -> None:
         last_action=Action.ROLLBACK,
         failed_prefix="bad;",
         repair_base_prefix="",
-        repair_scope=RollbackScope.STMT,
+        repair_scope=Granularity.STMT,
     )
 
     op = policy.next_action(ctx)
@@ -476,183 +686,79 @@ def test_default_policy_feedback_starts_with_mechanism_a() -> None:
     assert op.feedback_mechanism == FeedbackMechanism.A
 
 
-def test_default_policy_feedback_escalates_to_mechanism_b_after_no_progress() -> None:
-    policy = DefaultPolicy(DefaultPolicyConfig(max_repair_rounds=4))
-    generator = _EscalationFenceReopenGenerator()
 
-    # Given repeated failures in one repair key.
-    # When repair attempts make no progress.
-    # Then policy escalates from A to B.
-    run_dtv_loop(
-        generator=generator,
-        renderer=_AlwaysOkRenderer(),
-        oracles=[_AlwaysFailOracle()],
-        budget=Budget(gen_tokens_budget=32),
-        feedback_state=FeedbackState(),
-        rollback_manager=RollbackManager(),
-        policy=policy,
-        feedback_lang_config=RUST_FEEDBACK_LANG,
-        max_steps=16,
+def _do_verify_fail_rollback_feedback(policy, *, prefix="bad;", repair_base="",
+                                       expected_mechanism=None):
+    ctx = _ctx(
+        prefix=prefix,
+        last_action=Action.VERIFY,
+        last_render_status=RenderStatus.OK,
+        last_outputs=_fail_outputs(scope=Granularity.STMT),
     )
+    op = policy.next_action(ctx)
+    assert op.action == Action.ROLLBACK
 
-    assert generator.feedback_mechanisms[:3] == [
-        FeedbackMechanism.A,
-        FeedbackMechanism.A,
-        FeedbackMechanism.B,
-    ]
+    ctx = _ctx(
+        prefix=repair_base,
+        last_action=Action.ROLLBACK,
+        failed_prefix=prefix,
+        repair_base_prefix=repair_base,
+        repair_scope=Granularity.STMT,
+    )
+    op = policy.next_action(ctx)
+    assert op.action == Action.FEEDBACK
+    if expected_mechanism is not None:
+        assert op.feedback_mechanism == expected_mechanism
+    return op
 
 
 def test_default_policy_feedback_stays_on_b_per_key_by_default() -> None:
-    policy = DefaultPolicy(DefaultPolicyConfig(max_repair_rounds=4))
+    policy = DefaultPolicy(DefaultPolicyConfig(max_repair_rounds=6))
 
-    first_verify_fail_ctx = _ctx(
-        prefix="bad;",
-        last_action=Action.VERIFY,
-        last_render_status=RenderStatus.OK,
-        last_outputs=_fail_outputs(scope=RollbackScope.STMT),
+    # A exhausts its budget (max_a_rounds_per_key=2), then B takes over.
+    _do_verify_fail_rollback_feedback(policy, expected_mechanism=FeedbackMechanism.A)
+    _do_verify_fail_rollback_feedback(policy, expected_mechanism=FeedbackMechanism.A)
+    _do_verify_fail_rollback_feedback(policy, expected_mechanism=FeedbackMechanism.B)
+    _do_verify_fail_rollback_feedback(policy, expected_mechanism=FeedbackMechanism.B)
+
+    # New repair key resets to A.
+    _do_verify_fail_rollback_feedback(
+        policy, prefix="bad2;", repair_base="anchor2",
+        expected_mechanism=FeedbackMechanism.A,
     )
-    first_rollback_op = policy.next_action(first_verify_fail_ctx)
-    assert first_rollback_op.action == Action.ROLLBACK
-
-    first_feedback_ctx = _ctx(
-        prefix="",
-        last_action=Action.ROLLBACK,
-        failed_prefix="bad;",
-        repair_base_prefix="",
-        repair_scope=RollbackScope.STMT,
-    )
-    first_feedback_op = policy.next_action(first_feedback_ctx)
-    assert first_feedback_op.action == Action.FEEDBACK
-    assert first_feedback_op.feedback_mechanism == FeedbackMechanism.A
-
-    second_verify_fail_ctx = _ctx(
-        prefix="bad;",
-        last_action=Action.VERIFY,
-        last_render_status=RenderStatus.OK,
-        last_outputs=_fail_outputs(scope=RollbackScope.STMT),
-    )
-    second_rollback_op = policy.next_action(second_verify_fail_ctx)
-    assert second_rollback_op.action == Action.ROLLBACK
-
-    second_feedback_ctx = _ctx(
-        prefix="",
-        last_action=Action.ROLLBACK,
-        failed_prefix="bad;",
-        repair_base_prefix="",
-        repair_scope=RollbackScope.STMT,
-    )
-    second_feedback_op = policy.next_action(second_feedback_ctx)
-    assert second_feedback_op.action == Action.FEEDBACK
-    assert second_feedback_op.feedback_mechanism == FeedbackMechanism.B
-
-    third_verify_fail_ctx = _ctx(
-        prefix="bad;",
-        last_action=Action.VERIFY,
-        last_render_status=RenderStatus.OK,
-        last_outputs=_fail_outputs(scope=RollbackScope.STMT),
-    )
-    third_rollback_op = policy.next_action(third_verify_fail_ctx)
-    assert third_rollback_op.action == Action.ROLLBACK
-
-    third_feedback_ctx = _ctx(
-        prefix="",
-        last_action=Action.ROLLBACK,
-        failed_prefix="bad;",
-        repair_base_prefix="",
-        repair_scope=RollbackScope.STMT,
-    )
-    third_feedback_op = policy.next_action(third_feedback_ctx)
-    assert third_feedback_op.action == Action.FEEDBACK
-    assert third_feedback_op.feedback_mechanism == FeedbackMechanism.B
-
-
-    new_key_verify_fail_ctx = _ctx(
-        prefix="bad2;",
-        last_action=Action.VERIFY,
-        last_render_status=RenderStatus.OK,
-        last_outputs=_fail_outputs(scope=RollbackScope.STMT),
-    )
-    new_key_rollback_op = policy.next_action(new_key_verify_fail_ctx)
-    assert new_key_rollback_op.action == Action.ROLLBACK
-
-    new_key_feedback_ctx = _ctx(
-        prefix="",
-        last_action=Action.ROLLBACK,
-        failed_prefix="bad2;",
-        repair_base_prefix="anchor2",
-        repair_scope=RollbackScope.STMT,
-    )
-    new_key_feedback_op = policy.next_action(new_key_feedback_ctx)
-    assert new_key_feedback_op.action == Action.FEEDBACK
-    assert new_key_feedback_op.feedback_mechanism == FeedbackMechanism.A
 
 
 def test_default_policy_feedback_terminates_when_b_cap_is_reached() -> None:
     policy = DefaultPolicy(
         DefaultPolicyConfig(
-            max_repair_rounds=4,
+            max_repair_rounds=6,
             feedback_max_b_rounds_per_key=1,
         )
     )
 
-    first_verify_fail_ctx = _ctx(
+    # 2 A rounds (budget exhausted), then 1 B round (capped), then TERMINATE.
+    _do_verify_fail_rollback_feedback(policy, expected_mechanism=FeedbackMechanism.A)
+    _do_verify_fail_rollback_feedback(policy, expected_mechanism=FeedbackMechanism.A)
+    _do_verify_fail_rollback_feedback(policy, expected_mechanism=FeedbackMechanism.B)
+
+    ctx = _ctx(
         prefix="bad;",
         last_action=Action.VERIFY,
         last_render_status=RenderStatus.OK,
-        last_outputs=_fail_outputs(scope=RollbackScope.STMT),
+        last_outputs=_fail_outputs(scope=Granularity.STMT),
     )
-    first_rollback_op = policy.next_action(first_verify_fail_ctx)
-    assert first_rollback_op.action == Action.ROLLBACK
+    op = policy.next_action(ctx)
+    assert op.action == Action.ROLLBACK
 
-    first_feedback_ctx = _ctx(
+    ctx = _ctx(
         prefix="",
         last_action=Action.ROLLBACK,
         failed_prefix="bad;",
         repair_base_prefix="",
-        repair_scope=RollbackScope.STMT,
+        repair_scope=Granularity.STMT,
     )
-    first_feedback_op = policy.next_action(first_feedback_ctx)
-    assert first_feedback_op.action == Action.FEEDBACK
-    assert first_feedback_op.feedback_mechanism == FeedbackMechanism.A
-
-    second_verify_fail_ctx = _ctx(
-        prefix="bad;",
-        last_action=Action.VERIFY,
-        last_render_status=RenderStatus.OK,
-        last_outputs=_fail_outputs(scope=RollbackScope.STMT),
-    )
-    second_rollback_op = policy.next_action(second_verify_fail_ctx)
-    assert second_rollback_op.action == Action.ROLLBACK
-
-    second_feedback_ctx = _ctx(
-        prefix="",
-        last_action=Action.ROLLBACK,
-        failed_prefix="bad;",
-        repair_base_prefix="",
-        repair_scope=RollbackScope.STMT,
-    )
-    second_feedback_op = policy.next_action(second_feedback_ctx)
-    assert second_feedback_op.action == Action.FEEDBACK
-    assert second_feedback_op.feedback_mechanism == FeedbackMechanism.B
-
-    third_verify_fail_ctx = _ctx(
-        prefix="bad;",
-        last_action=Action.VERIFY,
-        last_render_status=RenderStatus.OK,
-        last_outputs=_fail_outputs(scope=RollbackScope.STMT),
-    )
-    third_rollback_op = policy.next_action(third_verify_fail_ctx)
-    assert third_rollback_op.action == Action.ROLLBACK
-
-    third_feedback_ctx = _ctx(
-        prefix="",
-        last_action=Action.ROLLBACK,
-        failed_prefix="bad;",
-        repair_base_prefix="",
-        repair_scope=RollbackScope.STMT,
-    )
-    third_feedback_op = policy.next_action(third_feedback_ctx)
-    assert third_feedback_op.action == Action.TERMINATE
+    op = policy.next_action(ctx)
+    assert op.action == Action.TERMINATE
 
 
 def test_default_policy_program_scope_escalates_to_b_even_when_failed_prefix_changes() -> None:
@@ -662,7 +768,7 @@ def test_default_policy_program_scope_escalates_to_b_even_when_failed_prefix_cha
         prefix="program_fail_v1",
         last_action=Action.VERIFY,
         last_render_status=RenderStatus.OK,
-        last_outputs=_fail_outputs(scope=RollbackScope.PROGRAM),
+        last_outputs=_fail_outputs(scope=Granularity.PROGRAM),
     )
     first_rollback_op = policy.next_action(first_verify_fail_ctx)
     assert first_rollback_op.action == Action.ROLLBACK
@@ -672,7 +778,7 @@ def test_default_policy_program_scope_escalates_to_b_even_when_failed_prefix_cha
         last_action=Action.ROLLBACK,
         failed_prefix="program_fail_v1",
         repair_base_prefix="",
-        repair_scope=RollbackScope.PROGRAM,
+        repair_scope=Granularity.PROGRAM,
     )
     first_feedback_op = policy.next_action(first_feedback_ctx)
     assert first_feedback_op.action == Action.FEEDBACK
@@ -682,7 +788,7 @@ def test_default_policy_program_scope_escalates_to_b_even_when_failed_prefix_cha
         prefix="program_fail_v2",
         last_action=Action.VERIFY,
         last_render_status=RenderStatus.OK,
-        last_outputs=_fail_outputs(scope=RollbackScope.PROGRAM),
+        last_outputs=_fail_outputs(scope=Granularity.PROGRAM),
     )
     second_rollback_op = policy.next_action(second_verify_fail_ctx)
     assert second_rollback_op.action == Action.ROLLBACK
@@ -692,7 +798,7 @@ def test_default_policy_program_scope_escalates_to_b_even_when_failed_prefix_cha
         last_action=Action.ROLLBACK,
         failed_prefix="program_fail_v2",
         repair_base_prefix="",
-        repair_scope=RollbackScope.PROGRAM,
+        repair_scope=Granularity.PROGRAM,
     )
     second_feedback_op = policy.next_action(second_feedback_ctx)
     assert second_feedback_op.action == Action.FEEDBACK
@@ -708,7 +814,7 @@ def test_default_policy_feedback_force_mechanism_b() -> None:
         last_action=Action.ROLLBACK,
         failed_prefix="bad;",
         repair_base_prefix="",
-        repair_scope=RollbackScope.STMT,
+        repair_scope=Granularity.STMT,
     )
 
     op = policy.next_action(ctx)
@@ -734,11 +840,11 @@ def test_default_policy_b_no_patch_escalates_to_rollback() -> None:
         prefix="bad;",
         last_action=Action.VERIFY,
         last_render_status=RenderStatus.OK,
-        last_outputs=_fail_outputs(scope=RollbackScope.STMT),
+        last_outputs=_fail_outputs(scope=Granularity.STMT),
     )
     rollback_op = policy.next_action(verify_fail_ctx)
     assert rollback_op.action == Action.ROLLBACK
-    assert rollback_op.rollback_scope == RollbackScope.STMT
+    assert rollback_op.rollback_scope == Granularity.STMT
 
     # After ROLLBACK -> first FEEDBACK(B) (b_no_patch not incremented; last_action=ROLLBACK)
     after_rollback_ctx = _ctx(
@@ -746,7 +852,7 @@ def test_default_policy_b_no_patch_escalates_to_rollback() -> None:
         last_action=Action.ROLLBACK,
         failed_prefix="bad;",
         repair_base_prefix="",
-        repair_scope=RollbackScope.STMT,
+        repair_scope=Granularity.STMT,
     )
     feedback_op = policy.next_action(after_rollback_ctx)
     assert feedback_op.action == Action.FEEDBACK
@@ -759,7 +865,7 @@ def test_default_policy_b_no_patch_escalates_to_rollback() -> None:
             last_action=Action.FEEDBACK,
             failed_prefix="bad;",
             repair_base_prefix="",
-            repair_scope=RollbackScope.STMT,
+            repair_scope=Granularity.STMT,
         )
         op = policy.next_action(no_patch_ctx)
         assert op.action == Action.FEEDBACK, f"expected FEEDBACK at no-patch round {i + 1}"
@@ -771,8 +877,8 @@ def test_default_policy_b_no_patch_escalates_to_rollback() -> None:
         last_action=Action.FEEDBACK,
         failed_prefix="bad;",
         repair_base_prefix="",
-        repair_scope=RollbackScope.STMT,
+        repair_scope=Granularity.STMT,
     )
     escalation_op = policy.next_action(final_no_patch_ctx)
     assert escalation_op.action == Action.ROLLBACK
-    assert escalation_op.rollback_scope == RollbackScope.STMT
+    assert escalation_op.rollback_scope == Granularity.STMT

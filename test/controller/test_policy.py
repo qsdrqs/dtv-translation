@@ -5,14 +5,14 @@ from dataclasses import dataclass
 from controller.loop import _effective_boundary_granularity, select_oracles_by_granularity
 from controller.policy import _select_fail_scope, DefaultPolicyConfig
 from core.budget import Budget
-from core.types import Artifact, ControllerState, Granularity, GroupStackFrame, OracleContext, OracleOutput, RollbackScope, Verdict
+from core.types import Artifact, ControllerState, Granularity, GroupStackFrame, OracleContext, OracleOutput, Verdict
 
 
 @dataclass
 class _FakeOracle:
     name: str
     required_granularity: Granularity
-    rollback_scope: RollbackScope = RollbackScope.STMT
+    rollback_scope: Granularity = Granularity.STMT
 
     def run(
         self,
@@ -82,10 +82,10 @@ def test_select_fail_scope_single_oracle_rollback_scope() -> None:
         OracleOutput(
             oracle_name="func_oracle",
             verdict=Verdict.FAIL,
-            rollback_scope=RollbackScope.FUNC,
+            rollback_scope=Granularity.FUNC,
         ),
     )
-    assert _select_fail_scope(config, outputs) == RollbackScope.FUNC
+    assert _select_fail_scope(config, outputs) == Granularity.FUNC
 
 
 def test_select_fail_scope_max_rollback_scope() -> None:
@@ -94,23 +94,23 @@ def test_select_fail_scope_max_rollback_scope() -> None:
         OracleOutput(
             oracle_name="stmt_oracle",
             verdict=Verdict.FAIL,
-            rollback_scope=RollbackScope.STMT,
+            rollback_scope=Granularity.STMT,
         ),
         OracleOutput(
             oracle_name="func_oracle",
             verdict=Verdict.FAIL,
-            rollback_scope=RollbackScope.FUNC,
+            rollback_scope=Granularity.FUNC,
         ),
     )
-    assert _select_fail_scope(config, outputs) == RollbackScope.FUNC
+    assert _select_fail_scope(config, outputs) == Granularity.FUNC
 
 
 def test_select_fail_scope_fallback_default() -> None:
-    config = DefaultPolicyConfig(default_fail_scope=RollbackScope.STMT)
+    config = DefaultPolicyConfig(default_fail_scope=Granularity.STMT)
     outputs = (
         OracleOutput(
             oracle_name="oracle_no_scope",
             verdict=Verdict.FAIL,
         ),
     )
-    assert _select_fail_scope(config, outputs) == RollbackScope.STMT
+    assert _select_fail_scope(config, outputs) == Granularity.STMT

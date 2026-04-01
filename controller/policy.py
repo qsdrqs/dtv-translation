@@ -11,11 +11,9 @@ from core.types import (
     Action,
     Artifact,
     FeedbackMechanism,
-    FeedbackMode,
     Granularity,
     OracleOutput,
     RenderStatus,
-    RollbackScope,
     StopReason,
     Verdict,
 )
@@ -30,7 +28,7 @@ class DefaultPolicyConfig:
     boundary_granularity: Granularity = Granularity.STMT
     eos_granularity: Granularity = Granularity.PROGRAM
     enable_rollback: bool = True
-    default_fail_scope: RollbackScope = RollbackScope.STMT
+    default_fail_scope: Granularity = Granularity.STMT
     stmt_stall_max_retries_before_escalation: int = 3
     enable_cdhr: bool = False
     enable_feedback: bool = True  # Controls both FEEDBACK and APPLY_PATCH.
@@ -38,12 +36,10 @@ class DefaultPolicyConfig:
     commit_when_no_oracle_selected: bool = False
     terminate_on_eos_and_pass: bool = True
     max_repair_rounds: int | None = None
-    feedback_mode: FeedbackMode = FeedbackMode.INLINE
     feedback_default_mechanism: FeedbackMechanism = FeedbackMechanism.A
     feedback_force_mechanism: FeedbackMechanism | None = None
-    feedback_scope_escalation: RollbackScope = RollbackScope.FUNC
+    feedback_scope_escalation: Granularity = Granularity.FUNC
     feedback_error_escalation_threshold: int = 3
-    feedback_no_progress_escalation_threshold: int = 1
     feedback_max_a_rounds_per_key: int = 2
     feedback_max_b_rounds_per_key: int | None = None
     feedback_max_b_no_patch_rounds: int = 3
@@ -56,9 +52,7 @@ class DefaultPolicyConfig:
 class _RepairScheduleState:
     a_rounds: int = 0
     b_rounds: int = 0
-    no_progress_count: int = 0
-    last_fail_signature: str | None = None
-    last_fail_scope: RollbackScope | None = None
+    last_fail_scope: Granularity | None = None
     last_error_count: int = 0
     locked_mechanism: FeedbackMechanism | None = None
     b_no_patch_rounds: int = 0
@@ -67,8 +61,7 @@ class _RepairScheduleState:
 @dataclass(frozen=True)
 class _FailSnapshot:
     failed_prefix: str
-    signature: str
-    scope: RollbackScope
+    scope: Granularity
     error_count: int
 
 
@@ -86,8 +79,8 @@ class DefaultPolicy(Policy):
 
     def __init__(self, config: DefaultPolicyConfig | None = None) -> None:
         self.config = config or DefaultPolicyConfig()
-        self._repair_rounds: dict[tuple[str, RollbackScope], int] = {}
-        self._repair_schedule: dict[tuple[str, RollbackScope], _RepairScheduleState] = {}
+        self._repair_rounds: dict[tuple[str, Granularity], int] = {}
+        self._repair_schedule: dict[tuple[str, Granularity], _RepairScheduleState] = {}
         self._pending_fail_snapshot: _FailSnapshot | None = None
         self._stmt_stall_key: tuple[str, tuple[Granularity, ...]] | None = None
         self._stmt_stall_retries: int = 0
@@ -110,6 +103,7 @@ class DefaultPolicy(Policy):
                 ctx.failed_prefix is not None
                 and ctx.repair_base_prefix is not None
                 and ctx.pending_patch is None
+                and ctx.last_action != Action.VERIFY
             ):
                 key = _repair_key(ctx)
                 if key is not None:
@@ -139,7 +133,6 @@ class DefaultPolicy(Policy):
                 self._record_mechanism_attempt(schedule_state, mechanism)
                 return ControllerOp(
                     Action.FEEDBACK,
-                    feedback_mode=self.config.feedback_mode,
                     feedback_mechanism=mechanism,
                 )
 
@@ -177,7 +170,6 @@ class DefaultPolicy(Policy):
                     scope = self._select_fail_scope(ctx)
                     self._pending_fail_snapshot = _FailSnapshot(
                         failed_prefix=ctx.state.prefix,
-                        signature=_fail_signature(ctx.last_outputs),
                         scope=scope,
                         error_count=_error_count(ctx.last_outputs),
                     )
@@ -215,11 +207,6 @@ class DefaultPolicy(Policy):
             return
         if snapshot.failed_prefix != ctx.failed_prefix:
             return
-        if schedule_state.last_fail_signature == snapshot.signature:
-            schedule_state.no_progress_count += 1
-        else:
-            schedule_state.no_progress_count = 0
-        schedule_state.last_fail_signature = snapshot.signature
         schedule_state.last_fail_scope = snapshot.scope
         schedule_state.last_error_count = snapshot.error_count
         self._pending_fail_snapshot = None
@@ -289,9 +276,9 @@ class DefaultPolicy(Policy):
         self._stmt_stall_key = None
         self._stmt_stall_retries = 0
 
-    def _select_fail_scope(self, ctx) -> RollbackScope:
+    def _select_fail_scope(self, ctx) -> Granularity:
         scope = _select_fail_scope(self.config, ctx.last_outputs)
-        if scope != RollbackScope.STMT:
+        if scope != Granularity.STMT:
             self._reset_stmt_stall_state()
             return scope
 
@@ -304,10 +291,10 @@ class DefaultPolicy(Policy):
 
         max_stmt_retries = max(0, self.config.stmt_stall_max_retries_before_escalation)
         if self._stmt_stall_retries <= max_stmt_retries:
-            return RollbackScope.STMT
+            return Granularity.STMT
         if _has_active_block(ctx):
-            return RollbackScope.BLOCK
-        return RollbackScope.FUNC
+            return Granularity.BLOCK
+        return Granularity.FUNC
 
     def select_oracles(
         self,
@@ -379,7 +366,7 @@ def _all_pass(outputs: tuple[OracleOutput, ...]) -> bool:
     return saw_pass
 
 
-def _select_fail_scope(config: DefaultPolicyConfig, outputs: tuple[OracleOutput, ...]) -> RollbackScope:
+def _select_fail_scope(config: DefaultPolicyConfig, outputs: tuple[OracleOutput, ...]) -> Granularity:
     fail_outputs = [o for o in outputs if o.verdict == Verdict.FAIL]
     scopes = [o.rollback_scope for o in fail_outputs if o.rollback_scope is not None]
     if scopes:
@@ -404,7 +391,7 @@ def _has_active_block(ctx) -> bool:
     return any(frame.kind == Granularity.BLOCK for frame in ctx.rollback.group_stack)
 
 
-def _repair_key(ctx) -> tuple[str, RollbackScope] | None:
+def _repair_key(ctx) -> tuple[str, Granularity] | None:
     if ctx.repair_base_prefix is None or ctx.repair_scope is None:
         return None
     return (ctx.repair_base_prefix, ctx.repair_scope)
@@ -412,7 +399,7 @@ def _repair_key(ctx) -> tuple[str, RollbackScope] | None:
 
 def _can_start_repair(
     config: DefaultPolicyConfig,
-    rounds: dict[tuple[str, RollbackScope], int],
+    rounds: dict[tuple[str, Granularity], int],
     ctx,
 ) -> bool:
     if not config.enable_feedback:
@@ -425,7 +412,7 @@ def _can_start_repair(
     return rounds.get(key, 0) < config.max_repair_rounds
 
 
-def _record_repair_round(rounds: dict[tuple[str, RollbackScope], int], ctx) -> None:
+def _record_repair_round(rounds: dict[tuple[str, Granularity], int], ctx) -> None:
     key = _repair_key(ctx)
     if key is None:
         return
@@ -445,23 +432,6 @@ def _error_count(outputs: tuple[OracleOutput, ...]) -> int:
     )
 
 
-def _fail_signature(outputs: tuple[OracleOutput, ...]) -> str:
-    lines: list[str] = []
-    for output in outputs:
-        if output.verdict != Verdict.FAIL:
-            continue
-        scope = output.rollback_scope.value if output.rollback_scope is not None else "none"
-        lines.append(f"oracle={output.oracle_name}|scope={scope}")
-        if not output.diagnostics:
-            lines.append("diag=(none)")
-            continue
-        for diag in output.diagnostics:
-            severity = diag.severity.strip().lower()
-            code = diag.error_code or ""
-            message = " ".join(diag.message.split())
-            lines.append(f"diag={severity}|{code}|{message}")
-    return "\n".join(lines)
-
 
 def _should_escalate_to_b(
     config: DefaultPolicyConfig,
@@ -470,8 +440,6 @@ def _should_escalate_to_b(
     # Escalation applies after at least one A round in the same repair key.
     if schedule_state.a_rounds == 0:
         return False
-    if schedule_state.no_progress_count >= config.feedback_no_progress_escalation_threshold:
-        return True
     if (
         schedule_state.last_fail_scope is not None
         and schedule_state.last_fail_scope >= config.feedback_scope_escalation
