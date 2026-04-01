@@ -1428,7 +1428,7 @@ class _DualHintPolicy:
 
 
 def test_dual_hint_block_survives_stmt_repair_cycle() -> None:
-    generator = _TrackingSequenceGenerator(
+    generator = _FencedTrackingGenerator(
         [
             "bad1\n",       # step 0: initial gen
             "fix1\n",       # step 3: feedback patch for hint1
@@ -1490,14 +1490,13 @@ def test_dual_hint_block_survives_stmt_repair_cycle() -> None:
     assert last_commit.oracle_outputs is not None
     assert all(o.verdict == Verdict.PASS for o in last_commit.oracle_outputs)
 
-    # Step 10 FEEDBACK(A) snippet must include "fix1" (committed earlier
-    # inside the BLOCK region), not just "bad2" (the latest STMT failure).
-    # seen_assistant_messages[3] is the 4th generate_step call (step 10 FEEDBACK).
     feedback_hint2_prompt = generator.seen_assistant_messages[3]
     snippet_start = feedback_hint2_prompt.index("failed snippet:")
     snippet_section = feedback_hint2_prompt[snippet_start:]
-    assert "fix1" in snippet_section
     assert "bad2" in snippet_section
+    assert "fix1" not in snippet_section
+    block_context = feedback_hint2_prompt[:snippet_start]
+    assert "fix1" in block_context
 
 
 def test_stmt_failure_lifted_to_func_persists_feedback_through_stmt_commit() -> None:
