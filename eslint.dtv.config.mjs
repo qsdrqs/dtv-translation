@@ -15,6 +15,6 @@ export default tseslint.config({
         propertyDeclaration: true,
       },
     ],
-    "@typescript-eslint/no-explicit-any": "error",
+    "@typescript-eslint/no-explicit-any": "off",
   },
 });

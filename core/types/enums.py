@@ -69,11 +69,6 @@ class Action(str, Enum):
     TERMINATE = "terminate"
 
 
-class FeedbackMode(str, Enum):
-    INLINE = "inline"
-    FENCED = "fenced"
-
-
 class FeedbackMechanism(str, Enum):
     A = "a"
     B = "b"
@@ -82,6 +77,3 @@ class FeedbackMechanism(str, Enum):
 class GenerationChannel(str, Enum):
     CONTINUATION = "continuation"
     PATCH = "patch"
-
-
-RollbackScope = Granularity

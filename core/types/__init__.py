@@ -15,12 +15,10 @@ from .diff_testing import (
 from .enums import (
     Action,
     FeedbackMechanism,
-    FeedbackMode,
     GenerationChannel,
     Granularity,
     GroupEventAction,
     RenderStatus,
-    RollbackScope,
     Verdict,
 )
 from .generation import GenerateContext, GenerateMessage, GenerateResult, StopReason
@@ -34,7 +32,6 @@ __all__ = [
     "Diagnostic",
     "DiagnosticSpan",
     "FeedbackMechanism",
-    "FeedbackMode",
     "GenerationChannel",
     "ExecutionResult",
     "ExecutionTraceEvent",
@@ -50,7 +47,6 @@ __all__ = [
     "OracleOutput",
     "RenderResult",
     "RenderStatus",
-    "RollbackScope",
     "StopReason",
     "TestCase",
     "TraceEvent",

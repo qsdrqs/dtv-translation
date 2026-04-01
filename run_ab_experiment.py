@@ -51,7 +51,6 @@ from core.types import (
     GenerateMessage,
     Granularity,
     RenderStatus,
-    RollbackScope,
     TestCase,
     TraceEvent,
     TranslationSample,
@@ -62,7 +61,7 @@ from feedback.formatter import RepairFeedbackFormatConfig
 from rollback.manager import RollbackManager
 from transformers import PreTrainedTokenizerBase, StoppingCriteriaList
 
-# ── Constants ──────────────────────────────────────────────────────────────────
+# -- Constants -----------------------------------------------------------------
 
 MODEL_NAME = "Qwen/Qwen3-4B-Instruct-2507"
 OUTPUT_TOKEN_CAP = 6144
@@ -86,7 +85,7 @@ DTV_CONFIG = DefaultPolicyConfig(
     boundary_granularity=Granularity.STMT,
     eos_granularity=Granularity.PROGRAM,
     enable_rollback=True,
-    default_fail_scope=RollbackScope.STMT,
+    default_fail_scope=Granularity.STMT,
     enable_feedback=True,
     repair_verify_granularity=Granularity.STMT,
 )
@@ -98,7 +97,7 @@ NAIVE_CONFIG = DefaultPolicyConfig(
     boundary_granularity=Granularity.STMT,
     eos_granularity=Granularity.PROGRAM,
     enable_rollback=True,
-    default_fail_scope=RollbackScope.PROGRAM,
+    default_fail_scope=Granularity.PROGRAM,
     enable_feedback=True,
     repair_verify_granularity=Granularity.PROGRAM,
 )
@@ -525,7 +524,7 @@ def run_single(
             rollback_manager=rollback_manager,
             policy=policy,
             feedback_lang_config=RUST_FEEDBACK_LANG,
-            repair_feedback_format_config=RepairFeedbackFormatConfig(include_failed_snippet=False),
+            repair_feedback_format_config=RepairFeedbackFormatConfig(include_failed_snippet=True),
             max_steps=MAX_STEPS,
             max_new_length=MAX_NEW_LENGTH,
             prompt_prefix=prompt,
