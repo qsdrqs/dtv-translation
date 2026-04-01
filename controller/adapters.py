@@ -85,6 +85,9 @@ class GeneratorAdapter(Generator):
             self._fence_parser.restore(shared_state)
         self._warning_emitted = state.warning_emitted
 
+    def set_stop_on_fence_open(self, enabled: bool) -> None:
+        self.backend.set_stop_on_fence_open(enabled)
+
     def generate_step(self, context: GenerateContext) -> GenerateResult:
         logger.info(
             "generate_step: steps=%s extract_fence=%s max_new_length=%s",

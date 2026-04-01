@@ -53,6 +53,12 @@ class QwenGeneratorBackend(GeneratorBackend):
             if callable(setter):
                 setter(channel)
 
+    def set_stop_on_fence_open(self, enabled: bool) -> None:
+        for criteria in self.stop_criteria:
+            setter = getattr(criteria, "set_stop_on_fence_open", None)
+            if callable(setter):
+                setter(enabled)
+
     def _build_prompt(self, context: GenerateContext) -> str:
         if not context.messages:
             return ""

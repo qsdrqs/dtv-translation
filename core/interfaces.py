@@ -12,7 +12,6 @@ from core.types import (
     OracleContext,
     OracleOutput,
     RenderResult,
-    RollbackScope,
 )
 
 
@@ -32,6 +31,9 @@ class Generator(Protocol):
     def restore_output_extractor_state(self, state: OutputExtractorState) -> None:
         ...
 
+    def set_stop_on_fence_open(self, enabled: bool) -> None:
+        ...
+
 
 class Renderer(Protocol):
     def try_render(self, prefix: str) -> RenderResult:
@@ -42,7 +44,7 @@ class Oracle(Protocol):
     """Deterministic verifier; raise on tool/infra failures instead of returning a verdict."""
     name: str
     required_granularity: Granularity
-    rollback_scope: RollbackScope
+    rollback_scope: Granularity
 
     def run(self, state: ControllerState, artifact: Artifact, context: OracleContext) -> OracleOutput:
         ...

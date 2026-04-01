@@ -47,6 +47,9 @@ class GeneratorBackend(ABC):
     def set_generation_channel(self, channel: GenerationChannel) -> None:
         _ = channel
 
+    def set_stop_on_fence_open(self, enabled: bool) -> None:
+        _ = enabled
+
     @abstractmethod
     def generate_step(self, context: GenerateContext) -> GenerateResult:
         raise NotImplementedError

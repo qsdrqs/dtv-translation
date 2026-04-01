@@ -132,6 +132,7 @@ class DTVStoppingCriteria(StoppingCriteria):
         self._parser_epoch = fence_parser.epoch if fence_parser is not None else None
         self._generation_channel = GenerationChannel.CONTINUATION
         self._feedback_fence_parser = FeedbackFenceStreamParser()
+        self._stop_on_fence_open = False
 
     def _reset_stream_state(self) -> None:
         self._calls = 0
@@ -149,6 +150,9 @@ class DTVStoppingCriteria(StoppingCriteria):
         self._prompt_token_count = prompt_token_count
         self._last_token_count = prompt_token_count
         self._calls = 0
+
+    def set_stop_on_fence_open(self, enabled: bool) -> None:
+        self._stop_on_fence_open = enabled
 
     def set_generation_channel(self, generation_channel: GenerationChannel | str) -> None:
         next_channel = GenerationChannel(generation_channel)
@@ -193,6 +197,8 @@ class DTVStoppingCriteria(StoppingCriteria):
                     self._code_text += inside_piece
             if self.fence_parser.state != FenceState.INSIDE:
                 return TORCH_FALSE
+            if self._stop_on_fence_open:
+                return TORCH_TRUE
             stripped = self._code_text.rstrip()
         else:
             decoded = self.tokenizer.decode(input_ids[0], skip_special_tokens=True)
