@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from collections.abc import Sequence
 
-from core.types import OracleOutput, RollbackScope, Verdict
+from core.types import OracleOutput, Granularity, Verdict
 
 
 _ERROR_LEVELS = {"error", "fatal"}
@@ -11,8 +11,8 @@ _ERROR_LEVELS = {"error", "fatal"}
 
 def _scope_for_output(
     output: OracleOutput,
-    fallback_scope: RollbackScope | None,
-) -> RollbackScope:
+    fallback_scope: Granularity | None,
+) -> Granularity:
     if output.rollback_scope is not None:
         return output.rollback_scope
     if fallback_scope is not None:
@@ -24,7 +24,7 @@ def _scope_for_output(
 
 def _copy_with_filtered_diagnostics(
     output: OracleOutput,
-    scope: RollbackScope,
+    scope: Granularity,
 ) -> OracleOutput | None:
     filtered = tuple(diag for diag in output.diagnostics if _is_error_level(diag.severity))
     if not filtered:
@@ -44,12 +44,12 @@ class FeedbackState:
     max_items: int = 8  # Cap on stored messages.
     items: list[str] = field(default_factory=list)
     recent_outputs: list[OracleOutput] = field(default_factory=list)
-    _active_outputs: dict[tuple[str, RollbackScope], OracleOutput] = field(
+    _active_outputs: dict[tuple[str, Granularity], OracleOutput] = field(
         default_factory=dict,
         init=False,
         repr=False,
     )
-    _scope_anchor_offsets: dict[RollbackScope, int] = field(
+    _scope_anchor_offsets: dict[Granularity, int] = field(
         default_factory=dict,
         init=False,
         repr=False,
@@ -58,7 +58,7 @@ class FeedbackState:
     def on_verify(
         self,
         outputs: list[OracleOutput],
-        selected_scope: RollbackScope | None = None,
+        selected_scope: Granularity | None = None,
     ) -> None:
         for output in outputs:
             scope = _scope_for_output(output, selected_scope)
@@ -76,13 +76,13 @@ class FeedbackState:
         self._prune_scope_anchors()
         self._refresh_views()
 
-    def on_rollback(self, selected_scope: RollbackScope) -> None:
+    def on_rollback(self, selected_scope: Granularity) -> None:
         _ = selected_scope
 
     def bind_failures_to_scope(
         self,
         outputs: Sequence[OracleOutput],
-        selected_scope: RollbackScope,
+        selected_scope: Granularity,
     ) -> None:
         updated = False
         for output in outputs:
@@ -95,15 +95,29 @@ class FeedbackState:
             filtered_output = _copy_with_filtered_diagnostics(output, owner_scope)
             if filtered_output is None:
                 raise ValueError("FAIL output has no error/fatal diagnostics")
-            self._drop_oracle_entries(output.oracle_name)
+            self._drop_oracle_entries(output.oracle_name, owner_scope)
             self._active_outputs[(output.oracle_name, owner_scope)] = filtered_output
             updated = True
         if not updated:
-            return
+            # Promote existing narrower-scope entries to selected_scope
+            # (rollback escalation: STMT repair failed, escalating to FUNC).
+            promote_keys = [
+                key for key in self._active_outputs
+                if key[1] < selected_scope
+            ]
+            for key in promote_keys:
+                oracle_name, _ = key
+                output = self._active_outputs.pop(key)
+                promoted = _copy_with_filtered_diagnostics(output, selected_scope)
+                if promoted is not None:
+                    self._active_outputs[(oracle_name, selected_scope)] = promoted
+                    updated = True
+            if not updated:
+                return
         self._prune_scope_anchors()
         self._refresh_views()
 
-    def on_commit(self, committed_scope: RollbackScope | None) -> None:
+    def on_commit(self, committed_scope: Granularity | None) -> None:
         if committed_scope is None:
             return
         stale_keys = [
@@ -151,7 +165,7 @@ class FeedbackState:
     def active_snapshot(self) -> tuple[OracleOutput, ...]:
         return tuple(self._sorted_active_outputs())
 
-    def active_snapshot_for_scope(self, scope: RollbackScope) -> tuple[OracleOutput, ...]:
+    def active_snapshot_for_scope(self, scope: Granularity) -> tuple[OracleOutput, ...]:
         outputs = [
             output
             for output in self._sorted_active_outputs()
@@ -161,11 +175,11 @@ class FeedbackState:
 
     def scoped_active_snapshot(
         self,
-    ) -> tuple[tuple[RollbackScope, int | None, tuple[OracleOutput, ...]], ...]:
-        grouped: dict[RollbackScope, list[OracleOutput]] = {}
+    ) -> tuple[tuple[Granularity, int | None, tuple[OracleOutput, ...]], ...]:
+        grouped: dict[Granularity, list[OracleOutput]] = {}
         for (_, scope), output in self._active_outputs.items():
             grouped.setdefault(scope, []).append(output)
-        rows: list[tuple[RollbackScope, int | None, tuple[OracleOutput, ...]]] = []
+        rows: list[tuple[Granularity, int | None, tuple[OracleOutput, ...]]] = []
         for scope, outputs in grouped.items():
             rows.append(
                 (
@@ -177,13 +191,21 @@ class FeedbackState:
         rows.sort(key=lambda item: item[0], reverse=True)
         return tuple(rows)
 
-    def set_scope_anchor(self, scope: RollbackScope, code_offset: int) -> None:
+    def set_scope_anchor(self, scope: Granularity, code_offset: int) -> None:
         if code_offset < 0:
             raise ValueError("code_offset must be >= 0")
         self._scope_anchor_offsets[scope] = code_offset
 
-    def _drop_oracle_entries(self, oracle_name: str) -> None:
-        stale_keys = [key for key in self._active_outputs if key[0] == oracle_name]
+    def _drop_oracle_entries(
+        self,
+        oracle_name: str,
+        max_scope: Granularity,
+    ) -> None:
+        stale_keys = [
+            key
+            for key in self._active_outputs
+            if key[0] == oracle_name and key[1] <= max_scope
+        ]
         for key in stale_keys:
             del self._active_outputs[key]
 
@@ -216,14 +238,14 @@ def _is_error_level(severity: str) -> bool:
 
 
 def _active_scopes(
-    active_outputs: dict[tuple[str, RollbackScope], OracleOutput],
-) -> set[RollbackScope]:
+    active_outputs: dict[tuple[str, Granularity], OracleOutput],
+) -> set[Granularity]:
     return {scope for _, scope in active_outputs}
 
 
 def _prune_anchor_offsets(
-    active_outputs: dict[tuple[str, RollbackScope], OracleOutput],
-    anchor_offsets: dict[RollbackScope, int],
+    active_outputs: dict[tuple[str, Granularity], OracleOutput],
+    anchor_offsets: dict[Granularity, int],
 ) -> None:
     scopes = _active_scopes(active_outputs)
     stale_scopes = [scope for scope in anchor_offsets if scope not in scopes]

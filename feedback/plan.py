@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from core.types import FeedbackMechanism, FeedbackMode, GenerationChannel
+from core.llm_output import AssistantContent, FenceState
+from core.types import Granularity
+from core.types import FeedbackMechanism, GenerationChannel
 from feedback.formatter import RepairFeedbackFormatConfig, render_repair_feedback
-from core.types import RollbackScope
 from feedback.language import FeedbackLanguageConfig
 from feedback.repair_context import RepairContext
 
@@ -19,30 +20,30 @@ _CONSTRAINTS = (
 @dataclass(frozen=True)
 class FeedbackPlan:
     mechanism: FeedbackMechanism
-    mode: FeedbackMode
     channel: GenerationChannel
     prompt: str
+    response_prefix: str | AssistantContent | None = None
+    post_fence_injection: str | None = None
 
 
 def build_feedback_plan(
     *,
     mechanism: FeedbackMechanism,
-    requested_mode: FeedbackMode | None,
     repair_context: RepairContext,
     repair_feedback_format_config: RepairFeedbackFormatConfig | None,
     lang_config: FeedbackLanguageConfig,
 ) -> FeedbackPlan:
     if mechanism == FeedbackMechanism.B:
+        diff_injection = _render_minus_prefill(repair_context.failed_snippet) + "+ "
         return FeedbackPlan(
             mechanism=mechanism,
-            mode=FeedbackMode.FENCED,
             channel=GenerationChannel.PATCH,
-            prompt=render_feedback_prompt(repair_context, lang_config),
+            prompt=render_feedback_prompt(repair_context, lang_config, use_stmt_diff=True),
+            response_prefix=None,
+            post_fence_injection=diff_injection,
         )
-    mode = requested_mode or FeedbackMode.INLINE
     return FeedbackPlan(
         mechanism=mechanism,
-        mode=mode,
         channel=GenerationChannel.CONTINUATION,
         prompt=render_repair_feedback(repair_context, format_config=repair_feedback_format_config),
     )
@@ -51,12 +52,20 @@ def build_feedback_plan(
 def render_feedback_prompt(
     repair_context: RepairContext,
     lang_config: FeedbackLanguageConfig,
+    *,
+    use_stmt_diff: bool = False,
 ) -> str:
     lang = lang_config.name
     fence_tag = max(lang_config.fence_tags, key=len)
     goal = f"Produce a minimal {lang} patch that resolves the listed failures."
     diagnostics_block = _render_diagnostics(repair_context)
-    constraints_block = "\n".join(f"- {line}" for line in _CONSTRAINTS)
+    constraints: list[str] = list(_CONSTRAINTS)
+    if use_stmt_diff:
+        constraints.extend([
+            "Return a unified diff patch for the failed snippet.",
+            'Use "-" lines for the current failing snippet and "+" lines for the replacement snippet.',
+        ])
+    constraints_block = "\n".join(f"- {line}" for line in constraints)
     parser_error_section = ""
     if repair_context.parser_error_context:
         parser_error_section = f"""
@@ -65,6 +74,9 @@ Previous parse error:
 - {repair_context.parser_error_context}"""
     scope_rules = _scope_rules(repair_context.repair_scope, lang_config)
     scope_rules_block = "\n".join(f"- {rule}" for rule in scope_rules)
+    output_contract = f"Return exactly one {lang} code block:"
+    if use_stmt_diff:
+        output_contract = f"Return exactly one {lang} code block containing the unified diff patch:"
     return f"""The previous generated next code snippet was:
 
 ```
@@ -87,11 +99,37 @@ scope rules:
 {scope_rules_block}
 
 output contract:
-Return exactly one {lang} code block:
+{output_contract}
 ```{fence_tag}
 <Your patch here>
 ```
 """
+
+
+def _build_response_prefix(
+    repair_context: RepairContext,
+    lang_config: FeedbackLanguageConfig,
+    use_stmt_diff: bool,
+) -> AssistantContent:
+    if not use_stmt_diff:
+        return AssistantContent.empty()
+    fence_tag = max(lang_config.fence_tags, key=len)
+    diff_lines = _render_minus_prefill(repair_context.failed_snippet)
+
+    # append a single `+` line to guide the model towards producing a diff
+    diff_lines += "+ "
+    return AssistantContent(
+        fence_lang=fence_tag,
+        code=diff_lines,
+        fence_state=FenceState.INSIDE,
+    )
+
+
+def _render_minus_prefill(snippet: str) -> str:
+    lines = snippet.splitlines()
+    if not lines:
+        return "-\n"
+    return "".join(f"- {line}\n" for line in lines)
 
 
 def _render_diagnostics(repair_context: RepairContext) -> str:
@@ -109,22 +147,22 @@ def _render_diagnostics(repair_context: RepairContext) -> str:
 
 
 def _scope_rules(
-    scope: RollbackScope,
+    scope: Granularity,
     lang_config: FeedbackLanguageConfig,
 ) -> tuple[str, ...]:
     lang = lang_config.name
     example = lang_config.example_function_wrapper
-    if scope == RollbackScope.STMT:
+    if scope == Granularity.STMT:
         return (
             "Replace only the failed snippet.",
             f"Do not return full function wrappers (for example, {example}).",
         )
-    if scope == RollbackScope.BLOCK:
+    if scope == Granularity.BLOCK:
         return (
             "Patch only the current block.",
             "Do not emit unrelated outer function/module code.",
         )
-    if scope == RollbackScope.FUNC:
+    if scope == Granularity.FUNC:
         return (
             "Patch only the current function.",
             "Do not emit unrelated module-level declarations.",

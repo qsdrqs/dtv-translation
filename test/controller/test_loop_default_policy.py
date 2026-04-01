@@ -21,7 +21,7 @@ from core.types import (
     OracleOutput,
     RenderResult,
     RenderStatus,
-    RollbackScope,
+    Granularity,
     StopReason,
     Verdict,
 )
@@ -173,13 +173,21 @@ class _MechanismBInsideGenerator:
             warning_emitted=False,
         )
         self._generated_once = False
+        self._feedback_phase = 0
         self.feedback_states: list[FenceState] = []
 
     def generate_step(self, context: GenerateContext) -> GenerateResult:
         if self._is_mechanism_b_feedback_context(context):
             self.feedback_states.append(self._extractor_state.extract.state)
+            self._feedback_phase += 1
+            if self._feedback_phase == 1:
+                return GenerateResult(
+                    delta_text="Let me reason about this.\n```rust\n",
+                    delta_tokens=1,
+                    stop_reason=StopReason(kind="boundary"),
+                )
             return GenerateResult(
-                delta_text="```rust\ngood;\n```",
+                delta_text="good;\n```\n",
                 delta_tokens=1,
                 stop_reason=StopReason(kind="boundary"),
             )
@@ -282,12 +290,12 @@ class _SequenceOracle:
         *,
         name: str = "oracle",
         required_granularity: Granularity = Granularity.STMT,
-        rollback_scope: RollbackScope | None = None,
+        rollback_scope: Granularity | None = None,
     ) -> None:
         self.verdicts = verdicts
         self.name = name
         self.required_granularity = required_granularity
-        self.rollback_scope = rollback_scope if rollback_scope is not None else RollbackScope(required_granularity.value)
+        self.rollback_scope = rollback_scope if rollback_scope is not None else Granularity(required_granularity.value)
         self.idx = 0
 
     def run(self, state, artifact, context) -> OracleOutput:
@@ -530,7 +538,7 @@ def test_default_policy_force_b_feedback_flows_through_loop() -> None:
     feedback_events = [event for event in trace if event.action == Action.FEEDBACK]
     assert len(feedback_events) == 1
     assert feedback_events[0].notes == "feedback_mechanism=b"
-    assert generator.feedback_states == [FenceState.INSIDE]
+    assert generator.feedback_states == [FenceState.INSIDE, FenceState.INSIDE]
     assert final_prefix == "good;"
 
 
@@ -551,68 +559,95 @@ def test_default_policy_inline_feedback_restores_extractor_before_generation() -
     assert final_prefix == "good;"
 
 
-def test_default_policy_e2e_stmt_stall_escalates_to_block_scope() -> None:
-    generator = _SequenceGenerator([
-        _Step("ok;", StopReason(kind="boundary")),
-        _Step("bad1;", StopReason(kind="boundary")),
-        _Step("bad2;", StopReason(kind="boundary")),
-        _Step("bad3;", StopReason(kind="boundary")),
-        _Step("bad4;", StopReason(kind="boundary")),
-    ])
-    renderer = _StaticGroupStackRenderer(
-        (
-            GroupStackFrame(kind=Granularity.FUNC),
-            GroupStackFrame(kind=Granularity.BLOCK),
-        )
-    )
-    oracles = [_SequenceOracle([Verdict.PASS, Verdict.FAIL, Verdict.FAIL, Verdict.FAIL, Verdict.FAIL])]
-    policy = DefaultPolicy(
-        DefaultPolicyConfig(
-            enable_feedback=False,
-            stmt_stall_max_retries_before_escalation=3,
-        )
-    )
+class _AlwaysBadFeedbackGenerator:
+    """First call returns 'ok;' (for COMMIT checkpoint), all subsequent return 'bad;'."""
 
-    _, trace = _run_loop(generator, renderer, oracles, policy, max_steps=20)
-    print(f"\n[block escalation]\n{_format_trace_for_observation(trace)}")
+    def __init__(self) -> None:
+        snapshot = FenceParserSnapshot(state=FenceState.OUTSIDE, saw_fence=False)
+        self._extractor_state = OutputExtractorState(
+            segment=snapshot, extract=snapshot, shared=snapshot, warning_emitted=False,
+        )
+        self._first = True
 
+    def generate_step(self, context: GenerateContext) -> GenerateResult:
+        if self._first:
+            self._first = False
+            inside = FenceParserSnapshot(state=FenceState.INSIDE, saw_fence=True)
+            self._extractor_state = OutputExtractorState(
+                segment=inside, extract=inside, shared=inside, warning_emitted=False,
+            )
+            return GenerateResult(
+                delta_text="ok;",
+                delta_tokens=1,
+                stop_reason=StopReason(kind="boundary"),
+                assistant_delta=AssistantContent(
+                    fence_lang="rust", code="ok;", fence_state=FenceState.INSIDE,
+                ),
+            )
+        return GenerateResult(
+            delta_text="bad;",
+            delta_tokens=1,
+            stop_reason=StopReason(kind="boundary"),
+        )
+
+    def reset_output_extractor(self) -> None:
+        return None
+
+    def get_output_extractor_state(self) -> FenceState:
+        return self._extractor_state.extract.state
+
+    def capture_output_extractor_state(self) -> OutputExtractorState:
+        return self._extractor_state
+
+    def restore_output_extractor_state(self, state: OutputExtractorState) -> None:
+        self._extractor_state = state
+
+
+def _run_stall_escalation_test(group_stack, expected_escalation_scope):
+    generator = _AlwaysBadFeedbackGenerator()
+    renderer = _StaticGroupStackRenderer(group_stack)
+    oracles = [_SequenceOracle([Verdict.PASS] + [Verdict.FAIL] * 20)]
+    policy = DefaultPolicy(DefaultPolicyConfig(
+        enable_feedback=True,
+        stmt_stall_max_retries_before_escalation=3,
+        feedback_max_a_rounds_per_key=10,
+    ))
+    budget = Budget(gen_tokens_budget=32)
+    _, trace = run_dtv_loop(
+        generator=generator,
+        renderer=renderer,
+        oracles=oracles,
+        budget=budget,
+        feedback_state=FeedbackState(),
+        rollback_manager=RollbackManager(),
+        policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
+        max_steps=30,
+    )
     actions = [event.action for event in trace]
     assert actions[:3] == [Action.GENERATE, Action.VERIFY, Action.COMMIT]
     rollback_scopes = [event.rollback_scope for event in trace if event.action == Action.ROLLBACK]
-    assert rollback_scopes[:4] == [
-        RollbackScope.STMT,
-        RollbackScope.STMT,
-        RollbackScope.STMT,
-        RollbackScope.BLOCK,
-    ]
+    assert len(rollback_scopes) >= 4, f"expected >= 4 rollbacks, got {len(rollback_scopes)}"
+    assert rollback_scopes[:3] == [Granularity.STMT] * 3
+    assert rollback_scopes[3] == expected_escalation_scope
+
+    # FEEDBACK and APPLY_PATCH must appear (production path, not no-feedback path).
+    assert Action.FEEDBACK in actions
+    assert Action.APPLY_PATCH in actions
+
+
+def test_default_policy_e2e_stmt_stall_escalates_to_block_scope() -> None:
+    _run_stall_escalation_test(
+        group_stack=(
+            GroupStackFrame(kind=Granularity.FUNC),
+            GroupStackFrame(kind=Granularity.BLOCK),
+        ),
+        expected_escalation_scope=Granularity.BLOCK,
+    )
 
 
 def test_default_policy_e2e_stmt_stall_escalates_to_func_without_block_scope() -> None:
-    generator = _SequenceGenerator([
-        _Step("ok;", StopReason(kind="boundary")),
-        _Step("bad1;", StopReason(kind="boundary")),
-        _Step("bad2;", StopReason(kind="boundary")),
-        _Step("bad3;", StopReason(kind="boundary")),
-        _Step("bad4;", StopReason(kind="boundary")),
-    ])
-    renderer = _StaticGroupStackRenderer((GroupStackFrame(kind=Granularity.FUNC),))
-    oracles = [_SequenceOracle([Verdict.PASS, Verdict.FAIL, Verdict.FAIL, Verdict.FAIL, Verdict.FAIL])]
-    policy = DefaultPolicy(
-        DefaultPolicyConfig(
-            enable_feedback=False,
-            stmt_stall_max_retries_before_escalation=3,
-        )
+    _run_stall_escalation_test(
+        group_stack=(GroupStackFrame(kind=Granularity.FUNC),),
+        expected_escalation_scope=Granularity.FUNC,
     )
-
-    _, trace = _run_loop(generator, renderer, oracles, policy, max_steps=20)
-    print(f"\n[func fallback]\n{_format_trace_for_observation(trace)}")
-
-    actions = [event.action for event in trace]
-    assert actions[:3] == [Action.GENERATE, Action.VERIFY, Action.COMMIT]
-    rollback_scopes = [event.rollback_scope for event in trace if event.action == Action.ROLLBACK]
-    assert rollback_scopes[:4] == [
-        RollbackScope.STMT,
-        RollbackScope.STMT,
-        RollbackScope.STMT,
-        RollbackScope.FUNC,
-    ]

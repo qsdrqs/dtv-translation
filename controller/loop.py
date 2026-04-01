@@ -18,16 +18,15 @@ from core.types import (
     Artifact,
     ControllerState,
     FeedbackMechanism,
-    FeedbackMode,
     GenerateContext,
     GenerateMessage,
+    GenerateResult,
     GenerationChannel,
     Granularity,
     GroupStackFrame,
     OracleContext,
     OracleOutput,
     RenderStatus,
-    RollbackScope,
     StopReason,
     TraceEvent,
     Verdict,
@@ -36,7 +35,7 @@ from feedback.annotation import annotate_snippet
 from feedback.formatter import RepairFeedbackFormatConfig, render_repair_feedback
 from feedback.feedback import FeedbackState
 from feedback.language import FeedbackLanguageConfig
-from feedback.output_parser import parse_feedback_output, validate_patch_scope
+from feedback.output_parser import parse_diff_feedback_output, parse_feedback_output, validate_patch_scope
 from feedback.plan import FeedbackPlan, build_feedback_plan
 from feedback.repair_context import RepairContext
 from feedback.strategies import AssistantInlineRepair, FeedbackStrategy, UserRoundRepair
@@ -48,8 +47,7 @@ logger = get_logger(__name__)
 class ControllerOp:
     action: Action
     verification_granularity: Granularity | None = None
-    rollback_scope: RollbackScope | None = None
-    feedback_mode: FeedbackMode | None = None
+    rollback_scope: Granularity | None = None
     feedback_mechanism: FeedbackMechanism | None = None
 
 
@@ -66,13 +64,13 @@ class PolicyContext:
     failed_prefix: str | None
     pending_patch: str | None
     repair_base_prefix: str | None
-    repair_scope: RollbackScope | None
+    repair_scope: Granularity | None
     fence_state: FenceState
 
 
 @dataclass(frozen=True)
 class RepairRegion:
-    scope: RollbackScope
+    scope: Granularity
     base_prefix: str
     base_assistant_prefix: AssistantContent
     base_extractor_state: OutputExtractorState | None
@@ -104,7 +102,7 @@ class ControllerRuntime:
         return self.repair_regions[-1] if self.repair_regions else None
 
     @property
-    def repair_scope(self) -> RollbackScope | None:
+    def repair_scope(self) -> Granularity | None:
         region = self.current_region
         return region.scope if region else None
 
@@ -233,10 +231,7 @@ def _select_feedback_generator(
     *,
     generator: Generator,
     feedback_generator: Generator | None,
-    feedback_plan: FeedbackPlan,
 ) -> Generator:
-    if feedback_plan.mode != FeedbackMode.FENCED:
-        return generator
     if feedback_generator is not None:
         return feedback_generator
     return generator
@@ -248,7 +243,7 @@ def _prepare_feedback_extractor_state(
     feedback_plan: FeedbackPlan,
     repair_base_extractor_state: OutputExtractorState,
 ) -> None:
-    if feedback_plan.mode == FeedbackMode.FENCED:
+    if feedback_plan.mechanism == FeedbackMechanism.B:
         feedback_gen.reset_output_extractor()
         return
     if feedback_plan.channel == GenerationChannel.CONTINUATION:
@@ -271,7 +266,7 @@ def _failed_snippet(base_prefix: str, failed_prefix: str) -> str:
     return failed_prefix
 
 
-def _snippet_for_scope(runtime: ControllerRuntime, scope: RollbackScope) -> str:
+def _snippet_for_scope(runtime: ControllerRuntime, scope: Granularity) -> str:
     for region in reversed(runtime.repair_regions):
         if region.scope == scope:
             return runtime.state.prefix[len(region.base_prefix) :]
@@ -378,7 +373,7 @@ def _append_trace(
     budget: Budget,
     oracle_outputs: tuple[OracleOutput, ...] = (),
     render_status: RenderStatus | None = None,
-    rollback_scope: RollbackScope | None = None,
+    rollback_scope: Granularity | None = None,
     patch_applied: bool = False,
     notes: str = "",
 ) -> None:
@@ -779,21 +774,25 @@ def _handle_feedback(
         or runtime.repair_base_extractor_state is None
     ):
         raise RuntimeError("FEEDBACK requires failed_prefix and repair base prefix.")
-    mechanism = op.feedback_mechanism or FeedbackMechanism.A
-    outermost_base = runtime.repair_regions[0].base_prefix
+    requested_mechanism = op.feedback_mechanism or FeedbackMechanism.A
+    repair_scope = runtime.repair_scope or Granularity.STMT
+    mechanism = _select_feedback_mechanism(
+        requested_mechanism=requested_mechanism,
+        repair_scope=repair_scope,
+    )
+    current_base = runtime.repair_base_prefix
     # Feedback B lists diagnostics explicitly; annotation would be redundant.
-    bad_snippet = _failed_snippet(outermost_base, runtime.failed_prefix)
+    bad_snippet = _failed_snippet(current_base, runtime.failed_prefix)
     scope_filter = runtime.repair_scope if mechanism == FeedbackMechanism.B else None
     repair_context = RepairContext.from_feedback_state(
         feedback_state,
         bad_snippet,
-        repair_scope=runtime.repair_scope or RollbackScope.STMT,
+        repair_scope=repair_scope,
         scope_filter=scope_filter,
         parser_error_context=runtime.feedback_parser_error,
     )
     feedback_plan = build_feedback_plan(
         mechanism=mechanism,
-        requested_mode=op.feedback_mode,
         repair_context=repair_context,
         repair_feedback_format_config=repair_feedback_format_config,
         lang_config=feedback_lang_config,
@@ -802,27 +801,44 @@ def _handle_feedback(
     feedback_gen = _select_feedback_generator(
         generator=generator,
         feedback_generator=feedback_generator,
-        feedback_plan=feedback_plan,
     )
     _prepare_feedback_extractor_state(
         feedback_gen=feedback_gen,
         feedback_plan=feedback_plan,
         repair_base_extractor_state=runtime.repair_base_extractor_state,
     )
-    context.extract_fence = feedback_plan.channel == GenerationChannel.CONTINUATION
-    context.channel = feedback_plan.channel
     update_last_assistant(base_messages, runtime.repair_base_assistant_prefix)
-    context.messages = feedback_strategy.apply(
-        base_messages,
-        feedback_plan.prompt,
-        runtime.repair_base_assistant_prefix,
-    )
-    result = feedback_gen.generate_step(context)
-    if feedback_gen is generator:
-        generator.restore_output_extractor_state(runtime.repair_base_extractor_state)
+
+    if feedback_plan.post_fence_injection is not None:
+        result, total_tokens = _feedback_two_phase(
+            feedback_plan=feedback_plan,
+            feedback_strategy=feedback_strategy,
+            feedback_gen=feedback_gen,
+            base_messages=base_messages,
+            context=context,
+            runtime=runtime,
+            feedback_lang_config=feedback_lang_config,
+        )
+    else:
+        context.extract_fence = feedback_plan.channel == GenerationChannel.CONTINUATION
+        context.channel = feedback_plan.channel
+        context.messages = feedback_strategy.apply(
+            base_messages,
+            feedback_plan.prompt,
+            runtime.repair_base_assistant_prefix,
+            feedback_plan.response_prefix,
+        )
+        result = feedback_gen.generate_step(context)
+        total_tokens = result.delta_tokens
+
+    generator.restore_output_extractor_state(runtime.repair_base_extractor_state)
     if feedback_plan.channel == GenerationChannel.PATCH:
-        parse_result = parse_feedback_output(result.delta_text, feedback_lang_config)
-        scope = runtime.repair_scope or RollbackScope.STMT
+        patch_text = _render_feedback_patch_text(
+            feedback_plan.post_fence_injection or feedback_plan.response_prefix,
+            result.delta_text,
+        )
+        parse_result = parse_diff_feedback_output(patch_text)
+        scope = repair_scope
         scope_error = None
         if parse_result.patch is not None:
             scope_error = validate_patch_scope(
@@ -840,7 +856,7 @@ def _handle_feedback(
         runtime.pending_patch = result.delta_text
         runtime.feedback_parser_error = None
     runtime.last_feedback_mechanism = feedback_plan.mechanism
-    budget.add_tokens(result.delta_tokens)
+    budget.add_tokens(total_tokens)
     runtime.last_stop_reason = result.stop_reason
     runtime.last_action = Action.FEEDBACK
     patch_len = len(runtime.pending_patch) if runtime.pending_patch is not None else 0
@@ -848,7 +864,7 @@ def _handle_feedback(
         "feedback: step=%s mechanism=%s delta_tokens=%s stop_reason=%s patch_len=%s parse_error=%s",
         runtime.state.step,
         feedback_plan.mechanism,
-        result.delta_tokens,
+        total_tokens,
         result.stop_reason.kind,
         patch_len,
         runtime.feedback_parser_error,
@@ -862,6 +878,100 @@ def _handle_feedback(
         budget=budget,
         notes=f"feedback_mechanism={feedback_plan.mechanism.value}",
     )
+
+
+def _set_stop_on_fence_open(gen: Generator, enabled: bool) -> None:
+    setter = getattr(gen, "set_stop_on_fence_open", None)
+    if callable(setter):
+        setter(enabled)
+
+
+def _feedback_two_phase(
+    *,
+    feedback_plan: FeedbackPlan,
+    feedback_strategy: FeedbackStrategy,
+    feedback_gen: Generator,
+    base_messages: list[GenerateMessage],
+    context: GenerateContext,
+    runtime: ControllerRuntime,
+    feedback_lang_config: FeedbackLanguageConfig,
+) -> tuple[GenerateResult, int]:
+    assert feedback_plan.post_fence_injection is not None
+    fence_tag = max(feedback_lang_config.fence_tags, key=len)
+    base_assistant = runtime.repair_base_assistant_prefix or AssistantContent.empty()
+
+    # Phase 1: free generation with fence extraction (model reasons, then opens fence).
+    _set_stop_on_fence_open(feedback_gen, True)
+    context.extract_fence = True
+    context.channel = GenerationChannel.CONTINUATION
+    context.messages = feedback_strategy.apply(
+        base_messages,
+        feedback_plan.prompt,
+        base_assistant,
+        None,
+    )
+    phase1 = feedback_gen.generate_step(context)
+    _set_stop_on_fence_open(feedback_gen, False)
+    phase1_tokens = phase1.delta_tokens
+
+    # Extract reasoning from Phase 1 output.
+    reasoning = ""
+    if phase1.assistant_delta is not None and phase1.assistant_delta.fence_lang:
+        reasoning = phase1.assistant_delta.pre_fence
+    else:
+        reasoning = phase1.delta_text
+    logger.info(
+        "feedback_two_phase: phase1 tokens=%s reasoning_len=%s fence_found=%s",
+        phase1_tokens,
+        len(reasoning),
+        phase1.assistant_delta is not None and bool(phase1.assistant_delta.fence_lang),
+    )
+
+    # Phase 2: inject diff prefix after fence opening, model continues from "+ ".
+    phase2_prefix = AssistantContent(
+        pre_fence=reasoning,
+        fence_lang=fence_tag,
+        code=feedback_plan.post_fence_injection,
+        fence_state=FenceState.INSIDE,
+    )
+    feedback_gen.reset_output_extractor()
+    context.extract_fence = False
+    context.channel = GenerationChannel.PATCH
+    context.messages = feedback_strategy.apply(
+        base_messages,
+        feedback_plan.prompt,
+        base_assistant,
+        phase2_prefix,
+    )
+    phase2 = feedback_gen.generate_step(context)
+    total_tokens = phase1_tokens + phase2.delta_tokens
+    logger.info(
+        "feedback_two_phase: phase2 tokens=%s total=%s",
+        phase2.delta_tokens,
+        total_tokens,
+    )
+    return phase2, total_tokens
+
+
+def _select_feedback_mechanism(
+    *,
+    requested_mechanism: FeedbackMechanism,
+    repair_scope: Granularity,
+) -> FeedbackMechanism:
+    if requested_mechanism == FeedbackMechanism.B and repair_scope != Granularity.STMT:
+        return FeedbackMechanism.A
+    return requested_mechanism
+
+
+def _render_feedback_patch_text(
+    response_prefix: str | AssistantContent | None,
+    delta_text: str,
+) -> str:
+    if response_prefix is None:
+        return delta_text
+    if isinstance(response_prefix, AssistantContent):
+        return f"{response_prefix.render()}{delta_text}"
+    return f"{response_prefix}{delta_text}"
 
 
 def _handle_apply_patch(
@@ -1004,12 +1114,11 @@ def run_dtv_loop(
         )
         op = policy.next_action(ctx)
         logger.info(
-            "policy: step=%s action=%s verification_granularity=%s rollback_scope=%s feedback_mode=%s feedback_mechanism=%s tokens_used=%s tokens_left=%s",
+            "policy: step=%s action=%s verification_granularity=%s rollback_scope=%s feedback_mechanism=%s tokens_used=%s tokens_left=%s",
             runtime.state.step,
             op.action,
             op.verification_granularity,
             op.rollback_scope,
-            op.feedback_mode,
             op.feedback_mechanism,
             budget.gen_tokens_used,
             _remaining_tokens(budget),

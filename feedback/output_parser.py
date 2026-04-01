@@ -5,7 +5,7 @@ from typing import cast
 
 from tree_sitter_language_pack import SupportedLanguage, get_parser
 
-from core.types import RollbackScope
+from core.types import Granularity
 from feedback.language import FeedbackLanguageConfig
 
 
@@ -52,6 +52,8 @@ def _find_fenced_blocks(text: str) -> list[_FenceMatch]:
 class ParseResult:
     patch: str | None
     error: str | None
+    # True when parsing consumed fenced content. False when it fell back to
+    # plain, unfenced text.
     used_fence: bool
 
 
@@ -75,27 +77,17 @@ class FeedbackFenceStreamParser:
         if self._complete:
             return
         joined = "".join(self._parts)
-        self._complete = _has_complete_fence(joined)
+        self._complete = _has_closing_fence(joined)
 
     @property
     def complete(self) -> bool:
         return self._complete
 
 
-def _has_complete_fence(text: str) -> bool:
-    pos = 0
-    while pos < len(text):
-        open_idx = text.find("```", pos)
-        if open_idx == -1:
-            return False
-        lang_start = open_idx + 3
-        newline_idx = text.find("\n", lang_start)
-        if newline_idx == -1:
-            return False
-        if "`" in text[lang_start:newline_idx]:
-            pos = lang_start
-            continue
-        return text.find("```", newline_idx + 1) != -1
+def _has_closing_fence(text: str) -> bool:
+    for line in text.splitlines():
+        if line.rstrip() == "```":
+            return True
     return False
 
 
@@ -106,40 +98,20 @@ def parse_feedback_output(
     stripped = text.strip()
     if not stripped:
         return ParseResult(patch=None, error="empty model output", used_fence=False)
-
-    matches = _find_fenced_blocks(stripped)
-    if matches:
-        if len(matches) > 1:
-            return ParseResult(
-                patch=None,
-                error="multiple fenced code blocks found",
-                used_fence=True,
-            )
-        match = matches[0]
-        lang = match.lang.strip().lower()
-        if lang not in lang_config.fence_tags:
-            return ParseResult(
-                patch=None,
-                error=f"fenced code block language must be {lang_config.name.lower()}",
-                used_fence=True,
-            )
-        prefix = stripped[: match.start].strip()
-        suffix = stripped[match.end :].strip()
-        if prefix or suffix:
-            return ParseResult(
-                patch=None,
-                error="fenced output must contain only one code block",
-                used_fence=True,
-            )
-        patch = match.body.strip()
-        if not patch:
+    body, used_fence, error = _extract_complete_fenced_body(
+        stripped,
+        lang_config=lang_config,
+    )
+    if error is not None:
+        return ParseResult(patch=None, error=error, used_fence=used_fence)
+    if body is not None:
+        if not body:
             return ParseResult(
                 patch=None,
                 error="empty fenced patch",
                 used_fence=True,
             )
-        return ParseResult(patch=patch, error=None, used_fence=True)
-
+        return ParseResult(patch=body, error=None, used_fence=True)
     if "```" in stripped:
         return ParseResult(
             patch=None,
@@ -147,6 +119,125 @@ def parse_feedback_output(
             used_fence=True,
         )
     return ParseResult(patch=stripped, error=None, used_fence=False)
+
+
+def parse_diff_feedback_output(text: str) -> ParseResult:
+    stripped = _strip_trailing_fence_close(text.strip())
+    if not stripped:
+        return ParseResult(patch=None, error="empty model output", used_fence=False)
+    body, used_fence, error = _extract_complete_fenced_body(
+        stripped,
+        lang_config=None,
+    )
+    if error is not None:
+        return ParseResult(patch=None, error=error, used_fence=used_fence)
+    if body is not None:
+        if not body:
+            return ParseResult(
+                patch=None,
+                error="empty fenced patch",
+                used_fence=True,
+            )
+        return _parse_diff_patch_body(body, used_fence=True)
+    open_body, open_error = _extract_open_fence_body(stripped)
+    if open_error is not None:
+        return ParseResult(patch=None, error=open_error, used_fence=True)
+    if open_body is not None:
+        if not open_body:
+            return ParseResult(patch=None, error="empty fenced patch", used_fence=True)
+        return _parse_diff_patch_body(open_body, used_fence=True)
+    return _parse_diff_patch_body(stripped, used_fence=False)
+
+
+def _strip_trailing_fence_close(text: str) -> str:
+    lines = text.splitlines()
+    while lines and lines[-1].rstrip() == "```":
+        lines.pop()
+    return "\n".join(lines).strip()
+
+
+def _extract_complete_fenced_body(
+    text: str,
+    *,
+    lang_config: FeedbackLanguageConfig | None,
+) -> tuple[str | None, bool, str | None]:
+    matches = _find_fenced_blocks(text)
+    if not matches:
+        return None, False, None
+    if len(matches) > 1:
+        return None, True, "multiple fenced code blocks found"
+    match = matches[0]
+    if lang_config is not None:
+        lang = match.lang.strip().lower()
+        if lang not in lang_config.fence_tags:
+            return None, True, f"fenced code block language must be {lang_config.name.lower()}"
+    prefix = text[: match.start].strip()
+    if prefix:
+        return None, True, "fenced output must contain only one code block"
+    return match.body.strip(), True, None
+
+
+def _extract_open_fence_body(text: str) -> tuple[str | None, str | None]:
+    if not text.startswith("```"):
+        return None, None
+    lang_start = 3
+    newline_idx = text.find("\n", lang_start)
+    if newline_idx == -1:
+        return None, "malformed fenced code block"
+    lang = text[lang_start:newline_idx]
+    if "`" in lang:
+        return None, "malformed fenced code block"
+    body = text[newline_idx + 1 :].strip("\n")
+    return body, None
+
+
+def _parse_diff_patch_body(body: str, *, used_fence: bool) -> ParseResult:
+    if not _looks_like_diff_patch(body):
+        return ParseResult(
+            patch=None,
+            error="patch must be a unified diff with '+' and '-' lines only",
+            used_fence=used_fence,
+        )
+    replacement_lines: list[str] = []
+    for line in body.splitlines():
+        if line.startswith("+"):
+            replacement_lines.append(_strip_diff_prefix(line))
+            continue
+        if line.startswith("-"):
+            continue
+        return ParseResult(
+            patch=None,
+            error="diff patch must contain only '+' and '-' lines",
+            used_fence=used_fence,
+        )
+    if not replacement_lines:
+        return ParseResult(
+            patch=None,
+            error="diff patch must contain at least one '+' line",
+            used_fence=used_fence,
+        )
+    patch = "\n".join(replacement_lines).strip()
+    if not patch:
+        return ParseResult(patch=None, error="empty diff replacement", used_fence=used_fence)
+    return ParseResult(patch=patch, error=None, used_fence=used_fence)
+
+
+def _looks_like_diff_patch(text: str) -> bool:
+    saw_prefixed = False
+    for line in text.splitlines():
+        if not line:
+            return False
+        if line.startswith("+") or line.startswith("-"):
+            saw_prefixed = True
+            continue
+        return False
+    return saw_prefixed
+
+
+def _strip_diff_prefix(line: str) -> str:
+    if line.startswith("+ "):
+        return line[2:]
+    return line[1:]
 
 
 def snippet_contains_function(
@@ -174,12 +265,12 @@ def snippet_contains_function(
 
 def validate_patch_scope(
     patch: str,
-    scope: RollbackScope,
+    scope: Granularity,
     lang_config: FeedbackLanguageConfig,
     *,
     rollback_snippet: str | None = None,
 ) -> str | None:
-    if scope == RollbackScope.PROGRAM:
+    if scope == Granularity.PROGRAM:
         return None
 
     lang = lang_config.name
@@ -188,6 +279,15 @@ def validate_patch_scope(
     tree = parser.parse((patch + patch_suffix).encode("utf-8"))
     root = tree.root_node
     if root.has_error:
+        # Continuation clauses (catch, else, finally, ...) cannot be parsed
+        # in isolation by tree-sitter.  If the rollback snippet suffers the
+        # same parse error, the error comes from the surrounding context, not
+        # from the patch itself.  Skip all AST-based checks in that case.
+        if rollback_snippet is not None:
+            rb_suffix = lang_config.closing_suffix_fn(rollback_snippet)
+            rb_tree = parser.parse((rollback_snippet + rb_suffix).encode("utf-8"))
+            if rb_tree.root_node.has_error:
+                return None
         return f"scope validator: patch is not valid {lang} syntax"
 
     named_children = [child for child in root.children if child.is_named]
@@ -197,7 +297,7 @@ def validate_patch_scope(
     func_type = lang_config.function_item_type
     top_types = lang_config.top_level_item_types
 
-    if scope == RollbackScope.FUNC:
+    if scope == Granularity.FUNC:
         non_func_top = sorted(
             {
                 child.type
@@ -222,7 +322,7 @@ def validate_patch_scope(
     allowed_in_stmt: set[str] = set()
     rollback_suffix = None
     if (
-        scope == RollbackScope.STMT
+        scope == Granularity.STMT
         and rollback_snippet is not None
         and snippet_contains_function(rollback_snippet, lang_config)
     ):

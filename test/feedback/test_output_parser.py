@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from core.types import RollbackScope
+from core.types import Granularity
 from c_rust.feedback import RUST_FEEDBACK_LANG
 from js_ts.feedback import TS_FEEDBACK_LANG
 from feedback.output_parser import (
     FeedbackFenceStreamParser,
+    parse_diff_feedback_output,
     parse_feedback_output,
     snippet_contains_function,
     validate_patch_scope,
@@ -67,6 +68,66 @@ def test_parse_feedback_output_accepts_plain_text_fallback() -> None:
     assert result.used_fence is False
 
 
+def test_parse_diff_feedback_output_requires_diff_patch() -> None:
+    result = parse_diff_feedback_output(
+        """```rust
+fn main() {
+    println!(\"ok\");
+}
+```"""
+    )
+
+    assert result.patch is None
+    assert result.error == "patch must be a unified diff with '+' and '-' lines only"
+    assert result.used_fence is True
+
+
+def test_parse_feedback_output_extracts_diff_replacement_without_closing_fence() -> None:
+    result = parse_diff_feedback_output(
+        """- function parseJson(
+-   txt: string,
+-   reviver?: ((this: any, key: string, value: any) => any) | undefined,
++ function parseJson(
++   txt: string,
++   reviver?: ((this: unknown, key: string, value: unknown) => unknown) | undefined,"""
+    )
+
+    assert result.patch == """function parseJson(
+  txt: string,
+  reviver?: ((this: unknown, key: string, value: unknown) => unknown) | undefined,"""
+    assert result.error is None
+    assert result.used_fence is False
+
+
+def test_parse_feedback_output_extracts_diff_replacement_from_open_fence() -> None:
+    result = parse_diff_feedback_output(
+        """```typescript
+- function parseJson(
++ function parseJson(
++   txt: string,
++   reviver?: ((this: unknown, key: string, value: unknown) => unknown) | undefined,"""
+    )
+
+    assert result.patch == """function parseJson(
+  txt: string,
+  reviver?: ((this: unknown, key: string, value: unknown) => unknown) | undefined,"""
+    assert result.error is None
+    assert result.used_fence is True
+
+
+def test_parse_feedback_output_extracts_diff_replacement_before_closing_fence() -> None:
+    result = parse_diff_feedback_output(
+        """```typescript
+- const x: any = value;
++ const x: unknown = value;
+```<|im_end|>""",
+    )
+
+    assert result.patch == "const x: unknown = value;"
+    assert result.error is None
+    assert result.used_fence is True
+
+
 def test_parse_feedback_output_rejects_non_rust_fence() -> None:
     result = parse_feedback_output(
         """```python
@@ -85,7 +146,7 @@ def test_validate_patch_scope_stmt_rejects_function_wrapper() -> None:
         """fn main() {
     let x: i32 = 1;
 }""",
-        RollbackScope.STMT,
+        Granularity.STMT,
         RUST_FEEDBACK_LANG,
     )
 
@@ -93,7 +154,7 @@ def test_validate_patch_scope_stmt_rejects_function_wrapper() -> None:
 
 
 def test_validate_patch_scope_stmt_accepts_statement_patch() -> None:
-    error = validate_patch_scope("let x: i32 = 1;", RollbackScope.STMT, RUST_FEEDBACK_LANG)
+    error = validate_patch_scope("let x: i32 = 1;", Granularity.STMT, RUST_FEEDBACK_LANG)
 
     assert error is None
 
@@ -103,7 +164,7 @@ def test_validate_patch_scope_program_allows_function_wrapper() -> None:
         """fn main() {
     let x: i32 = 1;
 }""",
-        RollbackScope.PROGRAM,
+        Granularity.PROGRAM,
         RUST_FEEDBACK_LANG,
     )
 
@@ -118,7 +179,7 @@ def test_validate_patch_scope_func_allows_single_function() -> None:
     if c < r { c } else { r }
     if d < r { d } else { r }
 }""",
-        RollbackScope.FUNC,
+        Granularity.FUNC,
         RUST_FEEDBACK_LANG,
     )
 
@@ -133,7 +194,7 @@ def test_validate_patch_scope_func_allows_multiple_functions() -> None:
 fn main() {
     let x = helper();
 }""",
-        RollbackScope.FUNC,
+        Granularity.FUNC,
         RUST_FEEDBACK_LANG,
     )
 
@@ -148,7 +209,7 @@ def test_validate_patch_scope_func_rejects_non_function_top_level() -> None:
 fn main() {
     let x: i32 = 1;
 }""",
-        RollbackScope.FUNC,
+        Granularity.FUNC,
         RUST_FEEDBACK_LANG,
     )
 
@@ -160,7 +221,7 @@ fn main() {
 
 def test_validate_patch_scope_func_accepts_statements_only() -> None:
     """FUNC patch with only statements (no function wrapper) should pass."""
-    error = validate_patch_scope("let x: i32 = 1;", RollbackScope.FUNC, RUST_FEEDBACK_LANG)
+    error = validate_patch_scope("let x: i32 = 1;", Granularity.FUNC, RUST_FEEDBACK_LANG)
 
     assert error is None
 
@@ -171,7 +232,7 @@ def test_validate_patch_scope_block_still_rejects_function() -> None:
         """fn main() {
     let x: i32 = 1;
 }""",
-        RollbackScope.BLOCK,
+        Granularity.BLOCK,
         RUST_FEEDBACK_LANG,
     )
 
@@ -206,7 +267,7 @@ function trap(height: number[]): number {
     const n = height.length;"""
     error = validate_patch_scope(
         patch,
-        RollbackScope.STMT,
+        Granularity.STMT,
         TS_FEEDBACK_LANG,
         rollback_snippet=rollback_snippet,
     )
@@ -223,7 +284,7 @@ function trap(height: number[]): number {
     const n = height.length;"""
     error = validate_patch_scope(
         patch,
-        RollbackScope.STMT,
+        Granularity.STMT,
         TS_FEEDBACK_LANG,
         rollback_snippet=rollback_snippet,
     )
@@ -234,7 +295,7 @@ def test_validate_patch_scope_stmt_still_rejects_function_without_rollback_snipp
     patch = """\
 function trap(height: number[]): number {
     const n: number = height.length;"""
-    error = validate_patch_scope(patch, RollbackScope.STMT, TS_FEEDBACK_LANG)
+    error = validate_patch_scope(patch, Granularity.STMT, TS_FEEDBACK_LANG)
     assert error is not None
 
 
@@ -244,7 +305,7 @@ function trap(height: number[]): number {
     const n: number = height.length;"""
     error = validate_patch_scope(
         patch,
-        RollbackScope.STMT,
+        Granularity.STMT,
         TS_FEEDBACK_LANG,
         rollback_snippet="const n = height.length;",
     )
@@ -260,7 +321,7 @@ fn main() {
     let x = 1;"""
     error = validate_patch_scope(
         patch,
-        RollbackScope.STMT,
+        Granularity.STMT,
         RUST_FEEDBACK_LANG,
         rollback_snippet=rollback_snippet,
     )
@@ -277,7 +338,7 @@ fn main() {
     let x = 1;"""
     error = validate_patch_scope(
         patch,
-        RollbackScope.STMT,
+        Granularity.STMT,
         RUST_FEEDBACK_LANG,
         rollback_snippet=rollback_snippet,
     )
@@ -293,11 +354,42 @@ fn main() {
     let x = 1;"""
     error = validate_patch_scope(
         patch,
-        RollbackScope.BLOCK,
+        Granularity.BLOCK,
         RUST_FEEDBACK_LANG,
         rollback_snippet=rollback_snippet,
     )
     assert error is not None
+
+
+def test_validate_patch_scope_stmt_accepts_catch_continuation_when_rollback_also_catch() -> None:
+    patch = """\
+ catch (e: unknown) {
+    if (typeof txt !== 'string') {
+      const isEmptyArray: boolean = Array.isArray(txt) && txt.length === 0;"""
+    rollback_snippet = """\
+ catch (e: unknown) {
+    if (typeof txt !== 'string') {
+      const isEmptyArray = Array.isArray(txt) && txt.length === 0;"""
+    error = validate_patch_scope(
+        patch,
+        Granularity.STMT,
+        TS_FEEDBACK_LANG,
+        rollback_snippet=rollback_snippet,
+    )
+    assert error is None
+
+
+def test_validate_patch_scope_stmt_rejects_invalid_syntax_when_rollback_parses_ok() -> None:
+    patch = "catch (e: unknown) { %%% invalid"
+    rollback_snippet = "const x: number = 1;"
+    error = validate_patch_scope(
+        patch,
+        Granularity.STMT,
+        TS_FEEDBACK_LANG,
+        rollback_snippet=rollback_snippet,
+    )
+    assert error is not None
+    assert "not valid TypeScript syntax" in error
 
 
 def test_feedback_fence_stream_parser_detects_complete_fence() -> None:
@@ -317,4 +409,12 @@ def test_feedback_fence_stream_parser_reset_clears_state() -> None:
     assert parser.complete is True
 
     parser.reset()
+    assert parser.complete is False
+
+
+def test_feedback_fence_stream_parser_requires_closing_fence() -> None:
+    parser = FeedbackFenceStreamParser()
+
+    parser.feed("+ const x: number = 1;")
+
     assert parser.complete is False

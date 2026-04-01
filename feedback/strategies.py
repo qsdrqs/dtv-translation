@@ -15,6 +15,7 @@ class FeedbackStrategy(ABC):
         messages: Sequence[GenerateMessage | dict[str, Any]],
         feedback: str,
         prefix: str | AssistantContent,
+        response_prefix: str | AssistantContent | None = None,
     ) -> list[GenerateMessage | dict[str, Any]]:
         raise NotImplementedError
 
@@ -60,6 +61,7 @@ class AssistantInlineRepair(FeedbackStrategy):
         messages: Sequence[GenerateMessage | dict[str, Any]],
         feedback: str,
         prefix: str | AssistantContent,
+        response_prefix: str | AssistantContent | None = None,
     ) -> list[GenerateMessage | dict[str, Any]]:
         normalized = self._normalize_messages(messages)
         assistant_index = self._last_assistant_index(normalized)
@@ -85,6 +87,7 @@ class UserRoundRepair(FeedbackStrategy):
         messages: Sequence[GenerateMessage | dict[str, Any]],
         feedback: str,
         prefix: str | AssistantContent,
+        response_prefix: str | AssistantContent | None = None,
     ) -> list[GenerateMessage | dict[str, Any]]:
         normalized = self._normalize_messages(messages)
 
@@ -98,6 +101,13 @@ class UserRoundRepair(FeedbackStrategy):
             normalized[assistant_index] = GenerateMessage(role="assistant", content=content, stop=True)
 
         normalized.append(GenerateMessage(role="user", content=feedback, stop=True))
-        normalized.append(GenerateMessage(role="assistant", content=AssistantContent.empty(), stop=False))
+        next_prefix = AssistantContent.empty()
+        if response_prefix is not None:
+            next_prefix = (
+                response_prefix
+                if isinstance(response_prefix, AssistantContent)
+                else AssistantContent.from_unfenced(response_prefix)
+            )
+        normalized.append(GenerateMessage(role="assistant", content=next_prefix, stop=False))
 
         return list(normalized)

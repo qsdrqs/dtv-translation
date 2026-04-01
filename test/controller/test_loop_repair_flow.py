@@ -15,7 +15,7 @@ from core.types import (
     Granularity,
     RenderResult,
     RenderStatus,
-    RollbackScope,
+    Granularity,
     StopReason,
     Verdict,
 )
@@ -27,7 +27,7 @@ from rollback.manager import RollbackManager
 class _OracleFail:
     name = "oracle"
     required_granularity = Granularity.STMT
-    rollback_scope = RollbackScope.STMT
+    rollback_scope = Granularity.STMT
 
     def run(self, state, artifact, context):
         _ = state
@@ -46,7 +46,7 @@ class _OracleFail:
 class _OracleFailThenPass:
     name = "oracle"
     required_granularity = Granularity.STMT
-    rollback_scope = RollbackScope.STMT
+    rollback_scope = Granularity.STMT
 
     def __init__(self) -> None:
         self.calls = 0
@@ -282,7 +282,7 @@ class _RepairFlowPolicy:
         # 2: rollback to base
         if self.stage == 2:
             self.stage = 3
-            return ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.STMT)
+            return ControllerOp(Action.ROLLBACK, rollback_scope=Granularity.STMT)
         # 3: probing verify that is inconclusive
         if self.stage == 3:
             self.stage = 4
@@ -318,7 +318,7 @@ class _GenerateFeedbackApplyTerminatePolicy:
             return ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT)
         if self.stage == 2:
             self.stage = 3
-            return ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.STMT)
+            return ControllerOp(Action.ROLLBACK, rollback_scope=Granularity.STMT)
         if self.stage == 3:
             self.stage = 4
             return ControllerOp(Action.FEEDBACK, feedback_mechanism=FeedbackMechanism.A)
@@ -351,7 +351,7 @@ class _ContinueGeneratePolicy:
             return ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT)
         if self.stage == 2:
             self.stage = 3
-            return ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.STMT)
+            return ControllerOp(Action.ROLLBACK, rollback_scope=Granularity.STMT)
         if self.stage == 3:
             self.stage = 4
             return ControllerOp(Action.CONTINUE)
@@ -387,7 +387,7 @@ class _NoOraclePolicy:
             return ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT)
         if self.stage == 2:
             self.stage = 3
-            return ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.STMT)
+            return ControllerOp(Action.ROLLBACK, rollback_scope=Granularity.STMT)
         if self.stage == 3:
             self.stage = 4
             self.allow_oracles = False
@@ -423,7 +423,7 @@ class _MechanismBApplyPolicy:
             return ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT)
         if self.stage == 2:
             self.stage = 3
-            return ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.STMT)
+            return ControllerOp(Action.ROLLBACK, rollback_scope=Granularity.STMT)
         if self.stage == 3:
             self.stage = 4
             return ControllerOp(Action.FEEDBACK, feedback_mechanism=FeedbackMechanism.B)
@@ -460,7 +460,7 @@ class _MechanismBRetryPolicy:
             return ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT)
         if self.stage == 2:
             self.stage = 3
-            return ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.STMT)
+            return ControllerOp(Action.ROLLBACK, rollback_scope=Granularity.STMT)
         if self.stage in {3, 4}:
             self.stage += 1
             return ControllerOp(Action.FEEDBACK, feedback_mechanism=FeedbackMechanism.B)
@@ -483,7 +483,7 @@ class _ScopeSequencedOracle:
         *,
         name: str,
         required_granularity: Granularity,
-        rollback_scope: RollbackScope,
+        rollback_scope: Granularity,
         verdicts: list[Verdict],
         message: str,
     ) -> None:
@@ -531,7 +531,7 @@ class _ScopeAwareFeedbackPolicy:
             return ControllerOp(Action.VERIFY, verification_granularity=Granularity.PROGRAM)
         if self.stage == 2:
             self.stage = 3
-            return ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.PROGRAM)
+            return ControllerOp(Action.ROLLBACK, rollback_scope=Granularity.PROGRAM)
         if self.stage == 3:
             self.stage = 4
             return ControllerOp(Action.FEEDBACK, feedback_mechanism=FeedbackMechanism.A)
@@ -543,7 +543,7 @@ class _ScopeAwareFeedbackPolicy:
             return ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT)
         if self.stage == 6:
             self.stage = 7
-            return ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.STMT)
+            return ControllerOp(Action.ROLLBACK, rollback_scope=Granularity.STMT)
         if self.stage == 7:
             self.stage = 8
             return ControllerOp(Action.FEEDBACK, feedback_mechanism=FeedbackMechanism.A)
@@ -586,7 +586,7 @@ class _ScopeAwareFeedbackMechanismBPolicy:
             return ControllerOp(Action.VERIFY, verification_granularity=Granularity.PROGRAM)
         if self.stage == 2:
             self.stage = 3
-            return ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.PROGRAM)
+            return ControllerOp(Action.ROLLBACK, rollback_scope=Granularity.PROGRAM)
         if self.stage == 3:
             self.stage = 4
             return ControllerOp(Action.FEEDBACK, feedback_mechanism=FeedbackMechanism.B)
@@ -598,7 +598,7 @@ class _ScopeAwareFeedbackMechanismBPolicy:
             return ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT)
         if self.stage == 6:
             self.stage = 7
-            return ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.STMT)
+            return ControllerOp(Action.ROLLBACK, rollback_scope=Granularity.STMT)
         if self.stage == 7:
             self.stage = 8
             return ControllerOp(Action.FEEDBACK, feedback_mechanism=FeedbackMechanism.B)
@@ -663,7 +663,7 @@ class _FeedbackThenGeneratePolicy:
             return ControllerOp(Action.VERIFY, verification_granularity=Granularity.PROGRAM)
         if self.stage == 2:
             self.stage = 3
-            return ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.PROGRAM)
+            return ControllerOp(Action.ROLLBACK, rollback_scope=Granularity.PROGRAM)
         if self.stage == 3:
             self.stage = 4
             return ControllerOp(Action.FEEDBACK, feedback_mechanism=FeedbackMechanism.A)
@@ -706,7 +706,7 @@ class _FeedbackBThenGeneratePolicy:
             return ControllerOp(Action.VERIFY, verification_granularity=Granularity.PROGRAM)
         if self.stage == 2:
             self.stage = 3
-            return ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.PROGRAM)
+            return ControllerOp(Action.ROLLBACK, rollback_scope=Granularity.STMT)
         if self.stage == 3:
             self.stage = 4
             return ControllerOp(Action.FEEDBACK, feedback_mechanism=FeedbackMechanism.B)
@@ -749,7 +749,7 @@ class _StmtLiftToFuncThenGeneratePolicy:
             return ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT)
         if self.stage == 2:
             self.stage = 3
-            return ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.FUNC)
+            return ControllerOp(Action.ROLLBACK, rollback_scope=Granularity.FUNC)
         if self.stage == 3:
             self.stage = 4
             return ControllerOp(Action.FEEDBACK, feedback_mechanism=FeedbackMechanism.A)
@@ -929,7 +929,8 @@ def test_feedback_prompt_can_omit_failed_snippet() -> None:
 
 
 def test_structured_feedback_mechanism_b_applies_parsed_patch() -> None:
-    generator = _SequenceGenerator(["bad stmt\n", "```rust\ngood;\n```"])
+    # Two-phase feedback B: Phase 1 = reasoning + fence open, Phase 2 = replacement code.
+    generator = _SequenceGenerator(["bad stmt\n", "Let me think about this fix.\n```rust\n", "good;\n```\n"])
     renderer = _OkRenderer()
     oracles = [_OracleFailThenPass()]
     budget = Budget(gen_tokens_budget=16)
@@ -963,17 +964,17 @@ def test_structured_feedback_mechanism_b_applies_parsed_patch() -> None:
     assert final_prefix == "good;"
 
 
-def test_structured_feedback_mechanism_b_parser_failure_feeds_next_round() -> None:
+def test_structured_feedback_mechanism_b_malformed_diff_feeds_next_round() -> None:
+    # Round 1 Phase 2: injection provides "- bad stmt\n+ ", model continues with
+    # "first;\nsecond;\n" -- the "second;" line lacks a +/- prefix, so the diff
+    # parser rejects the patch. Round 2 prompt includes this parse error.
     generator = _TrackingSequenceGenerator(
         [
             "bad stmt\n",
-            """```rust
-first;
-```
-```rust
-second;
-```""",
-            "```rust\nfixed;\n```",
+            "Let me try this fix.\n```rust\n",
+            "first;\nsecond;\n```\n",
+            "Reasoning about the fix.\n```rust\n",
+            "fixed;\n```\n",
         ]
     )
     renderer = _OkRenderer()
@@ -1000,19 +1001,20 @@ second;
     assert all(event.notes == "feedback_mechanism=b" for event in feedback_events)
     assert "The previous generated next code snippet was:" in generator.seen_user_messages[1]
     assert generator.seen_user_messages[-1].count("Previous parse error:") == 1
-    assert "multiple fenced code blocks found" in generator.seen_user_messages[-1]
+    assert "patch must be a unified diff" in generator.seen_user_messages[-1]
 
 
 def test_structured_feedback_mechanism_b_scope_validator_failure_feeds_next_round() -> None:
+    # Two-phase feedback B: each round = Phase 1 (reasoning + fence open) + Phase 2 (diff code).
+    # Round 1 Phase 2: multi-line diff producing a function_item (scope-invalid at STMT).
+    # Round 2 Phase 2: valid single-line replacement.
     generator = _TrackingSequenceGenerator(
         [
             "bad stmt\n",
-            """```rust
-fn main() {
-    let x: i32 = 1;
-}
-```""",
-            "```rust\nfixed;\n```",
+            "Let me wrap this in a function.\n```rust\n",
+            "fn main() {\n+     let x: i32 = 1;\n+ }\n```\n",
+            "Let me try a simpler fix.\n```rust\n",
+            "fixed;\n```\n",
         ]
     )
     renderer = _OkRenderer()
@@ -1054,14 +1056,14 @@ def test_scope_aware_feedback_retains_per_oracle_entries_until_owner_clears() ->
     func_oracle = _ScopeSequencedOracle(
         name="program_oracle",
         required_granularity=Granularity.PROGRAM,
-        rollback_scope=RollbackScope.PROGRAM,
+        rollback_scope=Granularity.PROGRAM,
         verdicts=[Verdict.FAIL, Verdict.PASS],
         message="program mismatch",
     )
     stmt_oracle = _ScopeSequencedOracle(
         name="stmt_oracle",
         required_granularity=Granularity.STMT,
-        rollback_scope=RollbackScope.STMT,
+        rollback_scope=Granularity.STMT,
         verdicts=[Verdict.FAIL, Verdict.FAIL, Verdict.PASS, Verdict.PASS],
         message="statement mismatch",
     )
@@ -1096,25 +1098,28 @@ def test_scope_aware_feedback_retains_per_oracle_entries_until_owner_clears() ->
 
 
 def test_feedback_b_filters_diagnostics_to_current_repair_scope() -> None:
+    # First feedback: PROGRAM scope -> B downgraded to A (inline continuation).
+    # Second feedback: STMT scope -> B stays B (two-phase).
     generator = _TrackingSequenceGenerator(
         [
             "bad stmt\n",
-            "```rust\nprogram_fix;\n```",
-            "```rust\nstmt_fix;\n```",
+            "program_fix;\n",
+            "Thinking about the stmt fix.\n```rust\n",
+            "stmt_fix;\n```\n",
         ]
     )
     renderer = _OkRenderer()
     program_oracle = _ScopeSequencedOracle(
         name="program_oracle",
         required_granularity=Granularity.PROGRAM,
-        rollback_scope=RollbackScope.PROGRAM,
+        rollback_scope=Granularity.PROGRAM,
         verdicts=[Verdict.FAIL],
         message="program mismatch",
     )
     stmt_oracle = _ScopeSequencedOracle(
         name="stmt_oracle",
         required_granularity=Granularity.STMT,
-        rollback_scope=RollbackScope.STMT,
+        rollback_scope=Granularity.STMT,
         verdicts=[Verdict.FAIL, Verdict.FAIL, Verdict.PASS, Verdict.PASS],
         message="statement mismatch",
     )
@@ -1137,10 +1142,16 @@ def test_feedback_b_filters_diagnostics_to_current_repair_scope() -> None:
 
     feedback_events = [event for event in trace if event.action == Action.FEEDBACK]
     assert len(feedback_events) == 2
-    first_feedback_prompt = generator.seen_user_messages[1]
+    assert feedback_events[0].notes == "feedback_mechanism=a"
+    assert feedback_events[1].notes == "feedback_mechanism=b"
+    # Mechanism A: diagnostics appear in the assistant message (inline format).
+    first_feedback_prompt = generator.seen_assistant_messages[1]
+    assert "oracle=program_oracle" in first_feedback_prompt
+    assert "program mismatch" in first_feedback_prompt
+    assert "oracle=stmt_oracle" in first_feedback_prompt
+    assert "statement mismatch" in first_feedback_prompt
+    # Mechanism B: diagnostics appear in the user message (Phase 1).
     second_feedback_prompt = generator.seen_user_messages[2]
-    assert "[program_oracle] program mismatch" in first_feedback_prompt
-    assert "[stmt_oracle] statement mismatch" in first_feedback_prompt
     assert "[stmt_oracle] statement mismatch" in second_feedback_prompt
 
 
@@ -1155,14 +1166,14 @@ def test_generate_without_feedback_a_does_not_inject_active_feedback() -> None:
     program_oracle = _ScopeSequencedOracle(
         name="program_oracle",
         required_granularity=Granularity.PROGRAM,
-        rollback_scope=RollbackScope.PROGRAM,
+        rollback_scope=Granularity.PROGRAM,
         verdicts=[Verdict.FAIL],
         message="program mismatch",
     )
     stmt_oracle = _ScopeSequencedOracle(
         name="stmt_oracle",
         required_granularity=Granularity.STMT,
-        rollback_scope=RollbackScope.STMT,
+        rollback_scope=Granularity.STMT,
         verdicts=[Verdict.PASS],
         message="unused",
     )
@@ -1203,14 +1214,14 @@ def test_generate_keeps_feedback_anchor_position_after_feedback_a() -> None:
     program_oracle = _ScopeSequencedOracle(
         name="program_oracle",
         required_granularity=Granularity.PROGRAM,
-        rollback_scope=RollbackScope.PROGRAM,
+        rollback_scope=Granularity.PROGRAM,
         verdicts=[Verdict.FAIL],
         message="program mismatch",
     )
     stmt_oracle = _ScopeSequencedOracle(
         name="stmt_oracle",
         required_granularity=Granularity.STMT,
-        rollback_scope=RollbackScope.STMT,
+        rollback_scope=Granularity.STMT,
         verdicts=[Verdict.PASS],
         message="unused",
     )
@@ -1243,10 +1254,12 @@ def test_generate_keeps_feedback_anchor_position_after_feedback_a() -> None:
 
 
 def test_generate_skips_inline_feedback_after_feedback_b() -> None:
+    # Two-phase feedback B: Phase 1 (reasoning + fence open) + Phase 2 (replacement).
     generator = _TrackingSequenceGenerator(
         [
             "bad stmt\n",
-            "fixed stmt\n",
+            "Reasoning about the fix.\n```rust\n",
+            "let x = 1;\n```\n",
             "next stmt\n",
         ]
     )
@@ -1254,14 +1267,14 @@ def test_generate_skips_inline_feedback_after_feedback_b() -> None:
     program_oracle = _ScopeSequencedOracle(
         name="program_oracle",
         required_granularity=Granularity.PROGRAM,
-        rollback_scope=RollbackScope.PROGRAM,
+        rollback_scope=Granularity.PROGRAM,
         verdicts=[Verdict.FAIL],
         message="program mismatch",
     )
     stmt_oracle = _ScopeSequencedOracle(
         name="stmt_oracle",
         required_granularity=Granularity.STMT,
-        rollback_scope=RollbackScope.STMT,
+        rollback_scope=Granularity.STMT,
         verdicts=[Verdict.PASS],
         message="unused",
     )
@@ -1282,9 +1295,9 @@ def test_generate_skips_inline_feedback_after_feedback_b() -> None:
         max_steps=16,
     )
 
-    assert len(generator.seen_assistant_messages) == 3
+    assert len(generator.seen_assistant_messages) == 4
     feedback_user_prompt = generator.seen_user_messages[1]
-    generate_prompt = generator.seen_assistant_messages[2]
+    generate_prompt = generator.seen_assistant_messages[3]
     assert "The previous generated next code snippet was:" in feedback_user_prompt
     assert "/* repair feedback:" not in generate_prompt
 
@@ -1298,7 +1311,7 @@ class _BlockRollbackThenCommitThenRefeedbackPolicy:
         actions = [
             ControllerOp(Action.GENERATE),                                      # 0: generate "bad"
             ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT),  # 1: verify -> fail
-            ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.BLOCK),  # 2: block rollback
+            ControllerOp(Action.ROLLBACK, rollback_scope=Granularity.BLOCK),  # 2: block rollback
             ControllerOp(Action.FEEDBACK, feedback_mechanism=FeedbackMechanism.A),  # 3: feedback A
             ControllerOp(Action.APPLY_PATCH),                                   # 4: apply patch
             ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT),  # 5: verify -> pass
@@ -1338,7 +1351,7 @@ def test_block_rollback_repair_context_survives_stmt_commit() -> None:
     oracle = _ScopeSequencedOracle(
         name="oracle",
         required_granularity=Granularity.STMT,
-        rollback_scope=RollbackScope.STMT,
+        rollback_scope=Granularity.STMT,
         verdicts=[Verdict.FAIL, Verdict.PASS, Verdict.FAIL],
         message="const assignment error",
     )
@@ -1383,14 +1396,14 @@ class _DualHintPolicy:
         actions = [
             ControllerOp(Action.GENERATE),                                      # 0: gen "bad1"
             ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT),  # 1: fail (hint1)
-            ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.BLOCK),  # 2: block rollback
+            ControllerOp(Action.ROLLBACK, rollback_scope=Granularity.BLOCK),  # 2: block rollback
             ControllerOp(Action.FEEDBACK, feedback_mechanism=FeedbackMechanism.A),  # 3: feedback hint1
             ControllerOp(Action.APPLY_PATCH),                                   # 4: apply
             ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT),  # 5: pass
             ControllerOp(Action.COMMIT),                                        # 6: commit STMT
             ControllerOp(Action.GENERATE),                                      # 7: gen "bad2"
             ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT),  # 8: fail (hint2)
-            ControllerOp(Action.ROLLBACK, rollback_scope=RollbackScope.STMT),   # 9: stmt rollback
+            ControllerOp(Action.ROLLBACK, rollback_scope=Granularity.STMT),   # 9: stmt rollback
             ControllerOp(Action.FEEDBACK, feedback_mechanism=FeedbackMechanism.A),  # 10: feedback hint2
             ControllerOp(Action.APPLY_PATCH),                                   # 11: apply
             ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT),  # 12: pass
@@ -1427,14 +1440,14 @@ def test_dual_hint_block_survives_stmt_repair_cycle() -> None:
     block_oracle = _ScopeSequencedOracle(
         name="block_oracle",
         required_granularity=Granularity.STMT,
-        rollback_scope=RollbackScope.BLOCK,
+        rollback_scope=Granularity.BLOCK,
         verdicts=[Verdict.FAIL, Verdict.PASS, Verdict.FAIL, Verdict.PASS],
         message="block-level error",
     )
     stmt_oracle = _ScopeSequencedOracle(
         name="stmt_oracle",
         required_granularity=Granularity.STMT,
-        rollback_scope=RollbackScope.STMT,
+        rollback_scope=Granularity.STMT,
         verdicts=[Verdict.PASS, Verdict.PASS, Verdict.FAIL, Verdict.PASS],
         message="stmt-level error",
     )
@@ -1499,7 +1512,7 @@ def test_stmt_failure_lifted_to_func_persists_feedback_through_stmt_commit() -> 
     stmt_oracle = _ScopeSequencedOracle(
         name="stmt_oracle",
         required_granularity=Granularity.STMT,
-        rollback_scope=RollbackScope.STMT,
+        rollback_scope=Granularity.STMT,
         verdicts=[Verdict.FAIL, Verdict.PASS],
         message="statement mismatch",
     )
@@ -1527,4 +1540,195 @@ def test_stmt_failure_lifted_to_func_persists_feedback_through_stmt_commit() -> 
     assert "oracle=stmt_oracle" in feedback_prompt
     assert "/* repair feedback:" in generate_prompt
     assert "oracle=stmt_oracle" in generate_prompt
+    assert "statement mismatch" in generate_prompt
+
+
+class _FuncRollbackRetryThenGeneratePolicy:
+    """FUNC rollback where the first repair attempt fails, triggering an
+    intermediate STMT rollback before the retry succeeds.
+
+    Flow:
+     0: GENERATE
+     1: VERIFY(STMT) -> FAIL
+     2: ROLLBACK(FUNC)
+     3: FEEDBACK(A)            -- first repair attempt
+     4: APPLY_PATCH
+     5: VERIFY(STMT) -> FAIL   -- attempt fails
+     6: ROLLBACK(STMT)          -- intermediate STMT rollback
+     7: FEEDBACK(A)            -- retry
+     8: APPLY_PATCH
+     9: VERIFY(STMT) -> PASS   -- retry succeeds
+    10: COMMIT
+    11: GENERATE               -- must still carry FUNC-level feedback
+    """
+
+    def __init__(self) -> None:
+        self.stage = 0
+
+    def next_action(self, ctx) -> ControllerOp:
+        _ = ctx
+        actions = [
+            ControllerOp(Action.GENERATE),
+            ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT),
+            ControllerOp(Action.ROLLBACK, rollback_scope=Granularity.FUNC),
+            ControllerOp(Action.FEEDBACK, feedback_mechanism=FeedbackMechanism.A),
+            ControllerOp(Action.APPLY_PATCH),
+            ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT),
+            ControllerOp(Action.ROLLBACK, rollback_scope=Granularity.STMT),
+            ControllerOp(Action.FEEDBACK, feedback_mechanism=FeedbackMechanism.A),
+            ControllerOp(Action.APPLY_PATCH),
+            ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT),
+            ControllerOp(Action.COMMIT),
+            ControllerOp(Action.GENERATE),
+            ControllerOp(Action.TERMINATE),
+        ]
+        if self.stage >= len(actions):
+            return ControllerOp(Action.TERMINATE)
+        op = actions[self.stage]
+        self.stage += 1
+        return op
+
+    def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
+        if selection_granularity is None:
+            raise ValueError("selection_granularity is required")
+        return select_oracles_by_granularity(
+            artifact,
+            budget,
+            available,
+            selection_granularity=selection_granularity,
+        )
+
+
+class _NestedStmtRepairWithinFuncSessionPolicy:
+    def __init__(self) -> None:
+        self.stage = 0
+
+    def next_action(self, ctx) -> ControllerOp:
+        _ = ctx
+        actions = [
+            ControllerOp(Action.GENERATE),
+            ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT),
+            ControllerOp(Action.ROLLBACK, rollback_scope=Granularity.FUNC),
+            ControllerOp(Action.FEEDBACK, feedback_mechanism=FeedbackMechanism.A),
+            ControllerOp(Action.APPLY_PATCH),
+            ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT),
+            ControllerOp(Action.COMMIT),
+            ControllerOp(Action.GENERATE),
+            ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT),
+            ControllerOp(Action.COMMIT),
+            ControllerOp(Action.GENERATE),
+            ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT),
+            ControllerOp(Action.ROLLBACK, rollback_scope=Granularity.STMT),
+            ControllerOp(Action.FEEDBACK, feedback_mechanism=FeedbackMechanism.A),
+            ControllerOp(Action.TERMINATE),
+        ]
+        if self.stage >= len(actions):
+            return ControllerOp(Action.TERMINATE)
+        op = actions[self.stage]
+        self.stage += 1
+        return op
+
+    def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
+        if selection_granularity is None:
+            raise ValueError("selection_granularity is required")
+        return select_oracles_by_granularity(
+            artifact,
+            budget,
+            available,
+            selection_granularity=selection_granularity,
+        )
+
+
+def test_stmt_feedback_uses_innermost_stmt_base_within_func_session() -> None:
+    generator = _TrackingSequenceGenerator(
+        [
+            "seed_stmt\n",
+            "func_repair_stmt\n",
+            "committed_stmt\n",
+            "failing_stmt\n",
+            "stmt_retry\n",
+        ]
+    )
+    renderer = _OkRenderer()
+    oracle = _ScopeSequencedOracle(
+        name="oracle",
+        required_granularity=Granularity.STMT,
+        rollback_scope=Granularity.STMT,
+        verdicts=[Verdict.FAIL, Verdict.PASS, Verdict.PASS, Verdict.FAIL],
+        message="type error",
+    )
+    budget = Budget(gen_tokens_budget=40)
+    feedback_state = FeedbackState()
+    rollback_manager = RollbackManager()
+    policy = _NestedStmtRepairWithinFuncSessionPolicy()
+
+    run_dtv_loop(
+        generator=generator,
+        renderer=renderer,
+        oracles=[oracle],
+        budget=budget,
+        feedback_state=feedback_state,
+        rollback_manager=rollback_manager,
+        policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
+        max_steps=20,
+    )
+
+    # 5 generate_step calls: steps 0, 3, 7, 10, 13
+    assert len(generator.seen_assistant_messages) == 5
+
+    stmt_feedback_prompt = generator.seen_assistant_messages[4]
+    assert "/* repair feedback:" in stmt_feedback_prompt
+    snippet_start = stmt_feedback_prompt.index("failed snippet:\n") + len("failed snippet:\n")
+    snippet_end = stmt_feedback_prompt.index("\n\ndiagnostics:", snippet_start)
+    failed_snippet = stmt_feedback_prompt[snippet_start:snippet_end]
+    assert failed_snippet == "failing_stmt", (
+        "nested STMT feedback must slice failed_snippet from the innermost "
+        "STMT rollback base, not from the outer FUNC session base"
+    )
+
+
+def test_func_feedback_survives_intermediate_stmt_rollback() -> None:
+    generator = _TrackingSequenceGenerator(
+        [
+            "bad stmt\n",       # step 0: initial gen
+            "still bad\n",      # step 3: first repair (will fail verify)
+            "fixed stmt\n",     # step 7: retry (will pass verify)
+            "next stmt\n",      # step 11: generate after commit
+        ]
+    )
+    renderer = _OkRenderer()
+    oracle = _ScopeSequencedOracle(
+        name="stmt_oracle",
+        required_granularity=Granularity.STMT,
+        rollback_scope=Granularity.STMT,
+        verdicts=[Verdict.FAIL, Verdict.FAIL, Verdict.PASS],
+        message="statement mismatch",
+    )
+    budget = Budget(gen_tokens_budget=32)
+    feedback_state = FeedbackState()
+    rollback_manager = RollbackManager()
+    policy = _FuncRollbackRetryThenGeneratePolicy()
+
+    run_dtv_loop(
+        generator=generator,
+        renderer=renderer,
+        oracles=[oracle],
+        budget=budget,
+        feedback_state=feedback_state,
+        rollback_manager=rollback_manager,
+        policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
+        max_steps=16,
+    )
+
+    # 4 generate_step calls: steps 0, 3, 7, 11
+    assert len(generator.seen_assistant_messages) == 4
+
+    generate_prompt = generator.seen_assistant_messages[3]
+    assert "/* repair feedback:" in generate_prompt, (
+        "FUNC-level feedback comment must survive an intermediate "
+        "ROLLBACK(STMT) within the FUNC repair; "
+        "bind_failures_to_scope._drop_oracle_entries removed FUNC entries"
+    )
     assert "statement mismatch" in generate_prompt

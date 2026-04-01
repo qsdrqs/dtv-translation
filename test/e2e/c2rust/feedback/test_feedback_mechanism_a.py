@@ -20,7 +20,6 @@ from core.llm_output import AssistantContent, FenceParser
 from core.types import (
     Action,
     FeedbackMechanism,
-    FeedbackMode,
     GenerateContext,
     GenerateResult,
     GenerationChannel,
@@ -246,7 +245,6 @@ fn main() {
             verify_on_eos=True,
             eos_granularity=Granularity.STMT,
             enable_feedback=True,
-            feedback_mode=FeedbackMode.FENCED,
             max_repair_rounds=1,
             repair_verify_granularity=Granularity.STMT,
         )
@@ -322,7 +320,6 @@ fn main() {
             verify_on_eos=True,
             eos_granularity=Granularity.PROGRAM,
             enable_feedback=True,
-            feedback_mode=FeedbackMode.FENCED,
             max_repair_rounds=1,
             repair_verify_granularity=Granularity.PROGRAM,
         )
@@ -398,7 +395,6 @@ fn main() {
             verify_on_eos=True,
             eos_granularity=Granularity.PROGRAM,
             enable_feedback=True,
-            feedback_mode=FeedbackMode.FENCED,
             feedback_force_mechanism=FeedbackMechanism.B,
             max_repair_rounds=1,
             repair_verify_granularity=Granularity.PROGRAM,
@@ -428,7 +424,8 @@ fn main() {
 }"""
     feedback_events = [event for event in trace if event.action == Action.FEEDBACK]
     assert len(feedback_events) == 1
-    assert feedback_events[0].notes == "feedback_mechanism=b"
-    feedback_prompt = _FeedbackBackend.seen_user_messages[0]
-    assert "The previous generated next code snippet was:" in feedback_prompt
-    assert "output contract:" in feedback_prompt
+    # PROGRAM scope forces B -> A downgrade (B is restricted to STMT scope).
+    assert feedback_events[0].notes == "feedback_mechanism=a"
+    feedback_prompt = _FeedbackBackend.seen_assistant_messages[0]
+    assert "/* repair feedback:" in feedback_prompt
+    assert "oracle=program_diff" in feedback_prompt

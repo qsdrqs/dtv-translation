@@ -3,16 +3,17 @@ from __future__ import annotations
 from core.types import (
     Diagnostic,
     FeedbackMechanism,
-    FeedbackMode,
     GenerationChannel,
     OracleOutput,
-    RollbackScope,
+    Granularity,
     Verdict,
 )
+from core.llm_output import AssistantContent
 from c_rust.feedback import RUST_FEEDBACK_LANG
 from feedback.feedback import FeedbackState
 from feedback.plan import build_feedback_plan, render_feedback_prompt
 from feedback.repair_context import RepairContext
+from js_ts.feedback import TS_FEEDBACK_LANG
 
 
 def test_build_repair_context_collects_scope_aligned_diagnostics() -> None:
@@ -28,7 +29,7 @@ def test_build_repair_context_collects_scope_aligned_diagnostics() -> None:
                     error_code="E0308",
                 ),
             ),
-            rollback_scope=RollbackScope.STMT,
+            rollback_scope=Granularity.STMT,
         ),
         OracleOutput(
             oracle_name="program_diff",
@@ -36,15 +37,15 @@ def test_build_repair_context_collects_scope_aligned_diagnostics() -> None:
             diagnostics=(
                 Diagnostic(message="stdout mismatch on test_1", severity="error"),
             ),
-            rollback_scope=RollbackScope.STMT,
+            rollback_scope=Granularity.STMT,
         ),
     ]
-    state.on_verify(outputs, selected_scope=RollbackScope.STMT)
+    state.on_verify(outputs, selected_scope=Granularity.STMT)
 
     repair_context = RepairContext.from_feedback_state(state, bad_snippet='let x: i32 = "1";')
 
     assert repair_context.failed_snippet == 'let x: i32 = "1";'
-    assert repair_context.repair_scope == RollbackScope.STMT
+    assert repair_context.repair_scope == Granularity.STMT
     assert repair_context.parser_error_context is None
     assert len(repair_context.outputs) == 2
     assert repair_context.outputs[0].oracle_name == "rustc"
@@ -63,10 +64,10 @@ def test_render_feedback_prompt_includes_parser_error_context() -> None:
             diagnostics=(
                 Diagnostic(message="expected `i32`, found `&str`", severity="error"),
             ),
-            rollback_scope=RollbackScope.STMT,
+            rollback_scope=Granularity.STMT,
         )
     ],
-    selected_scope=RollbackScope.STMT,)
+    selected_scope=Granularity.STMT,)
 
     repair_context = RepairContext.from_feedback_state(
         state,
@@ -120,10 +121,10 @@ def test_render_feedback_prompt_stmt_scope_forbids_function_wrapper_for_normal_s
             diagnostics=(
                 Diagnostic(message="expected `i32`, found `&str`", severity="error"),
             ),
-            rollback_scope=RollbackScope.STMT,
+            rollback_scope=Granularity.STMT,
         )
     ],
-    selected_scope=RollbackScope.STMT,)
+    selected_scope=Granularity.STMT,)
 
     repair_context = RepairContext.from_feedback_state(state, bad_snippet='let x: i32 = "1";')
 
@@ -142,21 +143,19 @@ def test_build_feedback_plan_maps_mechanism_a_to_continuation() -> None:
             diagnostics=(
                 Diagnostic(message="expected `i32`, found `&str`", severity="error"),
             ),
-            rollback_scope=RollbackScope.STMT,
+            rollback_scope=Granularity.STMT,
         )
     ],
-    selected_scope=RollbackScope.STMT,)
+    selected_scope=Granularity.STMT,)
     repair_context = RepairContext.from_feedback_state(state, bad_snippet='let x: i32 = "1";')
 
     plan = build_feedback_plan(
         mechanism=FeedbackMechanism.A,
-        requested_mode=FeedbackMode.INLINE,
         repair_context=repair_context,
         repair_feedback_format_config=None,
         lang_config=RUST_FEEDBACK_LANG,
     )
 
-    assert plan.mode == FeedbackMode.INLINE
     assert plan.channel == GenerationChannel.CONTINUATION
     assert "/* repair feedback:" in plan.prompt
 
@@ -170,23 +169,59 @@ def test_build_feedback_plan_maps_mechanism_b_to_patch_fenced() -> None:
             diagnostics=(
                 Diagnostic(message="expected `i32`, found `&str`", severity="error"),
             ),
-            rollback_scope=RollbackScope.STMT,
+            rollback_scope=Granularity.STMT,
         )
     ],
-    selected_scope=RollbackScope.STMT,)
+    selected_scope=Granularity.STMT,)
     repair_context = RepairContext.from_feedback_state(state, bad_snippet='let x: i32 = "1";')
 
     plan = build_feedback_plan(
         mechanism=FeedbackMechanism.B,
-        requested_mode=FeedbackMode.INLINE,
         repair_context=repair_context,
         repair_feedback_format_config=None,
         lang_config=RUST_FEEDBACK_LANG,
     )
 
-    assert plan.mode == FeedbackMode.FENCED
     assert plan.channel == GenerationChannel.PATCH
-    assert "Return exactly one Rust code block:" in plan.prompt
+    assert "Return exactly one Rust code block containing the unified diff patch:" in plan.prompt
+    assert plan.response_prefix is None
+    assert plan.post_fence_injection is not None
+
+
+def test_build_feedback_plan_puts_diff_in_post_fence_injection() -> None:
+    state = FeedbackState()
+    state.on_verify([
+        OracleOutput(
+            oracle_name="tsc",
+            verdict=Verdict.FAIL,
+            diagnostics=(
+                Diagnostic(message="Unexpected any", severity="error"),
+            ),
+            rollback_scope=Granularity.STMT,
+        )
+    ],
+    selected_scope=Granularity.STMT,)
+    repair_context = RepairContext.from_feedback_state(
+        state,
+        bad_snippet="""function parseJson(\n  txt: string\n): any {\n  return JSON.parse(txt);""",
+        repair_scope=Granularity.STMT,
+    )
+
+    plan = build_feedback_plan(
+        mechanism=FeedbackMechanism.B,
+        repair_context=repair_context,
+        repair_feedback_format_config=None,
+        lang_config=TS_FEEDBACK_LANG,
+    )
+
+    assert 'Return a unified diff patch for the failed snippet.' in plan.prompt
+    assert plan.response_prefix is None
+    assert plan.post_fence_injection == """\
+- function parseJson(
+-   txt: string
+- ): any {
+-   return JSON.parse(txt);
++ """
 
 
 def test_build_repair_context_scope_filter_limits_outputs() -> None:
@@ -196,25 +231,25 @@ def test_build_repair_context_scope_filter_limits_outputs() -> None:
             oracle_name="stmt_oracle",
             verdict=Verdict.FAIL,
             diagnostics=(Diagnostic(message="stmt mismatch", severity="error"),),
-            rollback_scope=RollbackScope.STMT,
+            rollback_scope=Granularity.STMT,
         )
     ],
-    selected_scope=RollbackScope.STMT,)
+    selected_scope=Granularity.STMT,)
     state.on_verify([
         OracleOutput(
             oracle_name="program_oracle",
             verdict=Verdict.FAIL,
             diagnostics=(Diagnostic(message="program mismatch", severity="error"),),
-            rollback_scope=RollbackScope.PROGRAM,
+            rollback_scope=Granularity.PROGRAM,
         )
     ],
-    selected_scope=RollbackScope.PROGRAM,)
+    selected_scope=Granularity.PROGRAM,)
 
     stmt_context = RepairContext.from_feedback_state(
         state,
         bad_snippet="bad stmt",
-        repair_scope=RollbackScope.STMT,
-        scope_filter=RollbackScope.STMT,
+        repair_scope=Granularity.STMT,
+        scope_filter=Granularity.STMT,
     )
     assert len(stmt_context.outputs) == 1
     assert stmt_context.outputs[0].oracle_name == "stmt_oracle"
@@ -222,8 +257,8 @@ def test_build_repair_context_scope_filter_limits_outputs() -> None:
     program_context = RepairContext.from_feedback_state(
         state,
         bad_snippet="bad program",
-        repair_scope=RollbackScope.PROGRAM,
-        scope_filter=RollbackScope.PROGRAM,
+        repair_scope=Granularity.PROGRAM,
+        scope_filter=Granularity.PROGRAM,
     )
     assert len(program_context.outputs) == 1
     assert program_context.outputs[0].oracle_name == "program_oracle"
