@@ -361,6 +361,12 @@ fn main() {
     assert error is not None
 
 
+def test_validate_patch_scope_stmt_accepts_ts_lexical_declaration() -> None:
+    patch = 'const syntaxErr: RegExpMatchArray | null = (e as Error).message.match(/pattern/i);'
+    error = validate_patch_scope(patch, Granularity.STMT, TS_FEEDBACK_LANG)
+    assert error is None
+
+
 def test_validate_patch_scope_stmt_accepts_catch_continuation_when_rollback_also_catch() -> None:
     patch = """\
  catch (e: unknown) {

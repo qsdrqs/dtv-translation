@@ -127,6 +127,14 @@ def _last_user_text(context: GenerateContext) -> str:
     return ""
 
 
+def _last_feedback_block(text: str) -> str:
+    start = text.rfind("/* repair feedback:")
+    assert start >= 0, "expected repair feedback block"
+    end = text.find("*/", start)
+    assert end >= 0, "expected repair feedback terminator"
+    return text[start : end + 2]
+
+
 class _TrackingSequenceGenerator(_SequenceGenerator):
     def __init__(self, steps: list[str]) -> None:
         super().__init__(steps)
@@ -1088,10 +1096,16 @@ def test_scope_aware_feedback_retains_per_oracle_entries_until_owner_clears() ->
     assert len(feedback_events) == 2
     feedback_prompts = generator.seen_assistant_messages[1:]
     assert len(feedback_prompts) == 2
-    assert "oracle=program_oracle" in feedback_prompts[0]
-    assert "oracle=stmt_oracle" in feedback_prompts[0]
+    first_feedback_block = _last_feedback_block(feedback_prompts[0])
+    second_feedback_block = _last_feedback_block(feedback_prompts[1])
+    assert "oracle=program_oracle" in first_feedback_block
+
+    # STMT failures that trigger PROGRAM rollback are expected in the PROGRAM block.
+    assert "oracle=stmt_oracle" in first_feedback_block
+
     assert "oracle=program_oracle" in feedback_prompts[1]
-    assert "oracle=stmt_oracle" in feedback_prompts[1]
+    assert "oracle=stmt_oracle" in second_feedback_block
+    assert "oracle=program_oracle" not in second_feedback_block
 
     final_feedback_lines = feedback_state.encode().splitlines()
     assert final_feedback_lines == []
@@ -1145,14 +1159,15 @@ def test_feedback_b_filters_diagnostics_to_current_repair_scope() -> None:
     assert feedback_events[0].notes == "feedback_mechanism=a"
     assert feedback_events[1].notes == "feedback_mechanism=b"
     # Mechanism A: diagnostics appear in the assistant message (inline format).
-    first_feedback_prompt = generator.seen_assistant_messages[1]
-    assert "oracle=program_oracle" in first_feedback_prompt
-    assert "program mismatch" in first_feedback_prompt
-    assert "oracle=stmt_oracle" in first_feedback_prompt
-    assert "statement mismatch" in first_feedback_prompt
+    first_feedback_block = _last_feedback_block(generator.seen_assistant_messages[1])
+    assert "oracle=program_oracle" in first_feedback_block
+    assert "program mismatch" in first_feedback_block
+    assert "oracle=stmt_oracle" in first_feedback_block
+    assert "statement mismatch" in first_feedback_block
     # Mechanism B: diagnostics appear in the user message (Phase 1).
     second_feedback_prompt = generator.seen_user_messages[2]
     assert "[stmt_oracle] statement mismatch" in second_feedback_prompt
+    assert "[program_oracle] program mismatch" not in second_feedback_prompt
 
 
 def test_generate_without_feedback_a_does_not_inject_active_feedback() -> None:

@@ -9,11 +9,13 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from c_rust.feedback import RUST_FEEDBACK_LANG
-from feedback.output_parser import parse_feedback_output
+from feedback.language import FeedbackLanguageConfig
+from feedback.output_parser import parse_diff_feedback_output, parse_feedback_output
+from js_ts.feedback import TS_FEEDBACK_LANG
 
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
-CASE_LINE_RE = re.compile(r"^\[(?P<idx>\d+)/(?:\d+)\]\s+(?P<case_id>s\d+)\s+/\s+(?P<mode>dtv|naive)\s+\.\.\.$")
+CASE_LINE_RE = re.compile(r"^\[(?P<idx>\d+)/(?:\d+)\]\s+(?P<case_id>\S+)\s+/\s+(?P<mode>dtv|naive)\s+\.\.\.$")
 RESULT_LINE_RE = re.compile(r"^->\s+")
 LOG_HEADER_RE = re.compile(
     r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})\s+"
@@ -21,9 +23,13 @@ LOG_HEADER_RE = re.compile(
     r"(?P<logger>[^:]+):\s*(?P<msg>.*)$"
 )
 IM_START_RE = re.compile(r"<\|im_start\|>(user|assistant)\n")
-RUST_FENCE_START_RE = re.compile(r"```(?:rust|rs)?\s*\n", re.IGNORECASE)
-ANY_FENCE_START_RE = re.compile(r"```[^\n`]*\n")
-REPAIR_FEEDBACK_RE = re.compile(r"/\* repair feedback:\n.*?\*/", re.DOTALL)
+ANY_FENCE_START_RE = re.compile(r"```[^\n`]*[ \t]*\n")
+
+
+def _make_fence_re(fence_tags: frozenset[str]) -> re.Pattern[str]:
+    tags = "|".join(re.escape(t) for t in sorted(fence_tags))
+    return re.compile(rf"```(?:{tags})?[ \t]*\n", re.IGNORECASE)
+REPAIR_FEEDBACK_START = "/* repair feedback:\n"
 POLICY_RE = re.compile(
     r"^policy: step=(?P<step>\d+) action=Action\.(?P<action>[A-Z_]+).*"
     r"feedback_mechanism=(?P<feedback_mechanism>\S+)"
@@ -226,13 +232,14 @@ def parse_chat_dump(dump_text: str | None) -> ParsedChat:
     return ParsedChat(messages=messages)
 
 
-def extract_rust_code(text: str) -> str:
+def extract_code(text: str, fence_tags: frozenset[str]) -> str:
     if not text:
         return ""
 
-    rust_match = RUST_FENCE_START_RE.search(text)
-    if rust_match is not None:
-        remainder = text[rust_match.end() :]
+    lang_re = _make_fence_re(fence_tags)
+    lang_match = lang_re.search(text)
+    if lang_match is not None:
+        remainder = text[lang_match.end():]
         end_index = remainder.find("```")
         if end_index >= 0:
             remainder = remainder[:end_index]
@@ -240,7 +247,7 @@ def extract_rust_code(text: str) -> str:
 
     any_match = ANY_FENCE_START_RE.search(text)
     if any_match is not None:
-        remainder = text[any_match.end() :]
+        remainder = text[any_match.end():]
         end_index = remainder.find("```")
         if end_index >= 0:
             remainder = remainder[:end_index]
@@ -250,14 +257,11 @@ def extract_rust_code(text: str) -> str:
 
 
 def split_inline_feedback(assistant_code: str) -> tuple[str, str]:
-    matches = list(REPAIR_FEEDBACK_RE.finditer(assistant_code))
-    if not matches:
+    start = assistant_code.rfind(REPAIR_FEEDBACK_START)
+    if start < 0:
         return assistant_code, ""
-    block = matches[-1]
-    rollback_prefix = assistant_code[: block.start()]
-    if rollback_prefix.endswith("\n\n"):
-        rollback_prefix = rollback_prefix[:-2]
-    feedback_text = block.group(0)
+    rollback_prefix = assistant_code[:start]
+    feedback_text = assistant_code[start:]
     return rollback_prefix, feedback_text
 
 
@@ -311,6 +315,7 @@ def collect_inference_calls(records: list[LogRecord]) -> dict[tuple[str | None, 
         if record.level == "MODEL_INPUT" and record.logger == "core.qwen_generator_backend":
             if pending_calls:
                 active_call = pending_calls.popleft()
+            if active_call is not None:
                 active_call.model_input = record.message
                 active_call.model_input_line = record.line_no
             continue
@@ -319,7 +324,6 @@ def collect_inference_calls(records: list[LogRecord]) -> dict[tuple[str | None, 
             if active_call is not None:
                 active_call.model_output = record.message
                 active_call.model_output_line = record.line_no
-                active_call = None
 
     return calls
 
@@ -349,6 +353,7 @@ def collect_dtv_case_ids(records: list[LogRecord], target_cases: set[str] | None
 def enrich_with_feedback_and_patch(
     event: RollbackEvent,
     call: InferenceCall | None,
+    lang_config: FeedbackLanguageConfig,
 ) -> None:
     if call is None:
         event.warnings.append("missing inference call for feedback step")
@@ -362,11 +367,13 @@ def enrich_with_feedback_and_patch(
 
     mechanism = event.feedback_mechanism or call.feedback_mechanism or ""
 
+    fence_tags = lang_config.fence_tags
+
     if mechanism.endswith(".A"):
         input_assistant = input_chat.last_non_empty_assistant()
         output_assistant = output_chat.last_non_empty_assistant()
-        input_code = extract_rust_code(input_assistant)
-        output_code = extract_rust_code(output_assistant)
+        input_code = extract_code(input_assistant, fence_tags)
+        output_code = extract_code(output_assistant, fence_tags)
 
         rollback_prefix, feedback_text = split_inline_feedback(input_code)
         patch_text = suffix_delta(input_code, output_code)
@@ -383,10 +390,10 @@ def enrich_with_feedback_and_patch(
             rollback_assistant = input_chat.last_non_empty_assistant()
 
         delta = suffix_delta(last_assistant_input, output_assistant)
-        parse_result = parse_feedback_output(delta, RUST_FEEDBACK_LANG)
+        parse_result = parse_diff_feedback_output(delta)
         applied_patch = parse_result.patch if parse_result.patch is not None else None
 
-        event.rollback_prefix = extract_rust_code(rollback_assistant)
+        event.rollback_prefix = extract_code(rollback_assistant, fence_tags)
         event.feedback_text = input_chat.last_content("user")
         event.feedback_patch_candidate = delta
         event.apply_patch_content = applied_patch
@@ -396,8 +403,8 @@ def enrich_with_feedback_and_patch(
         event.warnings.append(f"unknown feedback mechanism: {mechanism}")
         input_assistant = input_chat.last_non_empty_assistant()
         output_assistant = output_chat.last_non_empty_assistant()
-        input_code = extract_rust_code(input_assistant)
-        output_code = extract_rust_code(output_assistant)
+        input_code = extract_code(input_assistant, fence_tags)
+        output_code = extract_code(output_assistant, fence_tags)
         event.rollback_prefix = input_code
         event.feedback_text = ""
         event.feedback_patch_candidate = suffix_delta(input_code, output_code)
@@ -437,6 +444,7 @@ def collect_rollback_events(
     calls: dict[tuple[str | None, str | None, int], InferenceCall],
     target_cases: set[str] | None,
     case_ids: list[str],
+    lang_config: FeedbackLanguageConfig,
 ) -> dict[str, list[RollbackEvent]]:
     events_by_case: dict[str, list[RollbackEvent]] = {case_id: [] for case_id in case_ids}
     open_events: dict[str, list[RollbackEvent]] = defaultdict(list)
@@ -490,7 +498,7 @@ def collect_rollback_events(
                 event.feedback_parse_error = parse_error
 
                 call_key = (record.case_id, record.mode, step)
-                enrich_with_feedback_and_patch(event, calls.get(call_key))
+                enrich_with_feedback_and_patch(event, calls.get(call_key), lang_config)
             else:
                 # Subsequent feedback retry on the same rollback.
                 event.feedback_retries.append(FeedbackRetry(
@@ -518,7 +526,11 @@ def collect_rollback_events(
     return events_by_case
 
 
-def _extract_generate_prefix(call: InferenceCall | None, prefix_len_reported: int) -> str | None:
+def _extract_generate_prefix(
+    call: InferenceCall | None,
+    prefix_len_reported: int,
+    fence_tags: frozenset[str],
+) -> str | None:
     if call is None or call.model_output is None:
         return None
 
@@ -527,19 +539,40 @@ def _extract_generate_prefix(call: InferenceCall | None, prefix_len_reported: in
     if not assistant:
         return None
 
-    prefix = extract_rust_code(assistant)
+    prefix = extract_code(assistant, fence_tags)
     if len(prefix) > prefix_len_reported:
-        prefix = prefix[:prefix_len_reported]
+        prefix = prefix[-prefix_len_reported:]
     return prefix
+
+
+def _extract_generate_delta(
+    call: InferenceCall | None,
+    fence_tags: frozenset[str],
+) -> str | None:
+    if call is None or call.model_input is None or call.model_output is None:
+        return None
+
+    input_chat = parse_chat_dump(call.model_input)
+    output_chat = parse_chat_dump(call.model_output)
+    input_assistant = input_chat.last_non_empty_assistant()
+    output_assistant = output_chat.last_non_empty_assistant()
+    if not input_assistant or not output_assistant:
+        return None
+
+    input_code = extract_code(input_assistant, fence_tags)
+    output_code = extract_code(output_assistant, fence_tags)
+    return suffix_delta(input_code, output_code)
 
 
 def _build_prefix_snapshots(
     records: list[LogRecord],
     calls: dict[tuple[str | None, str | None, int], InferenceCall],
     events_by_case: dict[str, list[RollbackEvent]],
+    fence_tags: frozenset[str],
 ) -> dict[str, list[PrefixSnapshot]]:
     snapshots_by_case: dict[str, list[PrefixSnapshot]] = defaultdict(list)
     apply_event_by_step: dict[str, dict[int, RollbackEvent]] = defaultdict(dict)
+    last_prefix_by_case: dict[str, str] = {}
 
     for case_id, events in events_by_case.items():
         for event in events:
@@ -560,7 +593,17 @@ def _build_prefix_snapshots(
             step = int(generate_match.group("step"))
             prefix_len_reported = int(generate_match.group("prefix_len"))
             call = calls.get((case_id, "dtv", step))
-            prefix = _extract_generate_prefix(call, prefix_len_reported)
+            prefix: str | None = None
+            previous_prefix = last_prefix_by_case.get(case_id)
+            delta = _extract_generate_delta(call, fence_tags)
+            if previous_prefix is not None and delta is not None:
+                candidate = f"{previous_prefix}{delta}"
+                if len(candidate) == prefix_len_reported:
+                    prefix = candidate
+                elif len(candidate) > prefix_len_reported:
+                    prefix = candidate[:prefix_len_reported]
+            if prefix is None:
+                prefix = _extract_generate_prefix(call, prefix_len_reported, fence_tags)
             snapshots_by_case[case_id].append(
                 PrefixSnapshot(
                     line_no=record.line_no,
@@ -570,6 +613,8 @@ def _build_prefix_snapshots(
                     prefix=prefix,
                 )
             )
+            if prefix is not None:
+                last_prefix_by_case[case_id] = prefix
             continue
 
         apply_patch_match = APPLY_PATCH_RE.match(record.message)
@@ -597,6 +642,8 @@ def _build_prefix_snapshots(
                     prefix=prefix,
                 )
             )
+            if prefix is not None:
+                last_prefix_by_case[case_id] = prefix
 
     return dict(snapshots_by_case)
 
@@ -605,8 +652,9 @@ def infer_pre_rollback_context(
     records: list[LogRecord],
     calls: dict[tuple[str | None, str | None, int], InferenceCall],
     events_by_case: dict[str, list[RollbackEvent]],
+    fence_tags: frozenset[str],
 ) -> None:
-    snapshots_by_case = _build_prefix_snapshots(records, calls, events_by_case)
+    snapshots_by_case = _build_prefix_snapshots(records, calls, events_by_case, fence_tags)
 
     for case_id, events in events_by_case.items():
         snapshots = snapshots_by_case.get(case_id, [])
@@ -677,7 +725,7 @@ def infer_pre_rollback_context(
                 )
 
 
-def render_event_markdown(event: RollbackEvent) -> str:
+def render_event_markdown(event: RollbackEvent, lang_name: str = "rust") -> str:
     feedback_text = event.feedback_text or ""
     rollback_prefix = event.rollback_prefix or ""
     pre_rollback_prefix = event.pre_rollback_prefix or ""
@@ -686,13 +734,14 @@ def render_event_markdown(event: RollbackEvent) -> str:
     patch_candidate = event.feedback_patch_candidate or ""
     warnings = "\n".join(f"- {warning}" for warning in event.warnings) or "- none"
     parse_error = event.feedback_parse_error if event.feedback_parse_error is not None else "None"
+    code_tag = lang_name.lower()
     apply_patch_section = (
-        "```rust\n" + apply_patch_content + "\n```"
+        f"```{code_tag}\n" + apply_patch_content + "\n```"
         if apply_patch_content
         else "(no apply_patch content; patch was not applied)"
     )
     patch_candidate_section = (
-        "```rust\n" + patch_candidate + "\n```"
+        f"```{code_tag}\n" + patch_candidate + "\n```"
         if patch_candidate
         else "(none)"
     )
@@ -740,19 +789,19 @@ def render_event_markdown(event: RollbackEvent) -> str:
 
 ### Pre-Rollback Prefix
 
-```rust
+```{code_tag}
 {pre_rollback_prefix}
 ```
 
 ### Dropped Segment
 
-```rust
+```{code_tag}
 {dropped_content}
 ```
 
 ### Rollback Prefix
 
-```rust
+```{code_tag}
 {rollback_prefix}
 ```
 
@@ -781,6 +830,7 @@ def write_outputs(
     out_dir: Path,
     log_path: Path,
     events_by_case: dict[str, list[RollbackEvent]],
+    lang_name: str = "rust",
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -810,7 +860,7 @@ def write_outputs(
             "",
         ]
         for event in case_events:
-            md_parts.append(render_event_markdown(event))
+            md_parts.append(render_event_markdown(event, lang_name=lang_name))
             md_parts.append("")
 
         (case_dir / "rollback_events.md").write_text("\n".join(md_parts).rstrip() + "\n", encoding="utf-8")
@@ -865,6 +915,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional case ID filter. Repeat to include multiple cases.",
     )
+    parser.add_argument(
+        "--task",
+        choices=["c_rust", "js_ts"],
+        default="c_rust",
+        help="Translation task. Selects fence language and feedback parser. Default: c_rust.",
+    )
     return parser.parse_args()
 
 
@@ -874,15 +930,21 @@ def main() -> None:
     if not log_path.exists():
         raise FileNotFoundError(f"log file not found: {log_path}")
 
+    lang_config: FeedbackLanguageConfig
+    if args.task == "js_ts":
+        lang_config = TS_FEEDBACK_LANG
+    else:
+        lang_config = RUST_FEEDBACK_LANG
+
     out_dir = args.out_dir if args.out_dir is not None else default_out_dir(log_path)
     target_cases = set(args.case_id) if args.case_id else None
 
     records = parse_records(log_path)
     calls = collect_inference_calls(records)
     case_ids = collect_dtv_case_ids(records, target_cases)
-    events_by_case = collect_rollback_events(records, calls, target_cases, case_ids)
-    infer_pre_rollback_context(records, calls, events_by_case)
-    write_outputs(out_dir, log_path, events_by_case)
+    events_by_case = collect_rollback_events(records, calls, target_cases, case_ids, lang_config)
+    infer_pre_rollback_context(records, calls, events_by_case, lang_config.fence_tags)
+    write_outputs(out_dir, log_path, events_by_case, lang_name=lang_config.name)
 
     total_events = sum(len(events) for events in events_by_case.values())
     total_retries = sum(

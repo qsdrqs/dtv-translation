@@ -21,7 +21,6 @@ TS_FEEDBACK_LANG = FeedbackLanguageConfig(
         "enum_declaration",
         "import_statement",
         "export_statement",
-        "lexical_declaration",
     }),
     function_item_type="function_declaration",
     example_function_wrapper="`function main() { ... }`",

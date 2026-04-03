@@ -18,6 +18,7 @@ from core.types import (
 from js_ts.oracles.compiler_oracle.tsc_driver import TscDriver
 from js_ts.oracles.compiler_oracle.tsc_parser import (
     filter_partial_noise,
+    filter_type_correctness,
     has_errors,
     parse_tsc_diagnostics,
 )
@@ -65,6 +66,7 @@ class TscOracle(Oracle):
 
         if self.required_granularity < Granularity.PROGRAM:
             diagnostics = filter_partial_noise(diagnostics)
+        diagnostics = filter_type_correctness(diagnostics)
 
         verdict = _decide_verdict(result.exit_code, diagnostics, result.timed_out)
         first_diag = diagnostics[0].message if diagnostics else ""

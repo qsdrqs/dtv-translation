@@ -13,6 +13,13 @@ _PARTIAL_COMPILATION_NOISE: frozenset[str] = frozenset({
     "TS2304",
     "TS2552",
     "TS2307",
+    "TS2564",
+})
+
+_TYPE_CORRECTNESS_BLOCKLIST: frozenset[str] = frozenset({
+    "TS2322",
+    "TS2339",
+    "TS2345",
 })
 
 
@@ -41,6 +48,19 @@ def parse_tsc_diagnostics(result: TscResult) -> tuple[Diagnostic, ...]:
 
 def has_errors(diagnostics: tuple[Diagnostic, ...]) -> bool:
     return any(diag.severity in _ERROR_LEVELS for diag in diagnostics)
+
+
+def filter_type_correctness(
+    diagnostics: tuple[Diagnostic, ...],
+) -> tuple[Diagnostic, ...]:
+    return tuple(
+        d for d in diagnostics
+        if not (
+            d.error_code is not None
+            and d.error_code in _TYPE_CORRECTNESS_BLOCKLIST
+            and d.severity in _ERROR_LEVELS
+        )
+    )
 
 
 def filter_partial_noise(

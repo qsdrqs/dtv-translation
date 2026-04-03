@@ -6,6 +6,7 @@ from js_ts.oracles.compiler_oracle.tsc_driver import TscResult
 from js_ts.oracles.compiler_oracle.tsc_oracle import _decide_verdict
 from js_ts.oracles.compiler_oracle.tsc_parser import (
     filter_partial_noise,
+    filter_type_correctness,
     has_errors,
     parse_tsc_diagnostics,
 )
@@ -112,6 +113,46 @@ def test_filter_keeps_warnings() -> None:
         Diagnostic(message="unused variable", severity="warning", error_code="TS6133"),
     )
     filtered = filter_partial_noise(diagnostics)
+    assert filtered == diagnostics
+
+
+# filter_type_correctness
+
+
+def test_type_correctness_drops_blocklisted_keeps_others() -> None:
+    diagnostics = (
+        Diagnostic(message="Type 'string' is not assignable", error_code="TS2322"),
+        Diagnostic(message="Property 'x' does not exist on type 'never'", error_code="TS2339"),
+        Diagnostic(message="Argument type mismatch", error_code="TS2345"),
+        Diagnostic(message="Property has no initializer", error_code="TS2564"),
+        Diagnostic(message="type used as value", error_code="TS2693"),
+        Diagnostic(message="Parameter 'x' implicitly has an 'any' type", error_code="TS7006"),
+        Diagnostic(message="unused variable", severity="warning", error_code="TS6133"),
+    )
+    filtered = filter_type_correctness(diagnostics)
+    codes = tuple(d.error_code for d in filtered)
+    assert "TS2322" not in codes
+    assert "TS2339" not in codes
+    assert "TS2345" not in codes
+    assert "TS2564" in codes
+    assert "TS2693" in codes
+    assert "TS7006" in codes
+    assert "TS6133" in codes
+
+
+def test_type_correctness_keeps_ts2xxx_warnings() -> None:
+    diagnostics = (
+        Diagnostic(message="some TS2 warning", severity="warning", error_code="TS2999"),
+    )
+    filtered = filter_type_correctness(diagnostics)
+    assert filtered == diagnostics
+
+
+def test_type_correctness_keeps_non_coded() -> None:
+    diagnostics = (
+        Diagnostic(message="raw error"),
+    )
+    filtered = filter_type_correctness(diagnostics)
     assert filtered == diagnostics
 
 

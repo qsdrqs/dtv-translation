@@ -393,15 +393,22 @@ def _append_trace(
     )
 
 
-def _render_generate_feedback_assistant(
-    assistant_prefix: AssistantContent,
+def _render_feedback_assistant(
+    assistant_prefix: str | AssistantContent,
     feedback_state: FeedbackState,
     runtime: ControllerRuntime,
     comment_prefix: str = "//",
+    excluded_scopes: frozenset[Granularity] = frozenset(),
+    format_config: RepairFeedbackFormatConfig | None = None,
 ) -> str:
-    scoped_feedback = feedback_state.scoped_active_snapshot()
+    scoped_feedback = tuple(
+        row for row in feedback_state.scoped_active_snapshot()
+        if row[0] not in excluded_scopes
+    )
     if not scoped_feedback:
-        return assistant_prefix.render()
+        if isinstance(assistant_prefix, AssistantContent):
+            return assistant_prefix.render()
+        return assistant_prefix
 
     blocks: list[tuple[int | None, str]] = []
     for scope, anchor, outputs in scoped_feedback:
@@ -416,10 +423,14 @@ def _render_generate_feedback_assistant(
                 repair_scope=scope,
                 outputs=outputs,
             ),
+            format_config=format_config,
         )
         blocks.append((anchor, feedback_text))
 
-    if assistant_prefix.fence_state in {FenceState.INSIDE, FenceState.DONE}:
+    if isinstance(assistant_prefix, AssistantContent) and assistant_prefix.fence_state in {
+        FenceState.INSIDE,
+        FenceState.DONE,
+    }:
         code = assistant_prefix.code
         insertions: list[tuple[int, str]] = []
         for anchor, block in blocks:
@@ -430,7 +441,7 @@ def _render_generate_feedback_assistant(
             code = f"{code[:pos]}{block}\n\n{code[pos:]}"
         return assistant_prefix.with_code(code).render()
 
-    rendered_prefix = assistant_prefix.render()
+    rendered_prefix = assistant_prefix.render() if isinstance(assistant_prefix, AssistantContent) else assistant_prefix
     suffix = "\n\n".join(block for _, block in blocks)
     if not rendered_prefix:
         return suffix
@@ -474,7 +485,7 @@ def _handle_generate(
     ):
         update_last_assistant(
             messages,
-            _render_generate_feedback_assistant(
+            _render_feedback_assistant(
                 runtime.assistant_prefix, feedback_state, runtime, comment_prefix,
             ),
         )
@@ -783,7 +794,7 @@ def _handle_feedback(
     current_base = runtime.repair_base_prefix
     # Feedback B lists diagnostics explicitly; annotation would be redundant.
     bad_snippet = _failed_snippet(current_base, runtime.failed_prefix)
-    scope_filter = runtime.repair_scope if mechanism == FeedbackMechanism.B else None
+    scope_filter = repair_scope
     repair_context = RepairContext.from_feedback_state(
         feedback_state,
         bad_snippet,
@@ -807,7 +818,14 @@ def _handle_feedback(
         feedback_plan=feedback_plan,
         repair_base_extractor_state=runtime.repair_base_extractor_state,
     )
-    update_last_assistant(base_messages, runtime.repair_base_assistant_prefix)
+    replayed_assistant_prefix = _render_feedback_assistant(
+        runtime.repair_base_assistant_prefix,
+        feedback_state,
+        runtime,
+        excluded_scopes=frozenset({repair_scope}),
+        format_config=RepairFeedbackFormatConfig(include_failed_snippet=False),
+    )
+    update_last_assistant(base_messages, replayed_assistant_prefix)
 
     if feedback_plan.post_fence_injection is not None:
         result, total_tokens = _feedback_two_phase(
@@ -825,7 +843,7 @@ def _handle_feedback(
         context.messages = feedback_strategy.apply(
             base_messages,
             feedback_plan.prompt,
-            runtime.repair_base_assistant_prefix,
+            replayed_assistant_prefix,
             feedback_plan.response_prefix,
         )
         result = feedback_gen.generate_step(context)

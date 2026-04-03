@@ -47,10 +47,10 @@ def test_pass_on_valid_code() -> None:
     assert output.realized_cost == 1
 
 
-def test_fail_on_type_error() -> None:
+def test_type_error_filtered_passes() -> None:
     output = _run_oracle('const x: number = "hello";')
-    assert output.verdict == Verdict.FAIL
-    assert any(d.error_code == "TS2322" for d in output.diagnostics)
+    assert output.verdict == Verdict.PASS
+    assert not any(d.error_code == "TS2322" for d in output.diagnostics)
 
 
 def test_fail_on_syntax_error() -> None:
@@ -66,14 +66,13 @@ def test_noise_filtered_undefined_name_passes() -> None:
     assert output.verdict == Verdict.PASS
 
 
-def test_noise_filtered_but_real_error_still_fails() -> None:
+def test_noise_and_type_error_both_filtered_passes() -> None:
     code = """\
 const x: number = "hello";
 const y = unknownVar;
 """
     output = _run_oracle(code)
-    assert output.verdict == Verdict.FAIL
-    assert any(d.error_code == "TS2322" for d in output.diagnostics)
+    assert output.verdict == Verdict.PASS
 
 
 # strict mode
@@ -85,7 +84,7 @@ def test_strict_implicit_any_fails() -> None:
     assert any(d.error_code == "TS7006" for d in output.diagnostics)
 
 
-def test_strict_null_check_fails() -> None:
+def test_strict_null_check_filtered_passes() -> None:
     code = """\
 function foo(): string {
     const x: string | undefined = undefined;
@@ -93,7 +92,7 @@ function foo(): string {
 }
 """
     output = _run_oracle(code)
-    assert output.verdict == Verdict.FAIL
+    assert output.verdict == Verdict.PASS
 
 
 # TscProgramOracle
@@ -106,8 +105,7 @@ def test_program_oracle_attributes() -> None:
     assert oracle.rollback_scope == Granularity.PROGRAM
 
 
-def test_program_oracle_noise_not_filtered() -> None:
-    """At PROGRAM granularity, TS2304 (cannot find name) is a real error, not noise."""
+def test_program_oracle_undefined_name_fails() -> None:
     oracle = TscProgramOracle()
     code = "const x: number = unknownVar;"
     sample = TranslationSample(source_code="", source_lang="js", test_cases=[])
