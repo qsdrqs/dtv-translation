@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from c_rust.feedback import RUST_FEEDBACK_LANG
-from c_rust.oracles import ProgramOracle, RustcOracle
+from c_rust.oracles import RustcOracle
 from c_rust.render import CRustRenderer
 from controller.adapters import GeneratorAdapter
 from controller.loop import run_dtv_loop
@@ -16,7 +16,7 @@ from controller.policy import DefaultPolicy, DefaultPolicyConfig
 from controller.stop_criteria import DTVStoppingCriteria, RUST_PROFILE
 from core.budget import Budget
 from core.generator_backend import GeneratorBackend, infer_stop_reason
-from core.llm_output import AssistantContent, FenceParser
+from core.llm_output import AssistantContent, BEGIN_WRITE_CODE, END_WRITE_CODE, WriteRegionParser
 from core.types import (
     Action,
     FeedbackMechanism,
@@ -173,15 +173,15 @@ def _ensure_gcc() -> None:
 
 
 def _build_generator(backend_cls: type[GeneratorBackend]) -> GeneratorAdapter:
-    fence_parser = FenceParser(allowed_langs=("rust", "rs"))
+    write_region_parser = WriteRegionParser()
 
     def _stop_factory(tokenizer):
-        return [DTVStoppingCriteria(tokenizer, RUST_PROFILE, fence_parser=fence_parser)]
+        return [DTVStoppingCriteria(tokenizer, RUST_PROFILE, write_region_parser=write_region_parser)]
 
     return GeneratorAdapter(
         model_name="mock",
         stop_criteria_factory=_stop_factory,
-        fence_parser=fence_parser,
+        write_region_parser=write_region_parser,
         backend_cls=backend_cls,
     )
 
@@ -222,28 +222,25 @@ def _run_feedback_case(
     )
 
 
-def test_feedback_e2e_compile_failure_then_repair_success() -> None:
+def test_closed_candidate_compile_failure_terminates_inside_dtv() -> None:
     _ensure_rustc()
     sample = TranslationSample(
         source_code="int main(void) { return 0; }",
         source_lang="c",
         test_cases=[TestCase(stdin="", test_id="empty")],
     )
-    initial_output = """```rust
-fn main() {
+    initial_output = f"""{BEGIN_WRITE_CODE}
+fn main() {{
     let x: i32 = \"1\";
-}
-```"""
-    feedback_output = """```rust
-fn main() {
-    let x: i32 = 1;
-}
-```"""
+}}
+{END_WRITE_CODE}
+"""
+    feedback_output = ""
     policy = DefaultPolicy(
         DefaultPolicyConfig(
             verify_on_boundary=False,
-            verify_on_eos=True,
-            eos_granularity=Granularity.STMT,
+            verify_on_close=True,
+            close_granularity=Granularity.STMT,
             enable_feedback=True,
             max_repair_rounds=1,
             repair_verify_granularity=Granularity.STMT,
@@ -259,17 +256,13 @@ fn main() {
     )
 
     actions = [event.action for event in trace]
-    assert actions[:7] == [
+    assert actions[:3] == [
         Action.GENERATE,
         Action.VERIFY,
-        Action.ROLLBACK,
-        Action.FEEDBACK,
-        Action.APPLY_PATCH,
-        Action.VERIFY,
-        Action.COMMIT,
+        Action.TERMINATE,
     ]
     assert final_prefix == """fn main() {
-    let x: i32 = 1;
+    let x: i32 = "1";
 }
 """
     verify_events = [event for event in trace if event.action == Action.VERIFY]
@@ -277,155 +270,4 @@ fn main() {
         any(output.oracle_name == "rustc" and output.verdict == Verdict.FAIL for output in event.oracle_outputs)
         for event in verify_events
     )
-    assert any(
-        any(output.oracle_name == "rustc" and output.verdict == Verdict.PASS for output in event.oracle_outputs)
-        for event in verify_events
-    )
-    feedback_events = [event for event in trace if event.action == Action.FEEDBACK]
-    assert len(feedback_events) == 1
-    assert feedback_events[0].notes == "feedback_mechanism=a"
-    feedback_message = _FeedbackBackend.seen_assistant_messages[0]
-    assert "/* repair feedback:" in feedback_message
-    assert "oracle=rustc" in feedback_message
-    assert "failed snippet:" in feedback_message
-
-
-def test_feedback_e2e_behavior_mismatch_then_program_repair_success() -> None:
-    _ensure_rustc()
-    _ensure_gcc()
-    sample = TranslationSample(
-        source_code="""#include <stdio.h>
-
-int main(void) {
-    printf("42\\n");
-    return 0;
-}
-""",
-        source_lang="c",
-        test_cases=[TestCase(stdin="", test_id="stdout_case")],
-    )
-    initial_output = """```rust
-fn main() {
-    println!("24");
-}
-```"""
-    feedback_output = """```rust
-fn main() {
-    println!("42");
-}
-```"""
-    policy = DefaultPolicy(
-        DefaultPolicyConfig(
-            verify_on_boundary=False,
-            verify_on_eos=True,
-            eos_granularity=Granularity.PROGRAM,
-            enable_feedback=True,
-            max_repair_rounds=1,
-            repair_verify_granularity=Granularity.PROGRAM,
-        )
-    )
-
-    final_prefix, trace = _run_feedback_case(
-        sample=sample,
-        initial_output=initial_output,
-        feedback_output=feedback_output,
-        oracles=[RustcOracle(), ProgramOracle()],
-        policy=policy,
-    )
-
-    actions = [event.action for event in trace]
-    assert actions[:7] == [
-        Action.GENERATE,
-        Action.VERIFY,
-        Action.ROLLBACK,
-        Action.FEEDBACK,
-        Action.APPLY_PATCH,
-        Action.VERIFY,
-        Action.COMMIT,
-    ]
-    assert final_prefix.strip() == """fn main() {
-    println!("42");
-}"""
-    verify_events = [event for event in trace if event.action == Action.VERIFY]
-    assert any(
-        any(output.oracle_name == "program_diff" and output.verdict == Verdict.FAIL for output in event.oracle_outputs)
-        for event in verify_events
-    )
-    assert any(
-        any(output.oracle_name == "program_diff" and output.verdict == Verdict.PASS for output in event.oracle_outputs)
-        for event in verify_events
-    )
-    feedback_events = [event for event in trace if event.action == Action.FEEDBACK]
-    assert len(feedback_events) == 1
-    assert feedback_events[0].notes == "feedback_mechanism=a"
-    feedback_message = _FeedbackBackend.seen_assistant_messages[0]
-    assert "/* repair feedback:" in feedback_message
-    assert "oracle=program_diff" in feedback_message
-    assert "stdout mismatch" in feedback_message
-    assert "oracle=rustc" not in feedback_message
-
-
-def test_feedback_e2e_program_failure_then_mechanism_b_repair_success() -> None:
-    _ensure_rustc()
-    _ensure_gcc()
-    sample = TranslationSample(
-        source_code="""#include <stdio.h>
-
-int main(void) {
-    printf("42\\n");
-    return 0;
-}
-""",
-        source_lang="c",
-        test_cases=[TestCase(stdin="", test_id="stdout_case")],
-    )
-    initial_output = """```rust
-fn main() {
-    println!("24");
-}
-```"""
-    feedback_output = """```rust
-fn main() {
-    println!("42");
-}
-```"""
-    policy = DefaultPolicy(
-        DefaultPolicyConfig(
-            verify_on_boundary=False,
-            verify_on_eos=True,
-            eos_granularity=Granularity.PROGRAM,
-            enable_feedback=True,
-            feedback_force_mechanism=FeedbackMechanism.B,
-            max_repair_rounds=1,
-            repair_verify_granularity=Granularity.PROGRAM,
-        )
-    )
-
-    final_prefix, trace = _run_feedback_case(
-        sample=sample,
-        initial_output=initial_output,
-        feedback_output=feedback_output,
-        oracles=[RustcOracle(), ProgramOracle()],
-        policy=policy,
-    )
-
-    actions = [event.action for event in trace]
-    assert actions[:7] == [
-        Action.GENERATE,
-        Action.VERIFY,
-        Action.ROLLBACK,
-        Action.FEEDBACK,
-        Action.APPLY_PATCH,
-        Action.VERIFY,
-        Action.COMMIT,
-    ]
-    assert final_prefix.strip() == """fn main() {
-    println!("42");
-}"""
-    feedback_events = [event for event in trace if event.action == Action.FEEDBACK]
-    assert len(feedback_events) == 1
-    # PROGRAM scope forces B -> A downgrade (B is restricted to STMT scope).
-    assert feedback_events[0].notes == "feedback_mechanism=a"
-    feedback_prompt = _FeedbackBackend.seen_assistant_messages[0]
-    assert "/* repair feedback:" in feedback_prompt
-    assert "oracle=program_diff" in feedback_prompt
+    assert all(event.action != Action.FEEDBACK for event in trace)

@@ -8,7 +8,7 @@ from c_rust.feedback import RUST_FEEDBACK_LANG
 from controller.loop import run_dtv_loop
 from controller.policy import DefaultPolicy, DefaultPolicyConfig
 from core.budget import Budget
-from core.llm_output import AssistantContent, FenceParserSnapshot, FenceState, OutputExtractorState
+from core.llm_output import AssistantContent, OutputExtractorState, WriteRegionParserSnapshot, WriteRegionState
 from core.types import (
     Action,
     Artifact,
@@ -34,14 +34,14 @@ class _Step:
     text: str
     stop_reason: StopReason
     tokens: int = 1
-    fence_state: FenceState | None = None
+    write_region_state: WriteRegionState | None = None
 
 
 class _SequenceGenerator:
     def __init__(self, steps: list[_Step]) -> None:
         self.steps = steps
         self.idx = 0
-        snapshot = FenceParserSnapshot(state=FenceState.OUTSIDE, saw_fence=False)
+        snapshot = WriteRegionParserSnapshot(state=WriteRegionState.OUTSIDE, saw_begin=False, saw_end=False)
         self._extractor_state = OutputExtractorState(
             segment=snapshot,
             extract=snapshot,
@@ -59,16 +59,17 @@ class _SequenceGenerator:
             )
         step = self.steps[self.idx]
         self.idx += 1
-        if step.fence_state is not None:
-            snap = FenceParserSnapshot(
-                state=step.fence_state,
-                saw_fence=step.fence_state != FenceState.OUTSIDE,
+        if step.write_region_state is not None:
+            snap = WriteRegionParserSnapshot(
+                state=step.write_region_state,
+                saw_begin=step.write_region_state == WriteRegionState.INSIDE,
+                saw_end=step.write_region_state == WriteRegionState.OUTSIDE and self._extractor_state.extract.saw_begin,
             )
             self._extractor_state = OutputExtractorState(
                 segment=snap, extract=snap, shared=snap, warning_emitted=False,
             )
-        elif step.stop_reason.kind == "eos":
-            done = FenceParserSnapshot(state=FenceState.DONE, saw_fence=True)
+        elif step.stop_reason.kind == "write_region_closed":
+            done = WriteRegionParserSnapshot(state=WriteRegionState.OUTSIDE, saw_begin=True, saw_end=True)
             self._extractor_state = OutputExtractorState(
                 segment=done, extract=done, shared=done, warning_emitted=False,
             )
@@ -81,7 +82,7 @@ class _SequenceGenerator:
     def reset_output_extractor(self) -> None:
         return None
 
-    def get_output_extractor_state(self) -> FenceState:
+    def get_output_extractor_state(self) -> WriteRegionState:
         return self._extractor_state.extract.state
 
     def capture_output_extractor_state(self) -> OutputExtractorState:
@@ -90,10 +91,13 @@ class _SequenceGenerator:
     def restore_output_extractor_state(self, state: OutputExtractorState) -> None:
         self._extractor_state = state
 
+    def set_stop_on_write_region_open(self, enabled: bool) -> None:
+        _ = enabled
+
 
 class _FeedbackRestoreOrderGenerator:
     def __init__(self) -> None:
-        snapshot = FenceParserSnapshot(state=FenceState.OUTSIDE, saw_fence=False)
+        snapshot = WriteRegionParserSnapshot(state=WriteRegionState.OUTSIDE, saw_begin=False, saw_end=False)
         self._extractor_state = OutputExtractorState(
             segment=snapshot,
             extract=snapshot,
@@ -119,7 +123,7 @@ class _FeedbackRestoreOrderGenerator:
                 stop_reason=StopReason(kind="empty"),
             )
         self._generated_once = True
-        inside = FenceParserSnapshot(state=FenceState.INSIDE, saw_fence=True)
+        inside = WriteRegionParserSnapshot(state=WriteRegionState.INSIDE, saw_begin=True, saw_end=False)
         self._extractor_state = OutputExtractorState(
             segment=inside,
             extract=inside,
@@ -131,16 +135,16 @@ class _FeedbackRestoreOrderGenerator:
             delta_tokens=1,
             stop_reason=StopReason(kind="boundary"),
             assistant_delta=AssistantContent(
-                fence_lang="rust",
                 code="bad;",
-                fence_state=FenceState.INSIDE,
+                has_begin_marker=True,
+                region_state=WriteRegionState.INSIDE,
             ),
         )
 
     def reset_output_extractor(self) -> None:
         self.events.append("reset")
 
-    def get_output_extractor_state(self) -> FenceState:
+    def get_output_extractor_state(self) -> WriteRegionState:
         return self._extractor_state.extract.state
 
     def capture_output_extractor_state(self) -> OutputExtractorState:
@@ -149,6 +153,9 @@ class _FeedbackRestoreOrderGenerator:
     def restore_output_extractor_state(self, state: OutputExtractorState) -> None:
         self.events.append(f"restore:{int(state.warning_emitted)}")
         self._extractor_state = state
+
+    def set_stop_on_write_region_open(self, enabled: bool) -> None:
+        _ = enabled
 
     @staticmethod
     def _is_feedback_context(context: GenerateContext) -> bool:
@@ -165,7 +172,7 @@ class _FeedbackRestoreOrderGenerator:
 
 class _MechanismBInsideGenerator:
     def __init__(self) -> None:
-        snapshot = FenceParserSnapshot(state=FenceState.OUTSIDE, saw_fence=False)
+        snapshot = WriteRegionParserSnapshot(state=WriteRegionState.OUTSIDE, saw_begin=False, saw_end=False)
         self._extractor_state = OutputExtractorState(
             segment=snapshot,
             extract=snapshot,
@@ -174,7 +181,7 @@ class _MechanismBInsideGenerator:
         )
         self._generated_once = False
         self._feedback_phase = 0
-        self.feedback_states: list[FenceState] = []
+        self.feedback_states: list[WriteRegionState] = []
 
     def generate_step(self, context: GenerateContext) -> GenerateResult:
         if self._is_mechanism_b_feedback_context(context):
@@ -182,12 +189,12 @@ class _MechanismBInsideGenerator:
             self._feedback_phase += 1
             if self._feedback_phase == 1:
                 return GenerateResult(
-                    delta_text="Let me reason about this.\n```rust\n",
+                    delta_text="Let me reason about this.\n",
                     delta_tokens=1,
                     stop_reason=StopReason(kind="boundary"),
                 )
             return GenerateResult(
-                delta_text="good;\n```\n",
+                delta_text="good;\n<<END_WRITE_CODE>>\n",
                 delta_tokens=1,
                 stop_reason=StopReason(kind="boundary"),
             )
@@ -198,7 +205,7 @@ class _MechanismBInsideGenerator:
                 stop_reason=StopReason(kind="empty"),
             )
         self._generated_once = True
-        inside = FenceParserSnapshot(state=FenceState.INSIDE, saw_fence=True)
+        inside = WriteRegionParserSnapshot(state=WriteRegionState.INSIDE, saw_begin=True, saw_end=False)
         self._extractor_state = OutputExtractorState(
             segment=inside,
             extract=inside,
@@ -210,16 +217,16 @@ class _MechanismBInsideGenerator:
             delta_tokens=1,
             stop_reason=StopReason(kind="boundary"),
             assistant_delta=AssistantContent(
-                fence_lang="rust",
                 code="bad;",
-                fence_state=FenceState.INSIDE,
+                has_begin_marker=True,
+                region_state=WriteRegionState.INSIDE,
             ),
         )
 
     def reset_output_extractor(self) -> None:
         return None
 
-    def get_output_extractor_state(self) -> FenceState:
+    def get_output_extractor_state(self) -> WriteRegionState:
         return self._extractor_state.extract.state
 
     def capture_output_extractor_state(self) -> OutputExtractorState:
@@ -227,6 +234,9 @@ class _MechanismBInsideGenerator:
 
     def restore_output_extractor_state(self, state: OutputExtractorState) -> None:
         self._extractor_state = state
+
+    def set_stop_on_write_region_open(self, enabled: bool) -> None:
+        _ = enabled
 
     @staticmethod
     def _is_mechanism_b_feedback_context(context: GenerateContext) -> bool:
@@ -398,14 +408,14 @@ def test_default_policy_retry_after_fail_without_feedback_retries_generate() -> 
     assert final_prefix == "good;"
 
 
-def test_default_policy_no_oracles_continue_then_generate() -> None:
+def test_default_policy_no_oracles_without_close_stays_in_continue_loop() -> None:
     generator = _SequenceGenerator([
         _Step("let x = 1;", StopReason(kind="boundary")),
         _Step("let y = 2;", StopReason(kind="eos")),
     ])
     renderer = _OkRenderer()
     oracles = [_SequenceOracle([Verdict.PASS], required_granularity=Granularity.PROGRAM)]
-    policy = DefaultPolicy(DefaultPolicyConfig(terminate_on_eos_and_pass=False))
+    policy = DefaultPolicy()
 
     final_prefix, trace = _run_loop(generator, renderer, oracles, policy, max_steps=6)
 
@@ -416,7 +426,7 @@ def test_default_policy_no_oracles_continue_then_generate() -> None:
         Action.CONTINUE,
         Action.GENERATE,
         Action.VERIFY,
-        Action.COMMIT,
+        Action.CONTINUE,
     ]
     assert final_prefix == "let x = 1;let y = 2;"
 
@@ -476,7 +486,7 @@ def test_default_policy_inconclusive_render_continue_then_generate() -> None:
 
 def test_default_policy_eos_no_oracles_commits() -> None:
     generator = _SequenceGenerator([
-        _Step("fn main() {}", StopReason(kind="eos")),
+        _Step("fn main() {}", StopReason(kind="write_region_closed")),
     ])
     renderer = _OkRenderer()
     policy = DefaultPolicy()
@@ -538,7 +548,7 @@ def test_default_policy_force_b_feedback_flows_through_loop() -> None:
     feedback_events = [event for event in trace if event.action == Action.FEEDBACK]
     assert len(feedback_events) == 1
     assert feedback_events[0].notes == "feedback_mechanism=b"
-    assert generator.feedback_states == [FenceState.INSIDE, FenceState.INSIDE]
+    assert generator.feedback_states == [WriteRegionState.INSIDE, WriteRegionState.INSIDE]
     assert final_prefix == "good;"
 
 
@@ -563,7 +573,7 @@ class _AlwaysBadFeedbackGenerator:
     """First call returns 'ok;' (for COMMIT checkpoint), all subsequent return 'bad;'."""
 
     def __init__(self) -> None:
-        snapshot = FenceParserSnapshot(state=FenceState.OUTSIDE, saw_fence=False)
+        snapshot = WriteRegionParserSnapshot(state=WriteRegionState.OUTSIDE, saw_begin=False, saw_end=False)
         self._extractor_state = OutputExtractorState(
             segment=snapshot, extract=snapshot, shared=snapshot, warning_emitted=False,
         )
@@ -572,7 +582,7 @@ class _AlwaysBadFeedbackGenerator:
     def generate_step(self, context: GenerateContext) -> GenerateResult:
         if self._first:
             self._first = False
-            inside = FenceParserSnapshot(state=FenceState.INSIDE, saw_fence=True)
+            inside = WriteRegionParserSnapshot(state=WriteRegionState.INSIDE, saw_begin=True, saw_end=False)
             self._extractor_state = OutputExtractorState(
                 segment=inside, extract=inside, shared=inside, warning_emitted=False,
             )
@@ -581,7 +591,7 @@ class _AlwaysBadFeedbackGenerator:
                 delta_tokens=1,
                 stop_reason=StopReason(kind="boundary"),
                 assistant_delta=AssistantContent(
-                    fence_lang="rust", code="ok;", fence_state=FenceState.INSIDE,
+                    code="ok;", has_begin_marker=True, region_state=WriteRegionState.INSIDE,
                 ),
             )
         return GenerateResult(
@@ -593,7 +603,7 @@ class _AlwaysBadFeedbackGenerator:
     def reset_output_extractor(self) -> None:
         return None
 
-    def get_output_extractor_state(self) -> FenceState:
+    def get_output_extractor_state(self) -> WriteRegionState:
         return self._extractor_state.extract.state
 
     def capture_output_extractor_state(self) -> OutputExtractorState:
@@ -601,6 +611,9 @@ class _AlwaysBadFeedbackGenerator:
 
     def restore_output_extractor_state(self, state: OutputExtractorState) -> None:
         self._extractor_state = state
+
+    def set_stop_on_write_region_open(self, enabled: bool) -> None:
+        _ = enabled
 
 
 def _run_stall_escalation_test(group_stack, expected_escalation_scope):

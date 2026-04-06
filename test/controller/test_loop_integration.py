@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import pytest
 
 from c_rust.feedback import RUST_FEEDBACK_LANG
-from core.llm_output import AssistantContent, FenceParserSnapshot, FenceState, OutputExtractorState
+from core.llm_output import AssistantContent, OutputExtractorState, WriteRegionParserSnapshot, WriteRegionState
 from core.types import TestCase, TranslationSample
 from controller.loop import ControllerOp, run_dtv_loop, select_oracles_by_granularity
 from core.budget import Budget
@@ -44,11 +44,11 @@ class _FakeGenerator:
     def reset_output_extractor(self) -> None:
         return None
 
-    def get_output_extractor_state(self) -> FenceState:
-        return FenceState.OUTSIDE
+    def get_output_extractor_state(self) -> WriteRegionState:
+        return WriteRegionState.OUTSIDE
 
     def capture_output_extractor_state(self) -> OutputExtractorState:
-        snapshot = FenceParserSnapshot(state=FenceState.OUTSIDE, saw_fence=False)
+        snapshot = WriteRegionParserSnapshot(state=WriteRegionState.OUTSIDE, saw_begin=False, saw_end=False)
         return OutputExtractorState(
             segment=snapshot,
             extract=snapshot,
@@ -58,6 +58,9 @@ class _FakeGenerator:
 
     def restore_output_extractor_state(self, state: OutputExtractorState) -> None:
         _ = state
+
+    def set_stop_on_write_region_open(self, enabled: bool) -> None:
+        _ = enabled
 
 
 class _DummyRenderer:
@@ -103,7 +106,7 @@ class _SequenceGenerator:
     def __init__(self, steps: list[str]) -> None:
         self.steps = steps
         self.idx = 0
-        snapshot = FenceParserSnapshot(state=FenceState.OUTSIDE, saw_fence=False)
+        snapshot = WriteRegionParserSnapshot(state=WriteRegionState.OUTSIDE, saw_begin=False, saw_end=False)
         self._extractor_state = OutputExtractorState(
             segment=snapshot,
             extract=snapshot,
@@ -129,7 +132,7 @@ class _SequenceGenerator:
     def reset_output_extractor(self) -> None:
         return None
 
-    def get_output_extractor_state(self) -> FenceState:
+    def get_output_extractor_state(self) -> WriteRegionState:
         return self._extractor_state.extract.state
 
     def capture_output_extractor_state(self) -> OutputExtractorState:
@@ -137,6 +140,9 @@ class _SequenceGenerator:
 
     def restore_output_extractor_state(self, state: OutputExtractorState) -> None:
         self._extractor_state = state
+
+    def set_stop_on_write_region_open(self, enabled: bool) -> None:
+        _ = enabled
 
 
 def _last_assistant_text(context: GenerateContext) -> str:
@@ -158,7 +164,7 @@ class _TrackingGenerator:
         self.reset_calls = 0
         self.seen_assistant_messages: list[str] = []
         self.restored_states: list[OutputExtractorState] = []
-        snapshot = FenceParserSnapshot(state=FenceState.OUTSIDE, saw_fence=False)
+        snapshot = WriteRegionParserSnapshot(state=WriteRegionState.OUTSIDE, saw_begin=False, saw_end=False)
         self._extractor_state = OutputExtractorState(
             segment=snapshot,
             extract=snapshot,
@@ -178,9 +184,10 @@ class _TrackingGenerator:
         self.idx += 1
         assistant_delta = result.assistant_delta
         if assistant_delta is not None:
-            snapshot = FenceParserSnapshot(
-                state=assistant_delta.fence_state,
-                saw_fence=bool(assistant_delta.fence_lang) or self._extractor_state.extract.saw_fence,
+            snapshot = WriteRegionParserSnapshot(
+                state=assistant_delta.region_state,
+                saw_begin=assistant_delta.has_begin_marker or self._extractor_state.extract.saw_begin,
+                saw_end=assistant_delta.has_end_marker or self._extractor_state.extract.saw_end,
             )
             self._extractor_state = OutputExtractorState(
                 segment=snapshot,
@@ -193,7 +200,7 @@ class _TrackingGenerator:
     def reset_output_extractor(self) -> None:
         self.reset_calls += 1
 
-    def get_output_extractor_state(self) -> FenceState:
+    def get_output_extractor_state(self) -> WriteRegionState:
         return self._extractor_state.extract.state
 
     def capture_output_extractor_state(self) -> OutputExtractorState:
@@ -202,6 +209,9 @@ class _TrackingGenerator:
     def restore_output_extractor_state(self, state: OutputExtractorState) -> None:
         self.restored_states.append(state)
         self._extractor_state = state
+
+    def set_stop_on_write_region_open(self, enabled: bool) -> None:
+        _ = enabled
 
 
 class _ScopeFailOracle:
@@ -460,10 +470,10 @@ def test_rollback_restores_inside_parser_state_for_all_scopes(scope: Granularity
                 delta_tokens=1,
                 stop_reason=StopReason(kind="boundary"),
                 assistant_delta=AssistantContent(
-                    pre_fence="Rust translation follows:\n",
-                    fence_lang="rust",
+                    prelude="Rust translation follows:\n",
                     code="bad\n",
-                    fence_state=FenceState.INSIDE,
+                    has_begin_marker=True,
+                    region_state=WriteRegionState.INSIDE,
                 ),
             ),
         ]
@@ -487,12 +497,12 @@ def test_rollback_restores_inside_parser_state_for_all_scopes(scope: Granularity
         max_steps=5,
     )
 
-    assert rollback_manager.fence_anchor is not None
-    assert rollback_manager.fence_anchor.assistant_prefix.pre_fence == "Rust translation follows:\n"
+    assert rollback_manager.write_anchor is not None
+    assert rollback_manager.write_anchor.assistant_prefix.prelude == "Rust translation follows:\n"
     assert generator.restored_states
     restored = generator.restored_states[-1]
-    assert restored.extract.state == FenceState.INSIDE
-    assert restored.extract.saw_fence
+    assert restored.extract.state == WriteRegionState.INSIDE
+    assert restored.extract.saw_begin
 
 
 def test_program_rollback_then_generate_abandons_feedback_payload() -> None:
@@ -503,10 +513,10 @@ def test_program_rollback_then_generate_abandons_feedback_payload() -> None:
                 delta_tokens=1,
                 stop_reason=StopReason(kind="boundary"),
                 assistant_delta=AssistantContent(
-                    pre_fence="Here is the Rust translation:\n",
-                    fence_lang="rust",
+                    prelude="Here is the Rust translation:\n",
                     code="bad\n",
-                    fence_state=FenceState.INSIDE,
+                    has_begin_marker=True,
+                    region_state=WriteRegionState.INSIDE,
                 ),
             ),
             GenerateResult(
@@ -514,10 +524,10 @@ def test_program_rollback_then_generate_abandons_feedback_payload() -> None:
                 delta_tokens=1,
                 stop_reason=StopReason(kind="boundary"),
                 assistant_delta=AssistantContent(
-                    pre_fence="Here is the Rust translation:\n",
-                    fence_lang="rust",
+                    prelude="Here is the Rust translation:\n",
                     code="good\n",
-                    fence_state=FenceState.INSIDE,
+                    has_begin_marker=True,
+                    region_state=WriteRegionState.INSIDE,
                 ),
             ),
         ]
@@ -549,8 +559,8 @@ def test_program_rollback_then_generate_abandons_feedback_payload() -> None:
         Action.GENERATE,
         Action.TERMINATE,
     ]
-    assert rollback_manager.fence_anchor is not None
-    assert rollback_manager.fence_anchor.assistant_prefix.pre_fence == "Here is the Rust translation:\n"
+    assert rollback_manager.write_anchor is not None
+    assert rollback_manager.write_anchor.assistant_prefix.prelude == "Here is the Rust translation:\n"
     assert generator.reset_calls == 0
     assert generator.restored_states
-    assert generator.restored_states[-1].extract.state == FenceState.INSIDE
+    assert generator.restored_states[-1].extract.state == WriteRegionState.INSIDE

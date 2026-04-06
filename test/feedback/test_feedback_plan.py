@@ -8,7 +8,7 @@ from core.types import (
     Granularity,
     Verdict,
 )
-from core.llm_output import AssistantContent
+from core.llm_output import BEGIN_WRITE_CODE, END_WRITE_CODE, AssistantContent
 from c_rust.feedback import RUST_FEEDBACK_LANG
 from feedback.feedback import FeedbackState
 from feedback.plan import build_feedback_plan, render_feedback_prompt
@@ -72,44 +72,16 @@ def test_render_feedback_prompt_includes_parser_error_context() -> None:
     repair_context = RepairContext.from_feedback_state(
         state,
         bad_snippet='let x: i32 = "1";',
-        parser_error_context="multiple fenced code blocks found",
+        parser_error_context="multiple write regions found",
     )
 
     prompt = render_feedback_prompt(repair_context, RUST_FEEDBACK_LANG)
 
-    assert prompt == """The previous generated next code snippet was:
-
-```
-let x: i32 = \"1\";
-```
-
-It error with diagnostics:
-- [rustc] expected `i32`, found `&str`
-
-Your goal:
-- Produce a minimal Rust patch that resolves the listed failures.
-
-repair scope:
-- stmt
-
-constraints:
-- Keep unchanged code outside the failed snippet.
-- Return code only. Do not add prose.
-- Prefer the smallest valid edit.
-
-Previous parse error:
-- multiple fenced code blocks found
-
-scope rules:
-- Replace only the failed snippet.
-- Do not return full function wrappers (for example, `fn main() { ... }`).
-
-output contract:
-Return exactly one Rust code block:
-```rust
-<Your patch here>
-```
-"""
+    assert f"{BEGIN_WRITE_CODE}\nlet x: i32 = \"1\";\n{END_WRITE_CODE}" in prompt
+    assert "Previous parse error:" in prompt
+    assert "multiple write regions found" in prompt
+    assert "Return exactly one write-code region containing raw Rust text:" in prompt
+    assert f"{BEGIN_WRITE_CODE}\n<Your patch here>\n{END_WRITE_CODE}" in prompt
 
 
 def test_render_feedback_prompt_stmt_scope_forbids_function_wrapper_for_normal_stmt() -> None:
@@ -160,7 +132,7 @@ def test_build_feedback_plan_maps_mechanism_a_to_continuation() -> None:
     assert "/* repair feedback:" in plan.prompt
 
 
-def test_build_feedback_plan_maps_mechanism_b_to_patch_fenced() -> None:
+def test_build_feedback_plan_maps_mechanism_b_to_patch_write_region() -> None:
     state = FeedbackState()
     state.on_verify([
         OracleOutput(
@@ -183,12 +155,12 @@ def test_build_feedback_plan_maps_mechanism_b_to_patch_fenced() -> None:
     )
 
     assert plan.channel == GenerationChannel.PATCH
-    assert "Return exactly one Rust code block containing the unified diff patch:" in plan.prompt
+    assert "Return exactly one write-code region containing the unified diff patch:" in plan.prompt
     assert plan.response_prefix is None
-    assert plan.post_fence_injection is not None
+    assert plan.post_region_injection is not None
 
 
-def test_build_feedback_plan_puts_diff_in_post_fence_injection() -> None:
+def test_build_feedback_plan_puts_diff_in_post_region_injection() -> None:
     state = FeedbackState()
     state.on_verify([
         OracleOutput(
@@ -216,7 +188,7 @@ def test_build_feedback_plan_puts_diff_in_post_fence_injection() -> None:
 
     assert 'Return a unified diff patch for the failed snippet.' in plan.prompt
     assert plan.response_prefix is None
-    assert plan.post_fence_injection == """\
+    assert plan.post_region_injection == """\
 - function parseJson(
 -   txt: string
 - ): any {

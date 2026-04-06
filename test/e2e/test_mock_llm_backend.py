@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from controller.stop_criteria import DTVStoppingCriteria, RUST_PROFILE
-from core.llm_output import FenceParser
+from core.llm_output import WriteRegionParser
 from core.types import GenerateContext, GenerateMessage
 from test.e2e.mock_llm_backend import MockLLMBackend
 
@@ -21,7 +21,7 @@ def _collect_boundaries(text: str, source_path: Path) -> list[int]:
         model_name="mock",
         stop_criteria_factory=lambda tok: [DTVStoppingCriteria(tok, RUST_PROFILE)],
     )
-    context = GenerateContext(messages=(), steps=0, max_new_length=1024, extract_fence=False)
+    context = GenerateContext(messages=(), steps=0, max_new_length=1024, extract_write_region=False)
 
     boundaries: list[int] = []
     pos = 0
@@ -48,7 +48,7 @@ def test_streaming_emits_full_content(tmp_path: Path) -> None:
 
     MockLLMBackend.configure(source_path=source_path, chunk_size=1)
     backend = MockLLMBackend(model_name="mock")
-    context = GenerateContext(messages=(), steps=0, max_new_length=1024, extract_fence=False)
+    context = GenerateContext(messages=(), steps=0, max_new_length=1024, extract_write_region=False)
 
     result = backend.generate_step(context)
 
@@ -67,7 +67,7 @@ def test_streaming_with_messages_preserves_output(tmp_path: Path) -> None:
         GenerateMessage(role="user", content="Translate:", stop=True),
         GenerateMessage(role="assistant", content="", stop=False),
     )
-    context = GenerateContext(messages=messages, steps=0, max_new_length=1024, extract_fence=False)
+    context = GenerateContext(messages=messages, steps=0, max_new_length=1024, extract_write_region=False)
 
     result = backend.generate_step(context)
 
@@ -96,7 +96,7 @@ def test_stop_criteria_factory_triggers_boundary(tmp_path: Path) -> None:
         model_name="mock",
         stop_criteria_factory=lambda tok: [_StopAfter(2)],
     )
-    context = GenerateContext(messages=(), steps=0, max_new_length=1024, extract_fence=False)
+    context = GenerateContext(messages=(), steps=0, max_new_length=1024, extract_write_region=False)
 
     result = backend.generate_step(context)
 
@@ -127,30 +127,30 @@ def test_stop_criteria_block_comment_ignores_brace(tmp_path: Path) -> None:
 def test_stop_criteria_tracks_prompt_after_parser_restore(tmp_path: Path) -> None:
     text = (
         "Here is the translated Rust code for the provided C code snippet:\n\n"
-        "```rust\n"
+        "<<BEGIN_WRITE_CODE>>\n"
         "use std::io::{self, Read};\n"
         "fn main() {\n"
         "    let value = 1;\n"
         "    println!(\"{value}\");\n"
         "}\n"
-        "```\n"
+        "<<END_WRITE_CODE>>\n"
     )
     source_path = tmp_path / "template.md"
     _write(source_path, text)
 
     MockLLMBackend.configure(source_path=source_path, chunk_size=1)
-    fence_parser = FenceParser(allowed_langs=("rust", "rs"))
+    write_region_parser = WriteRegionParser()
     backend = MockLLMBackend(
         model_name="mock",
         stop_criteria_factory=lambda tok: [
-            DTVStoppingCriteria(tok, RUST_PROFILE, fence_parser=fence_parser)
+            DTVStoppingCriteria(tok, RUST_PROFILE, write_region_parser=write_region_parser)
         ],
     )
-    context = GenerateContext(messages=(), steps=0, max_new_length=1024, extract_fence=False)
+    context = GenerateContext(messages=(), steps=0, max_new_length=1024, extract_write_region=False)
 
     first = backend.generate_step(context)
-    snapshot = fence_parser.capture()
-    fence_parser.restore(snapshot)
+    snapshot = write_region_parser.capture()
+    write_region_parser.restore(snapshot)
     second = backend.generate_step(context)
 
     assert first.stop_reason.kind == "boundary"
@@ -172,18 +172,17 @@ def test_c_to_rust_translate_trap() -> None:
 
     source_text = source_path.read_text(encoding="utf-8")
     MockLLMBackend.configure(source_path=source_path, chunk_size=1)
-    fence_parser = FenceParser(allowed_langs=("rust", "rs"))
     backend = MockLLMBackend(
         model_name="mock",
         stop_criteria_factory=lambda tok: [
-            DTVStoppingCriteria(tok, RUST_PROFILE, fence_parser=fence_parser)
+            DTVStoppingCriteria(tok, RUST_PROFILE)
         ],
     )
     messages = (
         GenerateMessage(role="user", content=prompt, stop=True),
         GenerateMessage(role="assistant", content="", stop=False),
     )
-    context = GenerateContext(messages=messages, steps=0, max_new_length=4096, extract_fence=False)
+    context = GenerateContext(messages=messages, steps=0, max_new_length=4096, extract_write_region=False)
 
     chunks: list[str] = []
     pos = 0

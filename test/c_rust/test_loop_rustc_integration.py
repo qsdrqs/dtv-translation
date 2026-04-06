@@ -7,7 +7,7 @@ from c_rust.oracles import RustcOracle
 from c_rust.render import CRustRenderer
 from controller.loop import ControllerOp, run_dtv_loop, select_oracles_by_granularity
 from core.budget import Budget
-from core.llm_output import FenceParserSnapshot, FenceState, OutputExtractorState
+from core.llm_output import OutputExtractorState, WriteRegionParserSnapshot, WriteRegionState
 from core.types import (
     Action,
     Artifact,
@@ -40,11 +40,11 @@ class _FakeGenerator:
     def reset_output_extractor(self) -> None:
         return None
 
-    def get_output_extractor_state(self) -> FenceState:
-        return FenceState.OUTSIDE
+    def get_output_extractor_state(self) -> WriteRegionState:
+        return WriteRegionState.OUTSIDE
 
     def capture_output_extractor_state(self) -> OutputExtractorState:
-        snapshot = FenceParserSnapshot(state=FenceState.OUTSIDE, saw_fence=False)
+        snapshot = WriteRegionParserSnapshot(state=WriteRegionState.OUTSIDE, saw_begin=False, saw_end=False)
         return OutputExtractorState(
             segment=snapshot,
             extract=snapshot,
@@ -54,6 +54,9 @@ class _FakeGenerator:
 
     def restore_output_extractor_state(self, state: OutputExtractorState) -> None:
         _ = state
+
+    def set_stop_on_write_region_open(self, enabled: bool) -> None:
+        _ = enabled
 
 
 class _DummyRenderer:
@@ -66,7 +69,7 @@ class _SequenceGenerator:
     def __init__(self, steps: list[str]) -> None:
         self.steps = steps
         self.idx = 0
-        snapshot = FenceParserSnapshot(state=FenceState.OUTSIDE, saw_fence=False)
+        snapshot = WriteRegionParserSnapshot(state=WriteRegionState.OUTSIDE, saw_begin=False, saw_end=False)
         self._extractor_state = OutputExtractorState(
             segment=snapshot,
             extract=snapshot,
@@ -93,7 +96,7 @@ class _SequenceGenerator:
     def reset_output_extractor(self) -> None:
         return None
 
-    def get_output_extractor_state(self) -> FenceState:
+    def get_output_extractor_state(self) -> WriteRegionState:
         return self._extractor_state.extract.state
 
     def capture_output_extractor_state(self) -> OutputExtractorState:
@@ -101,6 +104,9 @@ class _SequenceGenerator:
 
     def restore_output_extractor_state(self, state: OutputExtractorState) -> None:
         self._extractor_state = state
+
+    def set_stop_on_write_region_open(self, enabled: bool) -> None:
+        _ = enabled
 
 
 class _SingleStepPolicy:

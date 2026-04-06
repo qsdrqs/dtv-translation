@@ -4,7 +4,7 @@ from c_rust.feedback import RUST_FEEDBACK_LANG
 from controller.loop import PolicyContext, run_dtv_loop
 from controller.policy import DefaultPolicy, DefaultPolicyConfig
 from core.budget import Budget
-from core.llm_output import AssistantContent, FenceParser, FenceState, OutputExtractorState
+from core.llm_output import AssistantContent, WriteRegionParser, WriteRegionState, OutputExtractorState
 from core.types import (
     Action,
     Artifact,
@@ -38,7 +38,7 @@ def _ctx(
     pending_patch: str | None = None,
     repair_base_prefix: str | None = None,
     repair_scope: Granularity | None = None,
-    fence_state: FenceState = FenceState.DONE,
+    write_region_state: WriteRegionState = WriteRegionState.OUTSIDE,
 ) -> PolicyContext:
     return PolicyContext(
         state=ControllerState(prefix=prefix),
@@ -53,7 +53,7 @@ def _ctx(
         pending_patch=pending_patch,
         repair_base_prefix=repair_base_prefix,
         repair_scope=repair_scope,
-        fence_state=fence_state,
+        write_region_state=write_region_state,
     )
 
 
@@ -99,16 +99,16 @@ class _AlwaysFailOracle:
         )
 
 
-class _EscalationFenceReopenGenerator:
+class _EscalationWriteRegionGenerator:
     def __init__(self) -> None:
-        self._parser = FenceParser(allowed_langs=("rust", "rs"))
+        self._parser = WriteRegionParser()
         self._did_generate = False
         self.feedback_mechanisms: list[FeedbackMechanism] = []
 
     def reset_output_extractor(self) -> None:
         self._parser.reset()
 
-    def get_output_extractor_state(self) -> FenceState:
+    def get_output_extractor_state(self) -> WriteRegionState:
         return self._parser.state
 
     def capture_output_extractor_state(self) -> OutputExtractorState:
@@ -123,6 +123,9 @@ class _EscalationFenceReopenGenerator:
     def restore_output_extractor_state(self, state: OutputExtractorState) -> None:
         self._parser.restore(state.extract)
 
+    def set_stop_on_write_region_open(self, enabled: bool) -> None:
+        _ = enabled
+
     def generate_step(self, context: GenerateContext) -> GenerateResult:
         mechanism = self._feedback_mechanism(context)
         if mechanism is not None:
@@ -134,7 +137,7 @@ class _EscalationFenceReopenGenerator:
                     delta_tokens=1,
                     stop_reason=StopReason(kind="boundary"),
                 )
-            self._parser.feed("```rust\n")
+            self._parser.feed("<<BEGIN_WRITE_CODE>>\n")
             return GenerateResult(
                 delta_text="bad;",
                 delta_tokens=1,
@@ -148,9 +151,9 @@ class _EscalationFenceReopenGenerator:
                 delta_tokens=1,
                 stop_reason=StopReason(kind="boundary"),
                 assistant_delta=AssistantContent(
-                    fence_lang="rust",
                     code="bad;",
-                    fence_state=FenceState.INSIDE,
+                    has_begin_marker=True,
+                    region_state=WriteRegionState.INSIDE,
                 ),
             )
 
@@ -569,16 +572,16 @@ def test_default_policy_generate_boundary_triggers_verify() -> None:
     assert op.verification_granularity == Granularity.STMT
 
 
-def test_default_policy_eos_uses_program_granularity() -> None:
+def test_default_policy_write_region_closed_uses_close_granularity() -> None:
     policy = DefaultPolicy()
     ctx = _ctx(
         prefix="fn main() {}",
         last_action=Action.GENERATE,
-        last_stop_reason=StopReason(kind="eos"),
+        last_stop_reason=StopReason(kind="write_region_closed"),
     )
     op = policy.next_action(ctx)
     assert op.action == Action.VERIFY
-    assert op.verification_granularity == Granularity.PROGRAM
+    assert op.verification_granularity == Granularity.FUNC
 
 
 def test_default_policy_continue_then_generate() -> None:
@@ -592,44 +595,36 @@ def test_default_policy_continue_then_generate() -> None:
     assert op.action == Action.GENERATE
 
 
-def test_eos_with_fence_inside_does_not_terminate() -> None:
-    """When stop_reason=eos but fence is still INSIDE, _is_eos() returns False.
-    After COMMIT the policy should GENERATE (not TERMINATE), because the fence
-    was never closed - the model's EOS is premature."""
-    policy = DefaultPolicy(DefaultPolicyConfig(terminate_on_eos_and_pass=True))
+def test_eos_without_write_region_close_does_not_terminate() -> None:
+    policy = DefaultPolicy()
     ctx = _ctx(
         last_action=Action.COMMIT,
         last_stop_reason=StopReason(kind="eos"),
         last_outputs=_outputs(Verdict.PASS),
-        fence_state=FenceState.INSIDE,
     )
     op = policy.next_action(ctx)
     assert op.action == Action.GENERATE
 
 
-def test_eos_with_fence_inside_does_not_verify_program() -> None:
-    """When stop_reason=eos but fence is still INSIDE, verification should use
-    boundary granularity (STMT), not EOS granularity (PROGRAM).
-    The prefix ends with ';' so is_boundary=True, but _is_eos()=False."""
+def test_eos_without_write_region_close_uses_boundary_granularity() -> None:
     policy = DefaultPolicy()
     ctx = _ctx(
         prefix="let x = 1;",
         last_action=Action.GENERATE,
         last_stop_reason=StopReason(kind="eos"),
-        fence_state=FenceState.INSIDE,
     )
     op = policy.next_action(ctx)
     assert op.action == Action.VERIFY
     assert op.verification_granularity == Granularity.STMT
 
 
-def test_default_policy_eos_pass_commits_then_terminates() -> None:
-    policy = DefaultPolicy(DefaultPolicyConfig(terminate_on_eos_and_pass=True))
+def test_default_policy_write_region_closed_pass_commits_then_terminates() -> None:
+    policy = DefaultPolicy()
     outputs = _outputs(Verdict.PASS)
     ctx_verify = _ctx(
         prefix="fn main() {}",
         last_action=Action.VERIFY,
-        last_stop_reason=StopReason(kind="eos"),
+        last_stop_reason=StopReason(kind="write_region_closed"),
         last_render_status=RenderStatus.OK,
         last_outputs=outputs,
     )
@@ -639,7 +634,7 @@ def test_default_policy_eos_pass_commits_then_terminates() -> None:
     ctx_commit = _ctx(
         prefix="fn main() {}",
         last_action=Action.COMMIT,
-        last_stop_reason=StopReason(kind="eos"),
+        last_stop_reason=StopReason(kind="write_region_closed"),
         last_render_status=RenderStatus.OK,
         last_outputs=outputs,
     )
@@ -647,12 +642,12 @@ def test_default_policy_eos_pass_commits_then_terminates() -> None:
     assert op.action == Action.TERMINATE
 
 
-def test_default_policy_eos_no_oracles_commits_then_terminates() -> None:
-    policy = DefaultPolicy(DefaultPolicyConfig(terminate_on_eos_and_pass=True))
+def test_default_policy_write_region_closed_no_oracles_commits_then_terminates() -> None:
+    policy = DefaultPolicy()
     ctx_verify = _ctx(
         prefix="fn main() {}",
         last_action=Action.VERIFY,
-        last_stop_reason=StopReason(kind="eos"),
+        last_stop_reason=StopReason(kind="write_region_closed"),
         last_render_status=RenderStatus.OK,
         last_outputs=(),
     )
@@ -662,7 +657,7 @@ def test_default_policy_eos_no_oracles_commits_then_terminates() -> None:
     ctx_commit = _ctx(
         prefix="fn main() {}",
         last_action=Action.COMMIT,
-        last_stop_reason=StopReason(kind="eos"),
+        last_stop_reason=StopReason(kind="write_region_closed"),
         last_render_status=RenderStatus.OK,
         last_outputs=(),
     )

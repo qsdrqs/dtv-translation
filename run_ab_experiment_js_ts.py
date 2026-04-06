@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""A/B experiment: DTV vs naive feedback under equal token budget.
+"""A/B experiment: DTV vs naive under equal token budget (JS->TS).
 
-Runs each case twice (DTV config, naive config) and compares:
-- Final verdict (program-level pass/fail)
-- Tokens consumed
-- Number of verify/feedback/rollback cycles
+Both strategies share the same prompt (with write-region contract) and the same
+post-generation compile-check-reprompt loop.  The only difference is the
+generation phase: DTV uses incremental stmt/block/func verification, naive uses
+one-shot generation.
 
 Usage:
     .venv/bin/python run_ab_experiment_js_ts.py [OPTIONS] [case_id ...]
@@ -13,7 +13,7 @@ Options:
     --all                   Run all cases found in the dataset directory
     --dataset-dir PATH      Dataset directory (default: DTV_JS_TS_DATASET_DIR or dataset_js_ts)
     --output PATH           Output JSON path (default: result/ab_experiment_js_ts_results.json)
-    --model-name NAME       HuggingFace model ID (default: Qwen/Qwen3-4B-Instruct-2507)
+    --model-name NAME       HuggingFace model ID (default: Qwen/Qwen3.5-4B)
     --token-budget N        Fixed token budget (default: 20480)
     --budget-k K            Per-case budget = K * JS_source_tokens (overrides --token-budget)
     --greedy                Use greedy decoding (do_sample=False)
@@ -27,7 +27,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import subprocess
 import tempfile
 import time
@@ -37,11 +36,11 @@ from pathlib import Path
 from typing import Protocol, cast
 
 from controller.adapters import GeneratorAdapter
-from controller.loop import run_dtv_loop
+from controller.loop import render_write_region_contract, run_dtv_loop
 from controller.policy import DefaultPolicy, DefaultPolicyConfig
 from controller.stop_criteria import DTVStoppingCriteria, TS_PROFILE
 from core.budget import Budget
-from core.llm_output import WriteRegionParser
+from core.llm_output import DEFAULT_WRITE_REGION_MARKERS, WriteRegionMarkers, WriteRegionParser
 from core.types import (
     Action,
     GenerateContext,
@@ -56,11 +55,13 @@ from core.types import (
 from feedback.feedback import FeedbackState
 from feedback.formatter import RepairFeedbackFormatConfig
 from js_ts.feedback import TS_FEEDBACK_LANG
-from js_ts.oracles import EslintOracle, TscOracle, TscProgramOracle
+from js_ts.oracles import EslintOracle, TscOracle
 from js_ts.oracles.compiler_oracle.tsc_driver import _find_type_roots
 from js_ts.render import JSToTSRenderer
 from rollback.manager import RollbackManager
 from transformers import PreTrainedTokenizerBase, StoppingCriteriaList
+
+# -- Constants -----------------------------------------------------------------
 
 MODEL_NAME = "Qwen/Qwen3.5-4B"
 OUTPUT_TOKEN_CAP = 20480
@@ -83,17 +84,6 @@ DTV_CONFIG = DefaultPolicyConfig(
     repair_verify_granularity=Granularity.STMT,
 )
 
-NAIVE_CONFIG = DefaultPolicyConfig(
-    verify_on_boundary=False,
-    verify_on_close=False,
-    boundary_granularity=Granularity.STMT,
-    close_granularity=Granularity.FUNC,
-    enable_rollback=True,
-    default_fail_scope=Granularity.PROGRAM,
-    enable_feedback=True,
-    repair_verify_granularity=Granularity.PROGRAM,
-)
-
 
 class _StopCriteriaBackend(Protocol):
     stop_criteria: StoppingCriteriaList
@@ -103,9 +93,7 @@ class _TokenizerBackend(Protocol):
     tokenizer: PreTrainedTokenizerBase
 
 
-_TS_FENCE_RE = re.compile(r"```(?:typescript|ts)\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
-_ANY_FENCE_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
-
+# -- Metrics -------------------------------------------------------------------
 
 @dataclass
 class RunResult:
@@ -125,20 +113,8 @@ class RunResult:
     trace_log: list[dict] | None = None
 
 
-@dataclass
-class NaiveLoopResult:
-    final_prefix: str
-    final_verdict: str
-    total_tokens: int
-    total_steps: int
-    verify_count: int
-    feedback_count: int
-    rollback_count: int
-    commit_count: int
-    trace_log: list[dict] | None = None
-
-
 def _all_pass(outputs: tuple) -> bool:
+    """Same logic as the policy: at least one PASS and no FAIL."""
     saw_pass = False
     for output in outputs:
         if output.verdict == Verdict.FAIL:
@@ -154,7 +130,7 @@ def _trace_verdict(oracle_outputs: tuple) -> str | None:
     return "pass" if _all_pass(oracle_outputs) else "fail"
 
 
-def extract_metrics(trace: list[TraceEvent]) -> dict:
+def _extract_dtv_metrics(trace: list[TraceEvent]) -> dict:
     verify_count = 0
     feedback_count = 0
     rollback_count = 0
@@ -181,21 +157,7 @@ def extract_metrics(trace: list[TraceEvent]) -> dict:
             entry["verdict"] = _trace_verdict(event.oracle_outputs)
         trace_log.append(entry)
 
-    final_verdict = "unknown"
-    for event in reversed(trace):
-        if (
-            event.action == Action.VERIFY
-            and event.verification_granularity == Granularity.PROGRAM
-            and event.oracle_outputs
-        ):
-            final_verdict = "pass" if _all_pass(event.oracle_outputs) else "fail"
-            break
-
-    total_tokens = trace[-1].budget_snapshot.get("gen_tokens_used", 0) if trace else 0
-
     return {
-        "final_verdict": final_verdict,
-        "total_tokens": total_tokens,
         "total_steps": len(trace),
         "verify_count": verify_count,
         "feedback_count": feedback_count,
@@ -205,27 +167,30 @@ def extract_metrics(trace: list[TraceEvent]) -> dict:
     }
 
 
-def load_sample(case_dir: Path) -> TranslationSample:
-    js_source = (case_dir / "source.js").read_text(encoding="utf-8").strip()
-    return TranslationSample(source_code=js_source, source_lang="js", test_cases=[])
+# -- Shared prompt / extraction / compilation ----------------------------------
+
+def _build_prompt(
+    source_code: str,
+    prompt_prefix: str,
+    language_name: str,
+    markers: WriteRegionMarkers,
+) -> str:
+    raw_prompt = f"\n{prompt_prefix}\n```javascript\n{source_code}\n```\n"
+    contract = render_write_region_contract(language_name, markers)
+    return f"{raw_prompt.rstrip()}\n\n{contract}"
 
 
-def evaluate_final_program(
-    final_prefix: str,
-    renderer: JSToTSRenderer,
-) -> tuple[bool, int, int]:
-    render_result = renderer.try_render(final_prefix)
-    if render_result.status != RenderStatus.OK or render_result.artifact is None:
-        return False, 0, 0
-
-    ts_code = render_result.artifact.code
-    compiles, _ = _compile_ts_code(ts_code)
-    return compiles, 0, 0
-
-
-def evaluate_final_ts_code(ts_code: str) -> tuple[bool, int, int]:
-    compiles, _ = _compile_ts_code(ts_code)
-    return compiles, 0, 0
+def _extract_write_region_code(raw_text: str, markers: WriteRegionMarkers) -> str | None:
+    begin_idx = raw_text.find(markers.begin_marker)
+    if begin_idx < 0:
+        return None
+    code_start = begin_idx + len(markers.begin_marker)
+    if code_start < len(raw_text) and raw_text[code_start] == "\n":
+        code_start += 1
+    end_idx = raw_text.find(markers.end_marker, code_start)
+    if end_idx < 0:
+        return raw_text[code_start:].strip()
+    return raw_text[code_start:end_idx].strip()
 
 
 def _remaining_tokens(budget: Budget) -> int:
@@ -235,24 +200,29 @@ def _remaining_tokens(budget: Budget) -> int:
 @contextmanager
 def _temporary_no_stopping_criteria(generator: GeneratorAdapter):
     backend = cast(_StopCriteriaBackend, generator.backend)
-    original_stop_criteria = backend.stop_criteria
+    original = backend.stop_criteria
     backend.stop_criteria = StoppingCriteriaList([])
     try:
         yield
     finally:
-        backend.stop_criteria = original_stop_criteria
+        backend.stop_criteria = original
 
 
-def _extract_ts_code(raw_text: str) -> str:
-    ts_match = _TS_FENCE_RE.search(raw_text)
-    if ts_match is not None:
-        return ts_match.group(1).strip()
-
-    any_match = _ANY_FENCE_RE.search(raw_text)
-    if any_match is not None:
-        return any_match.group(1).strip()
-
-    return raw_text.strip()
+def _generate_full_round(
+    generator: GeneratorAdapter,
+    messages: list[GenerateMessage],
+    budget: Budget,
+) -> tuple[str, int]:
+    context = GenerateContext(
+        messages=list(messages),
+        steps=0,
+        max_new_length=_remaining_tokens(budget),
+        extract_write_region=False,
+        channel=GenerationChannel.CONTINUATION,
+    )
+    result = generator.backend.generate_step(context)
+    budget.add_tokens(result.delta_tokens)
+    return result.delta_text, result.delta_tokens
 
 
 def _compile_ts_code(ts_code: str) -> tuple[bool, str]:
@@ -292,123 +262,140 @@ def _format_compile_feedback(compiler_output: str, max_lines: int = 20) -> str:
     lines = [line.strip() for line in compiler_output.splitlines() if line.strip()]
     if not lines:
         return "- tsc did not emit diagnostics"
-
     shown = lines[:max_lines]
     if len(lines) > max_lines:
         shown.append(f"... {len(lines) - max_lines} more lines omitted")
     return "\n".join(f"- {line}" for line in shown)
 
 
-def _build_repair_prompt(compiler_output: str) -> str:
+def _build_repair_prompt(compiler_output: str, markers: WriteRegionMarkers) -> str:
     diagnostics_text = _format_compile_feedback(compiler_output)
     return (
         "Your previous TypeScript translation failed to compile.\n"
         "Fix the compile errors and return a full corrected TypeScript program.\n"
-        "Do not explain. Return exactly one fenced TypeScript code block.\n\n"
+        f"Output the corrected code inside {markers.begin_marker} ... {markers.end_marker} markers.\n"
+        "Do not use markdown fences inside the write region.\n\n"
         f"Compiler diagnostics:\n{diagnostics_text}\n"
     )
 
 
-def _set_last_assistant(
-    messages: list[GenerateMessage],
-    content: str,
-    stop: bool,
-) -> None:
-    for idx in range(len(messages) - 1, -1, -1):
-        if messages[idx].role == "assistant":
-            messages[idx] = GenerateMessage(role="assistant", content=content, stop=stop)
-            return
-    messages.append(GenerateMessage(role="assistant", content=content, stop=stop))
-
-
-def _generate_full_round(
-    generator: GeneratorAdapter,
-    messages: list[GenerateMessage],
-    budget: Budget,
-) -> tuple[str, int]:
-    context = GenerateContext(
-        messages=list(messages),
-        steps=0,
-        max_new_length=_remaining_tokens(budget),
-        extract_write_region=False,
-        channel=GenerationChannel.CONTINUATION,
+def _build_missing_markers_prompt(markers: WriteRegionMarkers) -> str:
+    return (
+        "Your response did not include write-region markers.\n"
+        f"Output the code inside {markers.begin_marker} ... {markers.end_marker} markers.\n"
+        "Do not use markdown fences inside the write region.\n"
     )
-    result = generator.backend.generate_step(context)
-    budget.add_tokens(result.delta_tokens)
-    return result.delta_text, result.delta_tokens
 
 
-def run_naive_minimal(
+# -- Loading -------------------------------------------------------------------
+
+def load_sample(case_dir: Path) -> TranslationSample:
+    js_source = (case_dir / "source.js").read_text(encoding="utf-8").strip()
+    return TranslationSample(source_code=js_source, source_lang="js", test_cases=[])
+
+
+def evaluate_final_ts_code(ts_code: str) -> tuple[bool, int, int]:
+    compiles, _ = _compile_ts_code(ts_code)
+    return compiles, 0, 0
+
+
+# -- Shared program-level eval + reprompt loop ---------------------------------
+
+@dataclass
+class ProgramEvalLoopResult:
+    final_code: str
+    compiles: bool
+    rounds: int
+    trace: list[dict]
+
+
+def program_eval_loop(
+    initial_code: str | None,
     prompt: str,
     generator: GeneratorAdapter,
-    token_budget: int,
-    accumulate_history: bool = False,
-) -> NaiveLoopResult:
-    budget = Budget(gen_tokens_budget=token_budget)
-    messages: list[GenerateMessage] = [
-        GenerateMessage(role="user", content=prompt, stop=True),
-        GenerateMessage(role="assistant", content="", stop=False),
-    ]
+    budget: Budget,
+    markers: WriteRegionMarkers,
+    last_raw_output: str = "",
+    max_rounds: int | None = MAX_STEPS,
+) -> ProgramEvalLoopResult:
+    code = initial_code
+    last_raw = last_raw_output
+    trace: list[dict] = []
+    rounds = 0
 
-    final_prefix = ""
-    final_verdict = "fail"
-    total_steps = 0
-    verify_count = 0
-    feedback_count = 0
-    rollback_count = 0
-    commit_count = 0
-    trace_log: list[dict] = []
-
-    while (MAX_STEPS is None or total_steps < MAX_STEPS) and _remaining_tokens(budget) > 0:
-        raw_output, delta_tokens = _generate_full_round(generator, messages, budget)
-        total_steps += 1
-        if delta_tokens <= 0:
+    while max_rounds is None or rounds < max_rounds:
+        if _remaining_tokens(budget) <= 0:
             break
 
-        _set_last_assistant(messages, raw_output, stop=True)
-        final_prefix = _extract_ts_code(raw_output)
+        rounds += 1
 
-        verify_count += 1
-        compiles, compiler_output = _compile_ts_code(final_prefix)
-        trace_log.append({
-            "round": total_steps,
+        if code is None:
+            trace.append({
+                "round": rounds,
+                "tokens_used": budget.gen_tokens_used,
+                "compiles": False,
+                "missing_markers": True,
+            })
+            if _remaining_tokens(budget) <= 0:
+                break
+            feedback = _build_missing_markers_prompt(markers)
+            messages = [
+                GenerateMessage(role="user", content=prompt, stop=True),
+                GenerateMessage(role="assistant", content=last_raw, stop=True),
+                GenerateMessage(role="user", content=feedback, stop=True),
+                GenerateMessage(role="assistant", content="", stop=False),
+            ]
+            with _temporary_no_stopping_criteria(generator):
+                raw_output, delta_tokens = _generate_full_round(
+                    generator, messages, budget,
+                )
+            if delta_tokens <= 0:
+                break
+            last_raw = raw_output
+            code = _extract_write_region_code(raw_output, markers)
+            continue
+
+        compiles, compiler_output = _compile_ts_code(code)
+        trace.append({
+            "round": rounds,
             "tokens_used": budget.gen_tokens_used,
             "compiles": compiles,
         })
+
         if compiles:
-            final_verdict = "pass"
-            commit_count = 1
+            return ProgramEvalLoopResult(
+                final_code=code, compiles=True, rounds=rounds, trace=trace,
+            )
+
+        if _remaining_tokens(budget) <= 0:
             break
 
-        feedback_count += 1
-        rollback_count += 1
-        if _remaining_tokens(budget) <= 0 or (MAX_STEPS is not None and total_steps >= MAX_STEPS):
+        repair_prompt = _build_repair_prompt(compiler_output, markers)
+        messages = [
+            GenerateMessage(role="user", content=prompt, stop=True),
+            GenerateMessage(
+                role="assistant",
+                content=f"{markers.begin_marker}\n{code}\n{markers.end_marker}",
+                stop=True,
+            ),
+            GenerateMessage(role="user", content=repair_prompt, stop=True),
+            GenerateMessage(role="assistant", content="", stop=False),
+        ]
+
+        with _temporary_no_stopping_criteria(generator):
+            raw_output, delta_tokens = _generate_full_round(generator, messages, budget)
+        if delta_tokens <= 0:
             break
+        last_raw = raw_output
+        code = _extract_write_region_code(raw_output, markers)
 
-        repair_prompt = _build_repair_prompt(compiler_output)
-        if accumulate_history:
-            messages.append(GenerateMessage(role="user", content=repair_prompt, stop=True))
-            messages.append(GenerateMessage(role="assistant", content="", stop=False))
-        else:
-            messages = [
-                GenerateMessage(role="user", content=prompt, stop=True),
-                GenerateMessage(role="assistant", content=raw_output, stop=True),
-                GenerateMessage(role="user", content=repair_prompt, stop=True),
-                GenerateMessage(role="assistant", content="", stop=False),
-            ]
-
-    return NaiveLoopResult(
-        final_prefix=final_prefix,
-        final_verdict=final_verdict,
-        total_tokens=budget.gen_tokens_used,
-        total_steps=total_steps,
-        verify_count=verify_count,
-        feedback_count=feedback_count,
-        rollback_count=rollback_count,
-        commit_count=commit_count,
-        trace_log=trace_log,
+    final_code = code if code is not None else ""
+    return ProgramEvalLoopResult(
+        final_code=final_code, compiles=False, rounds=rounds, trace=trace,
     )
 
+
+# -- Runner --------------------------------------------------------------------
 
 def run_single(
     case_id: str,
@@ -417,6 +404,7 @@ def run_single(
     config_name: str,
     generator: GeneratorAdapter,
     token_budget: int,
+    markers: WriteRegionMarkers = DEFAULT_WRITE_REGION_MARKERS,
     budget_k: float | None = None,
 ) -> RunResult:
     sample = load_sample(case_dir)
@@ -429,39 +417,34 @@ def run_single(
     else:
         effective_budget = token_budget
 
-    prompt = f"\n{PROMPT_PREFIX}\n```javascript\n{js_source}\n```\n"
-
+    prompt = _build_prompt(js_source, PROMPT_PREFIX, "TypeScript", markers)
+    budget = Budget(gen_tokens_budget=effective_budget)
     renderer = JSToTSRenderer(sample=sample)
+
+    t0 = time.time()
+
     if config_name == "naive":
-        t0 = time.time()
+        messages = [
+            GenerateMessage(role="user", content=prompt, stop=True),
+            GenerateMessage(role="assistant", content="", stop=False),
+        ]
         with _temporary_no_stopping_criteria(generator):
-            naive_result = run_naive_minimal(
-                prompt=prompt,
-                generator=generator,
-                token_budget=effective_budget,
-            )
-        elapsed = time.time() - t0
-        final_prefix = naive_result.final_prefix
-        metrics = {
-            "final_verdict": naive_result.final_verdict,
-            "total_tokens": naive_result.total_tokens,
-            "total_steps": naive_result.total_steps,
-            "verify_count": naive_result.verify_count,
-            "feedback_count": naive_result.feedback_count,
-            "rollback_count": naive_result.rollback_count,
-            "commit_count": naive_result.commit_count,
-            "trace_log": naive_result.trace_log,
-        }
+            raw_output, _ = _generate_full_round(generator, messages, budget)
+        initial_code = _extract_write_region_code(raw_output, markers)
+        last_raw_output = raw_output
+        gen_steps = 1
+        gen_verify = 0
+        gen_feedback = 0
+        gen_rollback = 0
+        gen_commit = 0
+        gen_trace: list[dict] = []
     else:
-        oracles = [TscOracle(), TscProgramOracle(), EslintOracle()]
-        budget = Budget(gen_tokens_budget=effective_budget)
+        oracles = [TscOracle(), EslintOracle()]
         feedback_state = FeedbackState()
         rollback_manager = RollbackManager()
         policy = DefaultPolicy(config)
-
         generator.reset_output_extractor()
 
-        t0 = time.time()
         final_prefix, trace = run_dtv_loop(
             generator=generator,
             renderer=renderer,
@@ -475,27 +458,65 @@ def run_single(
             max_steps=MAX_STEPS,
             max_new_length=MAX_NEW_LENGTH,
             prompt_prefix=prompt,
+            inject_write_region_contract=False,
         )
-        elapsed = time.time() - t0
-        metrics = extract_metrics(trace)
+        dtv_metrics = _extract_dtv_metrics(trace)
+        gen_steps = dtv_metrics["total_steps"]
+        gen_verify = dtv_metrics["verify_count"]
+        gen_feedback = dtv_metrics["feedback_count"]
+        gen_rollback = dtv_metrics["rollback_count"]
+        gen_commit = dtv_metrics["commit_count"]
+        gen_trace = dtv_metrics["trace_log"]
 
-    if config_name == "naive":
-        compiles, test_passed, test_total = evaluate_final_ts_code(ts_code=final_prefix)
+        render_result = renderer.try_render(final_prefix)
+        if render_result.status == RenderStatus.OK and render_result.artifact is not None:
+            initial_code = render_result.artifact.code
+        else:
+            initial_code = final_prefix
+        last_raw_output = ""
+
+    eval_result = program_eval_loop(
+        initial_code=initial_code,
+        prompt=prompt,
+        generator=generator,
+        budget=budget,
+        markers=markers,
+        last_raw_output=last_raw_output,
+    )
+
+    elapsed = time.time() - t0
+
+    compiles, test_passed, test_total = evaluate_final_ts_code(
+        ts_code=eval_result.final_code,
+    )
+
+    outer_feedbacks = max(0, eval_result.rounds - 1)
+    combined_trace = gen_trace + [{"phase": "outer", **e} for e in eval_result.trace]
+
+    if compiles:
+        final_verdict = "pass"
     else:
-        compiles, test_passed, test_total = evaluate_final_program(
-            final_prefix=final_prefix,
-            renderer=renderer,
-        )
+        final_verdict = "fail"
+
     return RunResult(
         case_id=case_id,
         config=config_name,
+        final_verdict=final_verdict,
+        total_tokens=budget.gen_tokens_used,
+        total_steps=gen_steps + eval_result.rounds,
         elapsed_s=round(elapsed, 1),
+        verify_count=gen_verify + eval_result.rounds,
+        feedback_count=gen_feedback + outer_feedbacks,
+        rollback_count=gen_rollback + outer_feedbacks,
+        commit_count=gen_commit,
         compiles=compiles,
         test_passed=test_passed,
         test_total=test_total,
-        **metrics,
+        trace_log=combined_trace,
     )
 
+
+# -- Output --------------------------------------------------------------------
 
 def _discover_case_ids(dataset_dir: Path) -> list[str]:
     if not dataset_dir.is_dir():
@@ -577,6 +598,8 @@ def print_summary(
     print(f"{'=' * 95}")
 
 
+# -- Main ----------------------------------------------------------------------
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="A/B experiment: JS->TS DTV vs naive feedback")
     parser.add_argument("case_ids", nargs="*", help="Case IDs to run")
@@ -613,6 +636,7 @@ def main() -> None:
     do_sample: bool | None = False if args.greedy else None
 
     write_region_parser = WriteRegionParser()
+    markers = write_region_parser.markers
     generator = GeneratorAdapter(
         model_name=model_name,
         stop_criteria_factory=lambda tok: [
@@ -630,7 +654,7 @@ def main() -> None:
     print(f"Output: {output_path}")
 
     results: list[RunResult] = []
-    configs = [("dtv", DTV_CONFIG), ("naive", NAIVE_CONFIG)]
+    configs = [("dtv", DTV_CONFIG), ("naive", DTV_CONFIG)]
 
     for i, case_id in enumerate(case_ids, 1):
         case_dir = dataset_dir / case_id
@@ -644,11 +668,11 @@ def main() -> None:
                     config_name,
                     generator,
                     token_budget=token_budget,
+                    markers=markers,
                     budget_k=budget_k,
                 )
             except Exception as exc:
                 import traceback
-
                 traceback.print_exc()
                 print(f"  !! CRASH: {case_id}/{config_name}: {exc}", flush=True)
                 result = RunResult(

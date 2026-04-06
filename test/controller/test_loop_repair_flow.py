@@ -5,7 +5,7 @@ import pytest
 from c_rust.feedback import RUST_FEEDBACK_LANG
 from controller.loop import ControllerOp, run_dtv_loop, select_oracles_by_granularity
 from core.budget import Budget
-from core.llm_output import AssistantContent, FenceParserSnapshot, FenceState, OutputExtractorState
+from core.llm_output import AssistantContent, OutputExtractorState, WriteRegionParserSnapshot, WriteRegionState
 from core.types import (
     Action,
     Artifact,
@@ -74,7 +74,7 @@ class _SequenceGenerator:
     def __init__(self, steps: list[str]) -> None:
         self.steps = steps
         self.idx = 0
-        snapshot = FenceParserSnapshot(state=FenceState.OUTSIDE, saw_fence=False)
+        snapshot = WriteRegionParserSnapshot(state=WriteRegionState.OUTSIDE, saw_begin=False, saw_end=False)
         self._extractor_state = OutputExtractorState(
             segment=snapshot,
             extract=snapshot,
@@ -101,7 +101,7 @@ class _SequenceGenerator:
     def reset_output_extractor(self) -> None:
         return None
 
-    def get_output_extractor_state(self) -> FenceState:
+    def get_output_extractor_state(self) -> WriteRegionState:
         return self._extractor_state.extract.state
 
     def capture_output_extractor_state(self) -> OutputExtractorState:
@@ -109,6 +109,9 @@ class _SequenceGenerator:
 
     def restore_output_extractor_state(self, state: OutputExtractorState) -> None:
         self._extractor_state = state
+
+    def set_stop_on_write_region_open(self, enabled: bool) -> None:
+        _ = enabled
 
 
 def _last_assistant_text(context: GenerateContext) -> str:
@@ -147,13 +150,13 @@ class _TrackingSequenceGenerator(_SequenceGenerator):
         return super().generate_step(context)
 
 
-class _FencedTrackingGenerator:
+class _WriteRegionTrackingGenerator:
     def __init__(self, steps: list[str]) -> None:
         self.steps = steps
         self.idx = 0
         self.seen_assistant_messages: list[str] = []
         self.seen_user_messages: list[str] = []
-        snapshot = FenceParserSnapshot(state=FenceState.OUTSIDE, saw_fence=False)
+        snapshot = WriteRegionParserSnapshot(state=WriteRegionState.OUTSIDE, saw_begin=False, saw_end=False)
         self._extractor_state = OutputExtractorState(
             segment=snapshot,
             extract=snapshot,
@@ -173,7 +176,7 @@ class _FencedTrackingGenerator:
             )
         delta = self.steps[self.idx]
         self.idx += 1
-        inside = FenceParserSnapshot(state=FenceState.INSIDE, saw_fence=True)
+        inside = WriteRegionParserSnapshot(state=WriteRegionState.INSIDE, saw_begin=True, saw_end=False)
         self._extractor_state = OutputExtractorState(
             segment=inside,
             extract=inside,
@@ -181,12 +184,10 @@ class _FencedTrackingGenerator:
             warning_emitted=False,
         )
         assistant_delta = AssistantContent(
-            pre_fence="",
-            fence_lang="rust",
+            prelude="",
             code=delta,
-            post_fence="",
-            pending_text="",
-            fence_state=FenceState.INSIDE,
+            has_begin_marker=True,
+            region_state=WriteRegionState.INSIDE,
         )
         return GenerateResult(
             delta_text=delta,
@@ -196,7 +197,7 @@ class _FencedTrackingGenerator:
         )
 
     def reset_output_extractor(self) -> None:
-        snapshot = FenceParserSnapshot(state=FenceState.OUTSIDE, saw_fence=False)
+        snapshot = WriteRegionParserSnapshot(state=WriteRegionState.OUTSIDE, saw_begin=False, saw_end=False)
         self._extractor_state = OutputExtractorState(
             segment=snapshot,
             extract=snapshot,
@@ -204,7 +205,7 @@ class _FencedTrackingGenerator:
             warning_emitted=False,
         )
 
-    def get_output_extractor_state(self) -> FenceState:
+    def get_output_extractor_state(self) -> WriteRegionState:
         return self._extractor_state.extract.state
 
     def capture_output_extractor_state(self) -> OutputExtractorState:
@@ -213,12 +214,15 @@ class _FencedTrackingGenerator:
     def restore_output_extractor_state(self, state: OutputExtractorState) -> None:
         self._extractor_state = state
 
+    def set_stop_on_write_region_open(self, enabled: bool) -> None:
+        _ = enabled
+
 
 class _TokenSequenceGenerator:
     def __init__(self, steps: list[tuple[str, int]]) -> None:
         self.steps = steps
         self.idx = 0
-        snapshot = FenceParserSnapshot(state=FenceState.OUTSIDE, saw_fence=False)
+        snapshot = WriteRegionParserSnapshot(state=WriteRegionState.OUTSIDE, saw_begin=False, saw_end=False)
         self._extractor_state = OutputExtractorState(
             segment=snapshot,
             extract=snapshot,
@@ -245,7 +249,7 @@ class _TokenSequenceGenerator:
     def reset_output_extractor(self) -> None:
         return None
 
-    def get_output_extractor_state(self) -> FenceState:
+    def get_output_extractor_state(self) -> WriteRegionState:
         return self._extractor_state.extract.state
 
     def capture_output_extractor_state(self) -> OutputExtractorState:
@@ -253,6 +257,9 @@ class _TokenSequenceGenerator:
 
     def restore_output_extractor_state(self, state: OutputExtractorState) -> None:
         self._extractor_state = state
+
+    def set_stop_on_write_region_open(self, enabled: bool) -> None:
+        _ = enabled
 
 
 class _ToggleRenderer:
@@ -937,8 +944,11 @@ def test_feedback_prompt_can_omit_failed_snippet() -> None:
 
 
 def test_structured_feedback_mechanism_b_applies_parsed_patch() -> None:
-    # Two-phase feedback B: Phase 1 = reasoning + fence open, Phase 2 = replacement code.
-    generator = _SequenceGenerator(["bad stmt\n", "Let me think about this fix.\n```rust\n", "good;\n```\n"])
+    generator = _TrackingSequenceGenerator([
+        "bad stmt\n",
+        "Let me think about this fix.\n",
+        "good;\n<<END_WRITE_CODE>>\n",
+    ])
     renderer = _OkRenderer()
     oracles = [_OracleFailThenPass()]
     budget = Budget(gen_tokens_budget=16)
@@ -973,16 +983,13 @@ def test_structured_feedback_mechanism_b_applies_parsed_patch() -> None:
 
 
 def test_structured_feedback_mechanism_b_malformed_diff_feeds_next_round() -> None:
-    # Round 1 Phase 2: injection provides "- bad stmt\n+ ", model continues with
-    # "first;\nsecond;\n" -- the "second;" line lacks a +/- prefix, so the diff
-    # parser rejects the patch. Round 2 prompt includes this parse error.
     generator = _TrackingSequenceGenerator(
         [
             "bad stmt\n",
-            "Let me try this fix.\n```rust\n",
-            "first;\nsecond;\n```\n",
-            "Reasoning about the fix.\n```rust\n",
-            "fixed;\n```\n",
+            "Let me try this fix.\n",
+            "first;\nsecond;\n<<END_WRITE_CODE>>\n",
+            "Reasoning about the fix.\n",
+            "fixed;\n<<END_WRITE_CODE>>\n",
         ]
     )
     renderer = _OkRenderer()
@@ -1013,16 +1020,13 @@ def test_structured_feedback_mechanism_b_malformed_diff_feeds_next_round() -> No
 
 
 def test_structured_feedback_mechanism_b_scope_validator_failure_feeds_next_round() -> None:
-    # Two-phase feedback B: each round = Phase 1 (reasoning + fence open) + Phase 2 (diff code).
-    # Round 1 Phase 2: multi-line diff producing a function_item (scope-invalid at STMT).
-    # Round 2 Phase 2: valid single-line replacement.
     generator = _TrackingSequenceGenerator(
         [
             "bad stmt\n",
-            "Let me wrap this in a function.\n```rust\n",
-            "fn main() {\n+     let x: i32 = 1;\n+ }\n```\n",
-            "Let me try a simpler fix.\n```rust\n",
-            "fixed;\n```\n",
+            "Let me wrap this in a function.\n",
+            "fn main() {\n+     let x: i32 = 1;\n+ }\n<<END_WRITE_CODE>>\n",
+            "Let me try a simpler fix.\n",
+            "fixed;\n<<END_WRITE_CODE>>\n",
         ]
     )
     renderer = _OkRenderer()
@@ -1218,7 +1222,7 @@ def test_generate_without_feedback_a_does_not_inject_active_feedback() -> None:
 
 
 def test_generate_keeps_feedback_anchor_position_after_feedback_a() -> None:
-    generator = _FencedTrackingGenerator(
+    generator = _WriteRegionTrackingGenerator(
         [
             "bad stmt\n",
             "use std::io::{self, Write};\n",
@@ -1269,12 +1273,11 @@ def test_generate_keeps_feedback_anchor_position_after_feedback_a() -> None:
 
 
 def test_generate_skips_inline_feedback_after_feedback_b() -> None:
-    # Two-phase feedback B: Phase 1 (reasoning + fence open) + Phase 2 (replacement).
     generator = _TrackingSequenceGenerator(
         [
             "bad stmt\n",
-            "Reasoning about the fix.\n```rust\n",
-            "let x = 1;\n```\n",
+            "Reasoning about the fix.\n",
+            "let x = 1;\n<<END_WRITE_CODE>>\n",
             "next stmt\n",
         ]
     )
@@ -1443,7 +1446,7 @@ class _DualHintPolicy:
 
 
 def test_dual_hint_block_survives_stmt_repair_cycle() -> None:
-    generator = _FencedTrackingGenerator(
+    generator = _WriteRegionTrackingGenerator(
         [
             "bad1\n",       # step 0: initial gen
             "fix1\n",       # step 3: feedback patch for hint1

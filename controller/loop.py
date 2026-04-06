@@ -215,7 +215,7 @@ def _remaining_tokens(budget: Budget) -> int:
     return max(0, budget.gen_tokens_budget - budget.gen_tokens_used)
 
 
-def _render_write_region_contract(
+def render_write_region_contract(
     language_name: str,
     markers: WriteRegionMarkers,
 ) -> str:
@@ -1134,6 +1134,7 @@ def run_dtv_loop(
     prompt_prefix: str = "",
     oracle_runner: OracleRunner | None = None,
     write_region_markers: WriteRegionMarkers = DEFAULT_WRITE_REGION_MARKERS,
+    inject_write_region_contract: bool = True,
 ) -> tuple[str, list[TraceEvent]]:
     """
     State machine (MVP):
@@ -1156,8 +1157,11 @@ def run_dtv_loop(
     trace: list[TraceEvent] = []
 
     base_messages: list[GenerateMessage] = []
-    contract_prompt = _render_write_region_contract(feedback_lang_config.name, write_region_markers)
-    user_prompt = contract_prompt if not prompt_prefix else f"{prompt_prefix.rstrip()}\n\n{contract_prompt}"
+    if inject_write_region_contract:
+        contract_prompt = render_write_region_contract(feedback_lang_config.name, write_region_markers)
+        user_prompt = contract_prompt if not prompt_prefix else f"{prompt_prefix.rstrip()}\n\n{contract_prompt}"
+    else:
+        user_prompt = prompt_prefix
     base_messages.append(GenerateMessage(role="user", content=user_prompt, stop=True))
     base_messages.append(
         GenerateMessage(role="assistant", content=AssistantContent.empty(markers=write_region_markers), stop=False)

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from core.llm_output import BEGIN_WRITE_CODE, END_WRITE_CODE
 from core.types import Granularity
 from c_rust.feedback import RUST_FEEDBACK_LANG
 from js_ts.feedback import TS_FEEDBACK_LANG
 from feedback.output_parser import (
-    FeedbackFenceStreamParser,
+    FeedbackWriteRegionStreamParser,
     parse_diff_feedback_output,
     parse_feedback_output,
     snippet_contains_function,
@@ -12,37 +13,37 @@ from feedback.output_parser import (
 )
 
 
-def test_parse_feedback_output_single_fence_success() -> None:
+def test_parse_feedback_output_single_write_region_success() -> None:
     result = parse_feedback_output(
-        """```rust
-fn main() {
-    println!(\"ok\");
-}
-```""",
+        f"""{BEGIN_WRITE_CODE}
+fn main() {{
+    println!("ok");
+}}
+{END_WRITE_CODE}""",
         RUST_FEEDBACK_LANG,
     )
 
     assert result.patch == """fn main() {
-    println!(\"ok\");
+    println!("ok");
 }"""
     assert result.error is None
-    assert result.used_fence is True
+    assert result.used_write_region is True
 
 
-def test_parse_feedback_output_rejects_multiple_fences() -> None:
+def test_parse_feedback_output_rejects_multiple_regions() -> None:
     result = parse_feedback_output(
-        """```rust
+        f"""{BEGIN_WRITE_CODE}
 let x = 1;
-```
-```rust
+{END_WRITE_CODE}
+{BEGIN_WRITE_CODE}
 let y = 2;
-```""",
+{END_WRITE_CODE}""",
         RUST_FEEDBACK_LANG,
     )
 
     assert result.patch is None
-    assert result.error == "multiple fenced code blocks found"
-    assert result.used_fence is True
+    assert result.error == "multiple write regions found"
+    assert result.used_write_region is True
 
 
 def test_parse_feedback_output_rejects_empty_output() -> None:
@@ -50,95 +51,90 @@ def test_parse_feedback_output_rejects_empty_output() -> None:
 
     assert result.patch is None
     assert result.error == "empty model output"
-    assert result.used_fence is False
+    assert result.used_write_region is False
 
 
-def test_parse_feedback_output_accepts_plain_text_fallback() -> None:
+def test_parse_feedback_output_rejects_missing_region() -> None:
     result = parse_feedback_output(
         """fn main() {
-    println!(\"ok\");
+    println!("ok");
 }""",
         RUST_FEEDBACK_LANG,
     )
 
-    assert result.patch == """fn main() {
-    println!(\"ok\");
-}"""
-    assert result.error is None
-    assert result.used_fence is False
+    assert result.patch is None
+    assert result.error == "missing write region"
+    assert result.used_write_region is False
 
 
 def test_parse_diff_feedback_output_requires_diff_patch() -> None:
     result = parse_diff_feedback_output(
-        """```rust
-fn main() {
-    println!(\"ok\");
-}
-```"""
+        f"""{BEGIN_WRITE_CODE}
+fn main() {{
+    println!("ok");
+}}
+{END_WRITE_CODE}"""
     )
 
     assert result.patch is None
     assert result.error == "patch must be a unified diff with '+' and '-' lines only"
-    assert result.used_fence is True
+    assert result.used_write_region is True
 
 
-def test_parse_feedback_output_extracts_diff_replacement_without_closing_fence() -> None:
+def test_parse_feedback_output_rejects_unterminated_write_region() -> None:
     result = parse_diff_feedback_output(
-        """- function parseJson(
--   txt: string,
--   reviver?: ((this: any, key: string, value: any) => any) | undefined,
-+ function parseJson(
-+   txt: string,
-+   reviver?: ((this: unknown, key: string, value: unknown) => unknown) | undefined,"""
+        f"""{BEGIN_WRITE_CODE}
+- const x: any = value;"""
     )
 
-    assert result.patch == """function parseJson(
-  txt: string,
-  reviver?: ((this: unknown, key: string, value: unknown) => unknown) | undefined,"""
-    assert result.error is None
-    assert result.used_fence is False
+    assert result.patch is None
+    assert result.error == "unterminated write region"
+    assert result.used_write_region is True
 
 
-def test_parse_feedback_output_extracts_diff_replacement_from_open_fence() -> None:
+def test_parse_feedback_output_extracts_diff_replacement_from_write_region() -> None:
     result = parse_diff_feedback_output(
-        """```typescript
+        f"""{BEGIN_WRITE_CODE}
 - function parseJson(
 + function parseJson(
 +   txt: string,
-+   reviver?: ((this: unknown, key: string, value: unknown) => unknown) | undefined,"""
++   reviver?: ((this: unknown, key: string, value: unknown) => unknown) | undefined,
+{END_WRITE_CODE}"""
     )
 
     assert result.patch == """function parseJson(
   txt: string,
   reviver?: ((this: unknown, key: string, value: unknown) => unknown) | undefined,"""
     assert result.error is None
-    assert result.used_fence is True
+    assert result.used_write_region is True
 
 
-def test_parse_feedback_output_extracts_diff_replacement_before_closing_fence() -> None:
+def test_parse_feedback_output_rejects_trailing_text_after_end_marker() -> None:
     result = parse_diff_feedback_output(
-        """```typescript
+        f"""{BEGIN_WRITE_CODE}
 - const x: any = value;
 + const x: unknown = value;
-```<|im_end|>""",
+{END_WRITE_CODE}<|im_end|>"""
     )
 
-    assert result.patch == "const x: unknown = value;"
-    assert result.error is None
-    assert result.used_fence is True
+    assert result.patch is None
+    assert result.error == "unterminated write region"
+    assert result.used_write_region is True
 
 
-def test_parse_feedback_output_rejects_non_rust_fence() -> None:
+def test_parse_feedback_output_rejects_inner_fence() -> None:
     result = parse_feedback_output(
-        """```python
-print(\"hi\")
-```""",
+        f"""{BEGIN_WRITE_CODE}
+```python
+print("hi")
+```
+{END_WRITE_CODE}""",
         RUST_FEEDBACK_LANG,
     )
 
     assert result.patch is None
-    assert result.error == "fenced code block language must be rust"
-    assert result.used_fence is True
+    assert result.error == "write region must contain raw code only"
+    assert result.used_write_region is True
 
 
 def test_validate_patch_scope_stmt_rejects_function_wrapper() -> None:
@@ -398,28 +394,28 @@ def test_validate_patch_scope_stmt_rejects_invalid_syntax_when_rollback_parses_o
     assert "not valid TypeScript syntax" in error
 
 
-def test_feedback_fence_stream_parser_detects_complete_fence() -> None:
-    parser = FeedbackFenceStreamParser()
+def test_feedback_write_region_stream_parser_detects_complete_region() -> None:
+    parser = FeedbackWriteRegionStreamParser()
 
-    parser.feed("```rust\nlet x = 1;\n")
+    parser.feed(f"{BEGIN_WRITE_CODE}\nlet x = 1;\n")
     assert parser.complete is False
 
-    parser.feed("```")
+    parser.feed(END_WRITE_CODE)
     assert parser.complete is True
 
 
-def test_feedback_fence_stream_parser_reset_clears_state() -> None:
-    parser = FeedbackFenceStreamParser()
+def test_feedback_write_region_stream_parser_reset_clears_state() -> None:
+    parser = FeedbackWriteRegionStreamParser()
 
-    parser.feed("```rust\nlet x = 1;\n```")
+    parser.feed(f"{BEGIN_WRITE_CODE}\nlet x = 1;\n{END_WRITE_CODE}")
     assert parser.complete is True
 
     parser.reset()
     assert parser.complete is False
 
 
-def test_feedback_fence_stream_parser_requires_closing_fence() -> None:
-    parser = FeedbackFenceStreamParser()
+def test_feedback_write_region_stream_parser_requires_end_marker() -> None:
+    parser = FeedbackWriteRegionStreamParser()
 
     parser.feed("+ const x: number = 1;")
 

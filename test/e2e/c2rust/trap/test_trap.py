@@ -4,14 +4,14 @@ import json
 from pathlib import Path
 
 from c_rust.feedback import RUST_FEEDBACK_LANG
-from c_rust.oracles import FunctionOracle, ProgramOracle, RustcOracle
+from c_rust.oracles import FunctionOracle, RustcOracle
 from c_rust.render import CRustRenderer
 from controller.adapters import GeneratorAdapter
 from controller.loop import run_dtv_loop
 from controller.policy import DefaultPolicy, DefaultPolicyConfig
 from controller.stop_criteria import DTVStoppingCriteria, RUST_PROFILE
 from core.budget import Budget
-from core.llm_output import FenceParser
+from core.llm_output import BEGIN_WRITE_CODE, END_WRITE_CODE, WriteRegionParser
 from core.types import Action, TestCase, TranslationSample, Verdict
 from feedback.feedback import FeedbackState
 from rollback.manager import RollbackManager
@@ -40,11 +40,10 @@ def _load_tests(path: Path) -> list[TestCase]:
     return cases
 
 
-def test_trap_end_to_end() -> None:
+def test_trap_end_to_end(tmp_path: Path) -> None:
     base_dir = Path(__file__).resolve().parent
     c_source_path = base_dir / "trap_c_source.c"
     tests_path = base_dir / "trap_tests.json"
-    source_path = base_dir / "llm_output.md"
     expected_rust_path = base_dir / "trap_rs.rs"
 
     c_program = c_source_path.read_text(encoding="utf-8").strip()
@@ -55,16 +54,24 @@ def test_trap_end_to_end() -> None:
         test_cases=test_cases,
     )
 
-    source_text = source_path.read_text(encoding="utf-8")
+    expected_rust = expected_rust_path.read_text(encoding="utf-8")
+    source_text = (
+        "Here is the translated Rust code for the provided C code snippet:\n\n"
+        f"{BEGIN_WRITE_CODE}\n"
+        f"{expected_rust.rstrip()}\n"
+        f"{END_WRITE_CODE}\n"
+    )
+    source_path = tmp_path / "llm_output.md"
+    source_path.write_text(source_text, encoding="utf-8")
     MockLLMBackend.configure(source_path=source_path, chunk_size=1)
 
-    fence_parser = FenceParser(allowed_langs=("rust", "rs"))
+    write_region_parser = WriteRegionParser()
     generator = GeneratorAdapter(
         model_name="mock",
         stop_criteria_factory=lambda tok: [
-            DTVStoppingCriteria(tok, RUST_PROFILE, fence_parser=fence_parser)
+            DTVStoppingCriteria(tok, RUST_PROFILE, write_region_parser=write_region_parser)
         ],
-        fence_parser=fence_parser,
+        write_region_parser=write_region_parser,
         backend_cls=MockLLMBackend,
     )
 
@@ -76,7 +83,7 @@ def test_trap_end_to_end() -> None:
 '''
 
     renderer = CRustRenderer(sample=sample)
-    oracles = [RustcOracle(), FunctionOracle(), ProgramOracle()]
+    oracles = [RustcOracle(), FunctionOracle()]
     budget = Budget(gen_tokens_budget=len(source_text) + 16)
     feedback_state = FeedbackState()
     rollback_manager = RollbackManager()
@@ -96,7 +103,6 @@ def test_trap_end_to_end() -> None:
         prompt_prefix=prompt,
     )
 
-    expected_rust = expected_rust_path.read_text(encoding="utf-8")
     assert final_prefix == expected_rust
     assert trace
     verify_events = [event for event in trace if event.action == Action.VERIFY]

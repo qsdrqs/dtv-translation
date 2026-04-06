@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from core.llm_output import AssistantContent, FenceState
+from core.llm_output import AssistantContent, BEGIN_WRITE_CODE, WriteRegionState
 from core.types import FeedbackMechanism, Granularity
 from controller.loop import _render_feedback_patch_text, _select_feedback_mechanism
 
@@ -40,12 +40,12 @@ def test_select_feedback_mechanism_keeps_a_for_any_scope() -> None:
 
 def test_render_feedback_patch_text_includes_prefill_content() -> None:
     prefix = AssistantContent(
-        fence_lang="typescript",
         code="- old\n+ ",
-        fence_state=FenceState.INSIDE,
+        has_begin_marker=True,
+        region_state=WriteRegionState.INSIDE,
     )
 
-    assert _render_feedback_patch_text(prefix, "new\n") == """```typescript
+    assert _render_feedback_patch_text(prefix, "new\n") == f"""{BEGIN_WRITE_CODE}
 - old
 + new
 """

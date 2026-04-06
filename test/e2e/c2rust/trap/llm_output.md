@@ -1,6 +1,6 @@
 Here is the translated Rust code for the provided C code snippet:
 
-```rust
+<<BEGIN_WRITE_CODE>>
 use std::io::{self, Read};
 
 fn trap(height: &[i32]) -> i32 {
@@ -68,6 +68,6 @@ fn main() {
     let result = trap(&arr);
     println!("{result}");
 }
-```
+<<END_WRITE_CODE>>
 
 The Rust code above implemented the same functionality as the original C code, handling traps and exceptions appropriately.
