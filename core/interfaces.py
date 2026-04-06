@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from core.llm_output import FenceState, OutputExtractorState
+from core.llm_output import OutputExtractorState, WriteRegionState
 from core.types import (
     Artifact,
     ControllerState,
@@ -22,7 +22,7 @@ class Generator(Protocol):
     def reset_output_extractor(self) -> None:
         ...
 
-    def get_output_extractor_state(self) -> FenceState:
+    def get_output_extractor_state(self) -> WriteRegionState:
         ...
 
     def capture_output_extractor_state(self) -> OutputExtractorState:
@@ -31,7 +31,7 @@ class Generator(Protocol):
     def restore_output_extractor_state(self, state: OutputExtractorState) -> None:
         ...
 
-    def set_stop_on_fence_open(self, enabled: bool) -> None:
+    def set_stop_on_write_region_open(self, enabled: bool) -> None:
         ...
 
 

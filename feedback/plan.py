@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from core.llm_output import AssistantContent, FenceState
+from core.llm_output import AssistantContent, DEFAULT_WRITE_REGION_MARKERS, WriteRegionMarkers, WriteRegionState
 from core.types import Granularity
 from core.types import FeedbackMechanism, GenerationChannel
 from feedback.formatter import RepairFeedbackFormatConfig, render_repair_feedback
@@ -23,7 +23,7 @@ class FeedbackPlan:
     channel: GenerationChannel
     prompt: str
     response_prefix: str | AssistantContent | None = None
-    post_fence_injection: str | None = None
+    post_region_injection: str | None = None
 
 
 def build_feedback_plan(
@@ -32,15 +32,21 @@ def build_feedback_plan(
     repair_context: RepairContext,
     repair_feedback_format_config: RepairFeedbackFormatConfig | None,
     lang_config: FeedbackLanguageConfig,
+    write_region_markers: WriteRegionMarkers = DEFAULT_WRITE_REGION_MARKERS,
 ) -> FeedbackPlan:
     if mechanism == FeedbackMechanism.B:
         diff_injection = _render_minus_prefill(repair_context.failed_snippet) + "+ "
         return FeedbackPlan(
             mechanism=mechanism,
             channel=GenerationChannel.PATCH,
-            prompt=render_feedback_prompt(repair_context, lang_config, use_stmt_diff=True),
+            prompt=render_feedback_prompt(
+                repair_context,
+                lang_config,
+                use_stmt_diff=True,
+                write_region_markers=write_region_markers,
+            ),
             response_prefix=None,
-            post_fence_injection=diff_injection,
+            post_region_injection=diff_injection,
         )
     return FeedbackPlan(
         mechanism=mechanism,
@@ -54,9 +60,9 @@ def render_feedback_prompt(
     lang_config: FeedbackLanguageConfig,
     *,
     use_stmt_diff: bool = False,
+    write_region_markers: WriteRegionMarkers = DEFAULT_WRITE_REGION_MARKERS,
 ) -> str:
     lang = lang_config.name
-    fence_tag = max(lang_config.fence_tags, key=len)
     goal = f"Produce a minimal {lang} patch that resolves the listed failures."
     diagnostics_block = _render_diagnostics(repair_context)
     constraints: list[str] = list(_CONSTRAINTS)
@@ -74,14 +80,14 @@ Previous parse error:
 - {repair_context.parser_error_context}"""
     scope_rules = _scope_rules(repair_context.repair_scope, lang_config)
     scope_rules_block = "\n".join(f"- {rule}" for rule in scope_rules)
-    output_contract = f"Return exactly one {lang} code block:"
+    output_contract = f"Return exactly one write-code region containing raw {lang} text:"
     if use_stmt_diff:
-        output_contract = f"Return exactly one {lang} code block containing the unified diff patch:"
+        output_contract = "Return exactly one write-code region containing the unified diff patch:"
     return f"""The previous generated next code snippet was:
 
-```
+{write_region_markers.begin_marker}
 {repair_context.failed_snippet}
-```
+{write_region_markers.end_marker}
 
 It error with diagnostics:
 {diagnostics_block}
@@ -100,9 +106,9 @@ scope rules:
 
 output contract:
 {output_contract}
-```{fence_tag}
+{write_region_markers.begin_marker}
 <Your patch here>
-```
+{write_region_markers.end_marker}
 """
 
 
@@ -110,18 +116,18 @@ def _build_response_prefix(
     repair_context: RepairContext,
     lang_config: FeedbackLanguageConfig,
     use_stmt_diff: bool,
+    write_region_markers: WriteRegionMarkers = DEFAULT_WRITE_REGION_MARKERS,
 ) -> AssistantContent:
     if not use_stmt_diff:
         return AssistantContent.empty()
-    fence_tag = max(lang_config.fence_tags, key=len)
     diff_lines = _render_minus_prefill(repair_context.failed_snippet)
 
-    # append a single `+` line to guide the model towards producing a diff
     diff_lines += "+ "
     return AssistantContent(
-        fence_lang=fence_tag,
         code=diff_lines,
-        fence_state=FenceState.INSIDE,
+        has_begin_marker=True,
+        region_state=WriteRegionState.INSIDE,
+        markers=write_region_markers,
     )
 
 
@@ -169,5 +175,5 @@ def _scope_rules(
         )
     return (
         "Patch the full program as needed.",
-        f"Return one coherent {lang} code block only.",
+        f"Return one coherent {lang} write region only.",
     )

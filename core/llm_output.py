@@ -4,36 +4,53 @@ import logging
 from dataclasses import dataclass, field
 from enum import Enum
 
+
 _logger = logging.getLogger(__name__)
 
 
-class FenceState(str, Enum):
+@dataclass(frozen=True)
+class WriteRegionMarkers:
+    begin_marker: str = "<<BEGIN_WRITE_CODE>>"
+    end_marker: str = "<<END_WRITE_CODE>>"
+
+
+DEFAULT_WRITE_REGION_MARKERS = WriteRegionMarkers()
+BEGIN_WRITE_CODE = DEFAULT_WRITE_REGION_MARKERS.begin_marker
+END_WRITE_CODE = DEFAULT_WRITE_REGION_MARKERS.end_marker
+
+
+class WriteRegionState(str, Enum):
     OUTSIDE = "outside"
     INSIDE = "inside"
-    DONE = "done"
 
 
 @dataclass(frozen=True)
-class FenceParserSnapshot:
-    state: FenceState
-    saw_fence: bool
+class WriteRegionParserSnapshot:
+    state: WriteRegionState
+    saw_begin: bool
+    saw_end: bool
     buffer: str = ""
-    inside_parts: tuple[str, ...] = ()
+    code_parts: tuple[str, ...] = ()
+    invalid_payload: bool = False
+    invalid_reason: str = ""
 
-    def force_inside(self) -> "FenceParserSnapshot":
-        return FenceParserSnapshot(
-            state=FenceState.INSIDE,
-            saw_fence=True,
+    def force_inside(self) -> "WriteRegionParserSnapshot":
+        return WriteRegionParserSnapshot(
+            state=WriteRegionState.INSIDE,
+            saw_begin=True,
+            saw_end=False,
             buffer="",
-            inside_parts=(),
+            code_parts=(),
+            invalid_payload=False,
+            invalid_reason="",
         )
 
 
 @dataclass(frozen=True)
 class OutputExtractorState:
-    segment: FenceParserSnapshot
-    extract: FenceParserSnapshot
-    shared: FenceParserSnapshot | None
+    segment: WriteRegionParserSnapshot
+    extract: WriteRegionParserSnapshot
+    shared: WriteRegionParserSnapshot | None
     warning_emitted: bool = False
 
     def force_inside(self) -> "OutputExtractorState":
@@ -48,81 +65,105 @@ class OutputExtractorState:
 
 @dataclass(frozen=True)
 class AssistantContent:
-    pre_fence: str = ""
-    fence_lang: str = ""
+    prelude: str = ""
     code: str = ""
-    post_fence: str = ""
-    # Streaming buffer: text that may be a fence marker prefix (e.g. "```")
-    # but has not been confirmed by a newline yet.  Included in render() so
-    # the LLM sees a faithful snapshot; reclassified on the next
-    # FenceParser.feed() call via the internal _buffer.
+    postlude: str = ""
     pending_text: str = ""
-    fence_state: FenceState = FenceState.OUTSIDE
+    has_begin_marker: bool = False
+    has_end_marker: bool = False
+    region_state: WriteRegionState = WriteRegionState.OUTSIDE
+    markers: WriteRegionMarkers = DEFAULT_WRITE_REGION_MARKERS
 
     @classmethod
-    def empty(cls) -> "AssistantContent":
-        return cls()
+    def empty(cls, *, markers: WriteRegionMarkers = DEFAULT_WRITE_REGION_MARKERS) -> "AssistantContent":
+        return cls(markers=markers)
 
     @classmethod
-    def from_unfenced(cls, text: str) -> "AssistantContent":
-        return cls(pre_fence=text, fence_state=FenceState.OUTSIDE)
+    def from_text(
+        cls,
+        text: str,
+        *,
+        markers: WriteRegionMarkers = DEFAULT_WRITE_REGION_MARKERS,
+    ) -> "AssistantContent":
+        return cls(prelude=text, region_state=WriteRegionState.OUTSIDE, markers=markers)
 
     def render(self) -> str:
-        if self.fence_state == FenceState.OUTSIDE:
-            return f"{self.pre_fence}{self.pending_text}"
-        if self.fence_state == FenceState.INSIDE:
-            return f"{self.pre_fence}```{self.fence_lang}\n{self.code}{self.pending_text}"
-        return (
-            f"{self.pre_fence}```{self.fence_lang}\n{self.code}"
-            f"```\n{self.post_fence}{self.pending_text}"
-        )
+        parts: list[str] = [self.prelude]
+        if self.has_begin_marker:
+            parts.append(f"{self.markers.begin_marker}\n")
+            parts.append(self.code)
+            if self.has_end_marker:
+                parts.append(f"{self.markers.end_marker}\n")
+                parts.append(self.postlude)
+        else:
+            parts.append(self.code)
+            parts.append(self.postlude)
+        parts.append(self.pending_text)
+        return "".join(parts)
 
     def with_code(self, code: str) -> "AssistantContent":
         return AssistantContent(
-            pre_fence=self.pre_fence,
-            fence_lang=self.fence_lang,
+            prelude=self.prelude,
             code=code,
-            post_fence=self.post_fence,
+            postlude=self.postlude,
             pending_text=self.pending_text,
-            fence_state=self.fence_state,
+            has_begin_marker=self.has_begin_marker,
+            has_end_marker=self.has_end_marker,
+            region_state=self.region_state,
+            markers=self.markers,
         )
 
 
 def merge_assistant_content(prefix: AssistantContent, delta: AssistantContent) -> AssistantContent:
-    fence_lang = prefix.fence_lang or delta.fence_lang
     return AssistantContent(
-        pre_fence=prefix.pre_fence + delta.pre_fence,
-        fence_lang=fence_lang,
+        prelude=prefix.prelude + delta.prelude,
         code=prefix.code + delta.code,
-        post_fence=prefix.post_fence + delta.post_fence,
+        postlude=prefix.postlude + delta.postlude,
         pending_text=delta.pending_text,
-        fence_state=delta.fence_state,
+        has_begin_marker=prefix.has_begin_marker or delta.has_begin_marker,
+        has_end_marker=prefix.has_end_marker or delta.has_end_marker,
+        region_state=delta.region_state,
+        markers=prefix.markers,
     )
 
 
-class FenceReopenError(RuntimeError):
-    pass
-
-
 @dataclass
-class FenceParser:
-    allowed_langs: tuple[str, ...]
-    state: FenceState = FenceState.OUTSIDE
+class WriteRegionParser:
+    state: WriteRegionState = WriteRegionState.OUTSIDE
+    markers: WriteRegionMarkers = DEFAULT_WRITE_REGION_MARKERS
     _buffer: str = ""
-    _saw_fence: bool = False
+    _saw_begin: bool = False
+    _saw_end: bool = False
+    _invalid_payload: bool = False
+    _invalid_reason: str = ""
     _epoch: int = 0
-    _inside_parts: list[str] = field(default_factory=list)
+    _code_parts: list[str] = field(default_factory=list)
 
     def reset(self) -> None:
-        self.state = FenceState.OUTSIDE
+        self.state = WriteRegionState.OUTSIDE
         self._buffer = ""
-        self._saw_fence = False
+        self._saw_begin = False
+        self._saw_end = False
+        self._invalid_payload = False
+        self._invalid_reason = ""
         self._epoch += 1
-        self._inside_parts.clear()
+        self._code_parts.clear()
 
     @property
-    def saw_fence(self) -> bool:
-        return self._saw_fence
+    def saw_begin(self) -> bool:
+        return self._saw_begin
+
+    @property
+    def saw_end(self) -> bool:
+        return self._saw_end
+
+    @property
+    def invalid_payload(self) -> bool:
+        return self._invalid_payload
+
+    @property
+    def invalid_reason(self) -> str:
+        return self._invalid_reason
 
     @property
     def epoch(self) -> int:
@@ -130,16 +171,15 @@ class FenceParser:
 
     def feed(self, chunk: str) -> AssistantContent:
         if not chunk:
-            return AssistantContent(fence_state=self.state)
-        if self.state == FenceState.DONE and not self._buffer:
-            return AssistantContent(post_fence=chunk, fence_state=self.state)
+            return AssistantContent(region_state=self.state, markers=self.markers)
 
         data = f"{self._buffer}{chunk}"
         self._buffer = ""
-        pre_parts: list[str] = []
+        prelude_parts: list[str] = []
         code_parts: list[str] = []
-        post_parts: list[str] = []
-        fence_lang = ""
+        postlude_parts: list[str] = []
+        begin_seen = False
+        end_seen = False
 
         while True:
             newline_idx = data.find("\n")
@@ -147,111 +187,116 @@ class FenceParser:
                 break
             line = data[: newline_idx + 1]
             data = data[newline_idx + 1 :]
-            if self.state == FenceState.OUTSIDE:
-                lang = _extract_fence_lang(line, self.allowed_langs)
-                if lang is not None:
-                    self.state = FenceState.INSIDE
-                    self._saw_fence = True
-                    fence_lang = lang
+            if self.state == WriteRegionState.OUTSIDE:
+                if _is_begin_marker(line, self.markers):
+                    self.state = WriteRegionState.INSIDE
+                    self._saw_begin = True
+                    begin_seen = True
+                elif self._saw_end:
+                    postlude_parts.append(line)
                 else:
-                    pre_parts.append(line)
+                    prelude_parts.append(line)
                 continue
-            if self.state == FenceState.INSIDE:
-                lang = _extract_fence_lang(line, self.allowed_langs)
-                if lang is not None:
-                    _logger.warning(
-                        "Fence reopen detected while INSIDE; "
-                        "skipping marker and continuing extraction"
-                    )
-                    continue
-                if _is_closing_fence(line):
-                    self.state = FenceState.DONE
-                    continue
-                code_parts.append(line)
+
+            if _is_end_marker(line, self.markers):
+                self.state = WriteRegionState.OUTSIDE
+                self._saw_end = True
+                end_seen = True
                 continue
-            post_parts.append(line)
+            if _is_forbidden_inner_fence(line):
+                self._invalid_payload = True
+                if not self._invalid_reason:
+                    self._invalid_reason = "write region must contain raw code only"
+                continue
+            code_parts.append(line)
 
         pending = ""
         if data:
-            if _looks_like_fence_start(data):
-                self._buffer = data
-                pending = data
-            elif self.state == FenceState.OUTSIDE:
-                pre_parts.append(data)
-            elif self.state == FenceState.INSIDE:
-                code_parts.append(data)
+            if self.state == WriteRegionState.OUTSIDE:
+                if _looks_like_marker_prefix(data, self.markers.begin_marker):
+                    self._buffer = data
+                    pending = data
+                elif self._saw_end:
+                    postlude_parts.append(data)
+                else:
+                    prelude_parts.append(data)
             else:
-                post_parts.append(data)
+                if _looks_like_marker_prefix(data, self.markers.end_marker) or _looks_like_forbidden_inner_fence_prefix(data):
+                    self._buffer = data
+                    pending = data
+                else:
+                    code_parts.append(data)
 
-        inside_piece = "".join(code_parts)
-        if inside_piece:
-            self._inside_parts.append(inside_piece)
+        code_piece = "".join(code_parts)
+        if code_piece:
+            self._code_parts.append(code_piece)
 
         return AssistantContent(
-            pre_fence="".join(pre_parts),
-            fence_lang=fence_lang,
-            code=inside_piece,
-            post_fence="".join(post_parts),
+            prelude="".join(prelude_parts),
+            code=code_piece,
+            postlude="".join(postlude_parts),
             pending_text=pending,
-            fence_state=self.state,
+            has_begin_marker=begin_seen,
+            has_end_marker=end_seen,
+            region_state=self.state,
+            markers=self.markers,
         )
 
     def flush(self) -> AssistantContent:
-        """Finalize parsing when no more input is expected (e.g. EOS)."""
         if self._buffer:
             return self.feed("\n")
-        return AssistantContent(fence_state=self.state)
+        return AssistantContent(region_state=self.state, markers=self.markers)
 
-    def consume_inside(self) -> str:
-        if not self._inside_parts:
+    def consume_code(self) -> str:
+        if not self._code_parts:
             return ""
-        output = "".join(self._inside_parts)
-        self._inside_parts.clear()
+        output = "".join(self._code_parts)
+        self._code_parts.clear()
         return output
 
-    def capture(self) -> FenceParserSnapshot:
-        return FenceParserSnapshot(
+    def capture(self) -> WriteRegionParserSnapshot:
+        return WriteRegionParserSnapshot(
             state=self.state,
-            saw_fence=self._saw_fence,
+            saw_begin=self._saw_begin,
+            saw_end=self._saw_end,
             buffer=self._buffer,
-            inside_parts=tuple(self._inside_parts),
+            code_parts=tuple(self._code_parts),
+            invalid_payload=self._invalid_payload,
+            invalid_reason=self._invalid_reason,
         )
 
-    def restore(self, snapshot: FenceParserSnapshot) -> None:
+    def restore(self, snapshot: WriteRegionParserSnapshot) -> None:
         self.state = snapshot.state
-        self._saw_fence = snapshot.saw_fence
+        self._saw_begin = snapshot.saw_begin
+        self._saw_end = snapshot.saw_end
         self._buffer = snapshot.buffer
-        self._inside_parts = list(snapshot.inside_parts)
+        self._code_parts = list(snapshot.code_parts)
+        self._invalid_payload = snapshot.invalid_payload
+        self._invalid_reason = snapshot.invalid_reason
         self._epoch += 1
 
-def _extract_fence_lang(line: str, allowed_langs: tuple[str, ...]) -> str | None:
-    """Return the language tag if *line* is an opening fence for an allowed language, else None."""
-    stripped = line.strip()
-    if not stripped.startswith("```"):
-        return None
-    lang = stripped[3:].strip()
-    return lang if lang in allowed_langs else None
+
+def _is_begin_marker(line: str, markers: WriteRegionMarkers) -> bool:
+    return line.strip() == markers.begin_marker
 
 
-def _is_opening_fence(line: str, allowed_langs: tuple[str, ...]) -> bool:
-    stripped = line.strip()
-    if not stripped.startswith("```"):
+def _is_end_marker(line: str, markers: WriteRegionMarkers) -> bool:
+    return line.strip() == markers.end_marker
+
+
+def _is_forbidden_inner_fence(line: str) -> bool:
+    return line.strip().startswith("```")
+
+
+def _looks_like_marker_prefix(text: str, marker: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
         return False
-    lang = stripped[3:].strip()
-    return lang in allowed_langs
+    return marker.startswith(stripped)
 
 
-def _is_closing_fence(line: str) -> bool:
-    return line.strip() == "```"
-
-
-def _looks_like_fence_start(text: str) -> bool:
-    stripped = text.lstrip()
-    if not stripped.startswith("`"):
+def _looks_like_forbidden_inner_fence_prefix(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
         return False
-    tick_count = 0
-    for ch in stripped:
-        if ch != "`":
-            break
-        tick_count += 1
-    return 1 <= tick_count <= 3
+    return "```".startswith(stripped) or stripped.startswith("```")

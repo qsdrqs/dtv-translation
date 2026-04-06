@@ -11,7 +11,6 @@ def _ts_close(text: str) -> str:
 
 TS_FEEDBACK_LANG = FeedbackLanguageConfig(
     name="TypeScript",
-    fence_tags=frozenset({"typescript", "ts"}),
     tree_sitter_lang="typescript",
     top_level_item_types=frozenset({
         "function_declaration",

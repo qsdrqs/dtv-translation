@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from typing import Any, cast
 
 import torch
 import transformers
@@ -53,9 +54,9 @@ class QwenGeneratorBackend(GeneratorBackend):
             if callable(setter):
                 setter(channel)
 
-    def set_stop_on_fence_open(self, enabled: bool) -> None:
+    def set_stop_on_write_region_open(self, enabled: bool) -> None:
         for criteria in self.stop_criteria:
-            setter = getattr(criteria, "set_stop_on_fence_open", None)
+            setter = getattr(criteria, "set_stop_on_write_region_open", None)
             if callable(setter):
                 setter(enabled)
 
@@ -117,7 +118,8 @@ class QwenGeneratorBackend(GeneratorBackend):
             if not callable(setter):
                 raise TypeError("set_prompt_token_count is not callable on StoppingCriteria")
             setter(prompt_token_count)
-        outputs = self.model.generate(
+        model = cast(Any, self.model)
+        outputs = model.generate(
             inputs.input_ids,
             attention_mask=inputs.attention_mask,
             max_new_tokens=context.max_new_length,

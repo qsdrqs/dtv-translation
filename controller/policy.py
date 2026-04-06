@@ -6,7 +6,6 @@ from collections.abc import Sequence
 from controller.loop import ControllerOp, Policy, select_oracles_by_granularity
 from core.budget import Budget
 from core.interfaces import Oracle
-from core.llm_output import FenceState
 from core.types import (
     Action,
     Artifact,
@@ -24,9 +23,9 @@ class DefaultPolicyConfig:
     """Configuration knobs for DefaultPolicy behavior."""
 
     verify_on_boundary: bool = True
-    verify_on_eos: bool = True
+    verify_on_close: bool = True
     boundary_granularity: Granularity = Granularity.STMT
-    eos_granularity: Granularity = Granularity.PROGRAM
+    close_granularity: Granularity = Granularity.FUNC
     enable_rollback: bool = True
     default_fail_scope: Granularity = Granularity.STMT
     stmt_stall_max_retries_before_escalation: int = 3
@@ -34,7 +33,6 @@ class DefaultPolicyConfig:
     enable_feedback: bool = True  # Controls both FEEDBACK and APPLY_PATCH.
     repair_verify_granularity: Granularity = Granularity.STMT
     commit_when_no_oracle_selected: bool = False
-    terminate_on_eos_and_pass: bool = True
     max_repair_rounds: int | None = None
     feedback_default_mechanism: FeedbackMechanism = FeedbackMechanism.A
     feedback_force_mechanism: FeedbackMechanism | None = None
@@ -72,9 +70,8 @@ class DefaultPolicy(Policy):
     - Never returns GENERATE/FEEDBACK when the token budget is exhausted.
     - Never returns VERIFY when can_verify is False (except after APPLY_PATCH).
     - Emits CONTINUE explicitly when verification is inconclusive.
-    - EOS triggers a final VERIFY (typically PROGRAM) when enabled.
-    - When EOS is reached, policy commits before terminating. If no oracles are selected at EOS,
-      COMMIT is treated as acceptance of the final program.
+    - Candidate closure triggers a final intra-candidate VERIFY when enabled.
+    - Once a candidate closes, DTV never reopens it; any final acceptance is external.
     """
 
     def __init__(self, config: DefaultPolicyConfig | None = None) -> None:
@@ -87,9 +84,9 @@ class DefaultPolicy(Policy):
 
     def next_action(self, ctx) -> ControllerOp:
         tokens_left = _tokens_left(ctx.budget)
-        is_eos = _is_eos(ctx.last_stop_reason, ctx.fence_state)
+        is_closed = _is_write_region_closed(ctx.last_stop_reason)
         is_boundary = _is_boundary_suffix(ctx.state.prefix)
-        can_verify = _can_verify(self.config, is_boundary, is_eos)
+        can_verify = _can_verify(self.config, is_boundary, is_closed)
 
         if self.config.enable_feedback:
             if ctx.pending_patch is not None and ctx.repair_base_prefix is not None:
@@ -140,32 +137,41 @@ class DefaultPolicy(Policy):
             return _generate_or_terminate(tokens_left)
 
         if ctx.last_action == Action.GENERATE:
+            if _is_terminal_generate_failure(ctx.last_stop_reason):
+                return ControllerOp(Action.TERMINATE)
             if tokens_left <= 0:
                 if can_verify:
                     return ControllerOp(
                         Action.VERIFY,
-                        verification_granularity=_select_verify_granularity(self.config, is_eos),
+                        verification_granularity=_select_verify_granularity(self.config, is_closed),
                     )
                 return ControllerOp(Action.TERMINATE)
             if can_verify:
                 return ControllerOp(
                     Action.VERIFY,
-                    verification_granularity=_select_verify_granularity(self.config, is_eos),
+                    verification_granularity=_select_verify_granularity(self.config, is_closed),
                 )
+            if is_closed:
+                return ControllerOp(Action.TERMINATE)
             return ControllerOp(Action.GENERATE)
 
         if ctx.last_action == Action.VERIFY:
             if ctx.last_render_status != RenderStatus.OK:
                 self._reset_stmt_stall_state()
+                if is_closed:
+                    return ControllerOp(Action.TERMINATE)
                 return _continue_or_terminate(tokens_left)
             if not ctx.last_outputs:
                 self._reset_stmt_stall_state()
-                if is_eos:
+                if is_closed:
                     return ControllerOp(Action.COMMIT)
                 if self.config.commit_when_no_oracle_selected:
                     return ControllerOp(Action.COMMIT)
                 return _continue_or_terminate(tokens_left)
             if _any_fail(ctx.last_outputs):
+                if is_closed:
+                    self._reset_stmt_stall_state()
+                    return ControllerOp(Action.TERMINATE)
                 if self.config.enable_rollback:
                     scope = self._select_fail_scope(ctx)
                     self._pending_fail_snapshot = _FailSnapshot(
@@ -179,17 +185,15 @@ class DefaultPolicy(Policy):
             self._reset_stmt_stall_state()
             if _all_pass(ctx.last_outputs):
                 return ControllerOp(Action.COMMIT)
+            if is_closed:
+                return ControllerOp(Action.TERMINATE)
             return _continue_or_terminate(tokens_left)
 
         if ctx.last_action == Action.CONTINUE:
             return _generate_or_terminate(tokens_left)
 
         if ctx.last_action == Action.COMMIT:
-            if (
-                self.config.terminate_on_eos_and_pass
-                and is_eos
-                and (not ctx.last_outputs or _all_pass(ctx.last_outputs))
-            ):
+            if is_closed:
                 return ControllerOp(Action.TERMINATE)
             return _generate_or_terminate(tokens_left)
 
@@ -323,20 +327,26 @@ def _is_boundary_suffix(prefix: str) -> bool:
     return prefix.rstrip().endswith((";", "}"))
 
 
-def _is_eos(stop_reason: StopReason | None, fence_state: FenceState) -> bool:
-    return (
-        stop_reason is not None
-        and stop_reason.kind == "eos"
-        and fence_state == FenceState.DONE
-    )
+def _is_write_region_closed(stop_reason: StopReason | None) -> bool:
+    return stop_reason is not None and stop_reason.kind == "write_region_closed"
 
 
-def _can_verify(config: DefaultPolicyConfig, is_boundary: bool, is_eos: bool) -> bool:
-    return (config.verify_on_boundary and is_boundary) or (config.verify_on_eos and is_eos)
+def _can_verify(config: DefaultPolicyConfig, is_boundary: bool, is_closed: bool) -> bool:
+    return (config.verify_on_boundary and is_boundary) or (config.verify_on_close and is_closed)
 
 
-def _select_verify_granularity(config: DefaultPolicyConfig, is_eos: bool) -> Granularity:
-    return config.eos_granularity if is_eos else config.boundary_granularity
+def _select_verify_granularity(config: DefaultPolicyConfig, is_closed: bool) -> Granularity:
+    return config.close_granularity if is_closed else config.boundary_granularity
+
+
+def _is_terminal_generate_failure(stop_reason: StopReason | None) -> bool:
+    if stop_reason is None:
+        return False
+    return stop_reason.kind in {
+        "no_write_region_eos",
+        "unterminated_write_region",
+        "invalid_write_region_payload",
+    }
 
 
 def _generate_or_terminate(tokens_left: int) -> ControllerOp:
@@ -370,13 +380,13 @@ def _select_fail_scope(config: DefaultPolicyConfig, outputs: tuple[OracleOutput,
     fail_outputs = [o for o in outputs if o.verdict == Verdict.FAIL]
     scopes = [o.rollback_scope for o in fail_outputs if o.rollback_scope is not None]
     if scopes:
-        return max(scopes)
+        return min(max(scopes), Granularity.FUNC)
     if config.enable_cdhr:
         for output in outputs:
             for diag in output.diagnostics:
                 if diag.hint_scope is not None:
-                    return diag.hint_scope
-    return config.default_fail_scope
+                    return min(diag.hint_scope, Granularity.FUNC)
+    return min(config.default_fail_scope, Granularity.FUNC)
 
 
 def _stmt_stall_key(ctx) -> tuple[str, tuple[Granularity, ...]]:

@@ -11,7 +11,6 @@ def _rust_close(text: str) -> str:
 
 RUST_FEEDBACK_LANG = FeedbackLanguageConfig(
     name="Rust",
-    fence_tags=frozenset({"rust", "rs"}),
     tree_sitter_lang="rust",
     top_level_item_types=frozenset({
         "function_item",

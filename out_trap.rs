@@ -1,5 +1,3 @@
-use std::io::{self, Read};
-
 fn trap(height: &[i32]) -> i32 {
     if height.len() < 3 {
         return 0;
@@ -13,7 +11,6 @@ fn trap(height: &[i32]) -> i32 {
 
     while left < right {
         if height[left] < height[right] {
-            // Left side is the bottleneck
             if height[left] >= left_max {
                 left_max = height[left];
             } else {
@@ -21,7 +18,6 @@ fn trap(height: &[i32]) -> i32 {
             }
             left += 1;
         } else {
-            // Right side is the bottleneck
             if height[right] >= right_max {
                 right_max = height[right];
             } else {
@@ -35,40 +31,39 @@ fn trap(height: &[i32]) -> i32 {
 }
 
 fn main() {
-    let mut input = String::new();
-    io::stdin().read_line(&mut input).expect("Failed to read input");
+    let mut n: usize = 0;
+    let stdin = std::io::stdin();
+    let mut input = stdin.lock();
+    let mut line = String::new();
+ 
 
-    let n: i32 = input
-        .trim()
-        .parse()
-        .expect("Invalid input: expected a non-negative integer");
+    // We need to read the input properly
+    let mut n = 0;
+ 
 
-    if n < 0 {
-        println!("1");
-        return;
-    }
+    // Correct approach: read n from stdin
+    let mut n_input = String::new();
+    std::io::stdin().read_line(&mut n_input).unwrap();
+    n = n_input.trim().parse::<usize>().unwrap_or(0);
 
     if n == 0 {
         println!("0");
         return;
     }
 
-    let mut height: Vec<i32> = Vec::with_capacity(n as usize);
-
-    let mut input_line = String::new();
-    io::stdin().read_line(&mut input_line).expect("Failed to read input");
-
-    let values: Vec<i32> = input_line
-        .trim()
-        .split_whitespace()
-        .map(|s| s.parse::<i32>().expect("Invalid integer"))
-        .collect();
-
-    if values.len() != n as usize {
+    if n < 0 {
         println!("1");
         return;
     }
 
-    let result = trap(&values);
+    let mut arr = vec![0; n];
+    for i in 0..n {
+        let mut input_val = String::new();
+        std::io::stdin().read_line(&mut input_val).unwrap();
+        let val: i32 = input_val.trim().parse().unwrap();
+        arr[i] = val;
+    }
+
+    let result = trap(&arr);
     println!("{}", result);
 }

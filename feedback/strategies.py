@@ -106,7 +106,7 @@ class UserRoundRepair(FeedbackStrategy):
             next_prefix = (
                 response_prefix
                 if isinstance(response_prefix, AssistantContent)
-                else AssistantContent.from_unfenced(response_prefix)
+            else AssistantContent.from_text(response_prefix)
             )
         normalized.append(GenerateMessage(role="assistant", content=next_prefix, stop=False))
 

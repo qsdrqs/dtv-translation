@@ -8,8 +8,10 @@ from core.budget import Budget
 from core.interfaces import Generator, Oracle, OracleRunner, Renderer
 from core.llm_output import (
     AssistantContent,
-    FenceState,
+    DEFAULT_WRITE_REGION_MARKERS,
     OutputExtractorState,
+    WriteRegionMarkers,
+    WriteRegionState,
     merge_assistant_content,
 )
 from core.logger import get_logger
@@ -65,7 +67,7 @@ class PolicyContext:
     pending_patch: str | None
     repair_base_prefix: str | None
     repair_scope: Granularity | None
-    fence_state: FenceState
+    write_region_state: WriteRegionState
 
 
 @dataclass(frozen=True)
@@ -213,6 +215,20 @@ def _remaining_tokens(budget: Budget) -> int:
     return max(0, budget.gen_tokens_budget - budget.gen_tokens_used)
 
 
+def _render_write_region_contract(
+    language_name: str,
+    markers: WriteRegionMarkers,
+) -> str:
+    return (
+        f"When you are ready to write the final {language_name} candidate, emit exactly one write region.\n"
+        f"You may think before {markers.begin_marker}, but inside the write region output raw code only.\n"
+        f"Do not use markdown fences inside the write region.\n"
+        f"{markers.begin_marker}\n"
+        "<raw code only>\n"
+        f"{markers.end_marker}"
+    )
+
+
 def _policy_feedback_enabled(policy: Policy) -> bool:
     config = getattr(policy, "config", None)
     if config is not None and hasattr(config, "enable_feedback"):
@@ -288,37 +304,55 @@ def _pop_repair_regions(runtime: ControllerRuntime, committed_scope: Granularity
         runtime.repair_regions.pop()
 
 
-def _fence_start_only(content: AssistantContent | None) -> AssistantContent:
-    if content is None or not content.fence_lang:
+def _write_region_start_only(content: AssistantContent | None) -> AssistantContent:
+    if content is None or not content.has_begin_marker:
         return AssistantContent.empty()
     return AssistantContent(
-        pre_fence=content.pre_fence,
-        fence_lang=content.fence_lang,
+        prelude=content.prelude,
         code="",
-        post_fence="",
+        postlude="",
         pending_text="",
-        fence_state=FenceState.INSIDE,
+        has_begin_marker=True,
+        region_state=WriteRegionState.INSIDE,
+        markers=content.markers,
     )
 
 
 def _restore_inside_from_anchor(anchor: AssistantContent, code_prefix: str) -> AssistantContent:
     return AssistantContent(
-        pre_fence=anchor.pre_fence,
-        fence_lang=anchor.fence_lang,
+        prelude=anchor.prelude,
         code=code_prefix,
-        post_fence="",
+        postlude="",
         pending_text="",
-        fence_state=FenceState.INSIDE,
+        has_begin_marker=True,
+        region_state=WriteRegionState.INSIDE,
+        markers=anchor.markers,
     )
+
+
+def _get_write_anchor(rollback_manager: RollbackManager):
+    anchor = getattr(rollback_manager, "write_anchor", None)
+    return anchor
+
+
+def _set_write_anchor(
+    rollback_manager: RollbackManager,
+    assistant_prefix: AssistantContent,
+    extractor_state: OutputExtractorState | None,
+) -> None:
+    setter = getattr(rollback_manager, "set_write_anchor", None)
+    if not callable(setter):
+        raise RuntimeError("RollbackManager missing set_write_anchor")
+    setter(assistant_prefix, extractor_state)
 
 
 def _assert_extractor_consistency(runtime: ControllerRuntime) -> None:
     if runtime.extractor_state is None:
         return
-    if runtime.extractor_state.segment.state != runtime.assistant_prefix.fence_state:
+    if runtime.extractor_state.segment.state != runtime.assistant_prefix.region_state:
         raise RuntimeError(
-            "assistant fence state diverged from segment parser state "
-            f"({runtime.assistant_prefix.fence_state} vs {runtime.extractor_state.segment.state})"
+            "assistant write-region state diverged from segment parser state "
+            f"({runtime.assistant_prefix.region_state} vs {runtime.extractor_state.segment.state})"
         )
 
 
@@ -427,10 +461,10 @@ def _render_feedback_assistant(
         )
         blocks.append((anchor, feedback_text))
 
-    if isinstance(assistant_prefix, AssistantContent) and assistant_prefix.fence_state in {
-        FenceState.INSIDE,
-        FenceState.DONE,
-    }:
+    if isinstance(assistant_prefix, AssistantContent) and (
+        assistant_prefix.region_state == WriteRegionState.INSIDE
+        or assistant_prefix.has_begin_marker
+    ):
         code = assistant_prefix.code
         insertions: list[tuple[int, str]] = []
         for anchor, block in blocks:
@@ -460,7 +494,7 @@ def _handle_generate(
     trace: list[TraceEvent],
     comment_prefix: str = "//",
 ) -> None:
-    context.extract_fence = True
+    context.extract_write_region = True
     context.channel = GenerationChannel.CONTINUATION
     active_outputs = feedback_state.active_snapshot()
     if (
@@ -492,13 +526,14 @@ def _handle_generate(
     context.messages = messages
     result = generator.generate_step(context)
     runtime.state.prefix += result.delta_text
-    assistant_delta = result.assistant_delta or AssistantContent.from_unfenced(result.delta_text)
+    assistant_delta = result.assistant_delta or AssistantContent.from_text(result.delta_text)
     runtime.assistant_prefix = merge_assistant_content(runtime.assistant_prefix, assistant_delta)
     runtime.extractor_state = generator.capture_output_extractor_state()
-    if rollback_manager.fence_anchor is None and runtime.assistant_prefix.fence_lang:
-        anchor_assistant = _fence_start_only(runtime.assistant_prefix)
+    write_anchor = _get_write_anchor(rollback_manager)
+    if write_anchor is None and runtime.assistant_prefix.has_begin_marker:
+        anchor_assistant = _write_region_start_only(runtime.assistant_prefix)
         anchor_state = runtime.extractor_state.force_inside() if runtime.extractor_state else None
-        rollback_manager.set_fence_anchor(anchor_assistant, anchor_state)
+        _set_write_anchor(rollback_manager, anchor_assistant, anchor_state)
     budget.add_tokens(result.delta_tokens)
     runtime.last_stop_reason = result.stop_reason
     runtime.last_render_status = None
@@ -710,13 +745,14 @@ def _handle_rollback(
     runtime.state.prefix = snapshot.code_prefix
     runtime.assistant_prefix = snapshot.assistant_prefix
     runtime.extractor_state = snapshot.extractor_state
-    if rollback_manager.fence_anchor is not None:
+    write_anchor = _get_write_anchor(rollback_manager)
+    if write_anchor is not None:
         runtime.assistant_prefix = _restore_inside_from_anchor(
-            rollback_manager.fence_anchor.assistant_prefix,
+            write_anchor.assistant_prefix,
             runtime.state.prefix,
         )
         if runtime.extractor_state is None:
-            runtime.extractor_state = rollback_manager.fence_anchor.extractor_state
+            runtime.extractor_state = write_anchor.extractor_state
         if runtime.extractor_state is None:
             runtime.extractor_state = generator.capture_output_extractor_state()
         runtime.extractor_state = runtime.extractor_state.force_inside()
@@ -776,6 +812,7 @@ def _handle_feedback(
     feedback_state: FeedbackState,
     repair_feedback_format_config: RepairFeedbackFormatConfig | None,
     feedback_lang_config: FeedbackLanguageConfig,
+    write_region_markers: WriteRegionMarkers,
     trace: list[TraceEvent],
 ) -> None:
     if (
@@ -807,6 +844,7 @@ def _handle_feedback(
         repair_context=repair_context,
         repair_feedback_format_config=repair_feedback_format_config,
         lang_config=feedback_lang_config,
+        write_region_markers=write_region_markers,
     )
     feedback_strategy = _feedback_strategy_for_mechanism(feedback_plan.mechanism)
     feedback_gen = _select_feedback_generator(
@@ -827,8 +865,8 @@ def _handle_feedback(
     )
     update_last_assistant(base_messages, replayed_assistant_prefix)
 
-    if feedback_plan.post_fence_injection is not None:
-        result, total_tokens = _feedback_two_phase(
+    if feedback_plan.post_region_injection is not None:
+        result, total_tokens, patch_response_prefix = _feedback_two_phase(
             feedback_plan=feedback_plan,
             feedback_strategy=feedback_strategy,
             feedback_gen=feedback_gen,
@@ -836,9 +874,11 @@ def _handle_feedback(
             context=context,
             runtime=runtime,
             feedback_lang_config=feedback_lang_config,
+            write_region_markers=write_region_markers,
         )
     else:
-        context.extract_fence = feedback_plan.channel == GenerationChannel.CONTINUATION
+        patch_response_prefix = feedback_plan.response_prefix
+        context.extract_write_region = feedback_plan.channel == GenerationChannel.CONTINUATION
         context.channel = feedback_plan.channel
         context.messages = feedback_strategy.apply(
             base_messages,
@@ -852,10 +892,10 @@ def _handle_feedback(
     generator.restore_output_extractor_state(runtime.repair_base_extractor_state)
     if feedback_plan.channel == GenerationChannel.PATCH:
         patch_text = _render_feedback_patch_text(
-            feedback_plan.post_fence_injection or feedback_plan.response_prefix,
+            patch_response_prefix,
             result.delta_text,
         )
-        parse_result = parse_diff_feedback_output(patch_text)
+        parse_result = parse_diff_feedback_output(patch_text, markers=write_region_markers)
         scope = repair_scope
         scope_error = None
         if parse_result.patch is not None:
@@ -898,8 +938,8 @@ def _handle_feedback(
     )
 
 
-def _set_stop_on_fence_open(gen: Generator, enabled: bool) -> None:
-    setter = getattr(gen, "set_stop_on_fence_open", None)
+def _set_stop_on_write_region_open(gen: Generator, enabled: bool) -> None:
+    setter = getattr(gen, "set_stop_on_write_region_open", None)
     if callable(setter):
         setter(enabled)
 
@@ -913,14 +953,16 @@ def _feedback_two_phase(
     context: GenerateContext,
     runtime: ControllerRuntime,
     feedback_lang_config: FeedbackLanguageConfig,
-) -> tuple[GenerateResult, int]:
-    assert feedback_plan.post_fence_injection is not None
-    fence_tag = max(feedback_lang_config.fence_tags, key=len)
-    base_assistant = runtime.repair_base_assistant_prefix or AssistantContent.empty()
+    write_region_markers: WriteRegionMarkers,
+) -> tuple[GenerateResult, int, AssistantContent]:
+    assert feedback_plan.post_region_injection is not None
+    base_assistant = (
+        runtime.repair_base_assistant_prefix
+        or AssistantContent.empty(markers=write_region_markers)
+    )
 
-    # Phase 1: free generation with fence extraction (model reasons, then opens fence).
-    _set_stop_on_fence_open(feedback_gen, True)
-    context.extract_fence = True
+    _set_stop_on_write_region_open(feedback_gen, True)
+    context.extract_write_region = True
     context.channel = GenerationChannel.CONTINUATION
     context.messages = feedback_strategy.apply(
         base_messages,
@@ -929,31 +971,30 @@ def _feedback_two_phase(
         None,
     )
     phase1 = feedback_gen.generate_step(context)
-    _set_stop_on_fence_open(feedback_gen, False)
+    _set_stop_on_write_region_open(feedback_gen, False)
     phase1_tokens = phase1.delta_tokens
 
-    # Extract reasoning from Phase 1 output.
     reasoning = ""
-    if phase1.assistant_delta is not None and phase1.assistant_delta.fence_lang:
-        reasoning = phase1.assistant_delta.pre_fence
+    if phase1.assistant_delta is not None and phase1.assistant_delta.has_begin_marker:
+        reasoning = phase1.assistant_delta.prelude
     else:
         reasoning = phase1.delta_text
     logger.info(
-        "feedback_two_phase: phase1 tokens=%s reasoning_len=%s fence_found=%s",
+        "feedback_two_phase: phase1 tokens=%s reasoning_len=%s begin_found=%s",
         phase1_tokens,
         len(reasoning),
-        phase1.assistant_delta is not None and bool(phase1.assistant_delta.fence_lang),
+        phase1.assistant_delta is not None and phase1.assistant_delta.has_begin_marker,
     )
 
-    # Phase 2: inject diff prefix after fence opening, model continues from "+ ".
     phase2_prefix = AssistantContent(
-        pre_fence=reasoning,
-        fence_lang=fence_tag,
-        code=feedback_plan.post_fence_injection,
-        fence_state=FenceState.INSIDE,
+        prelude=reasoning,
+        code=feedback_plan.post_region_injection,
+        has_begin_marker=True,
+        region_state=WriteRegionState.INSIDE,
+        markers=write_region_markers,
     )
     feedback_gen.reset_output_extractor()
-    context.extract_fence = False
+    context.extract_write_region = False
     context.channel = GenerationChannel.PATCH
     context.messages = feedback_strategy.apply(
         base_messages,
@@ -968,7 +1009,7 @@ def _feedback_two_phase(
         phase2.delta_tokens,
         total_tokens,
     )
-    return phase2, total_tokens
+    return phase2, total_tokens, phase2_prefix
 
 
 def _select_feedback_mechanism(
@@ -988,6 +1029,11 @@ def _render_feedback_patch_text(
     if response_prefix is None:
         return delta_text
     if isinstance(response_prefix, AssistantContent):
+        if response_prefix.has_begin_marker:
+            region = f"{response_prefix.markers.begin_marker}\n{response_prefix.code}"
+            if response_prefix.has_end_marker:
+                region += f"{response_prefix.markers.end_marker}\n"
+            return f"{region}{delta_text}"
         return f"{response_prefix.render()}{delta_text}"
     return f"{response_prefix}{delta_text}"
 
@@ -1087,6 +1133,7 @@ def run_dtv_loop(
     max_new_length: int = 1024,
     prompt_prefix: str = "",
     oracle_runner: OracleRunner | None = None,
+    write_region_markers: WriteRegionMarkers = DEFAULT_WRITE_REGION_MARKERS,
 ) -> tuple[str, list[TraceEvent]]:
     """
     State machine (MVP):
@@ -1101,16 +1148,19 @@ def run_dtv_loop(
         oracle_runner = DummyOracleRunner()
     oracle_runner_impl: OracleRunner = oracle_runner
     feedback_enabled = _policy_feedback_enabled(policy)
+    if hasattr(rollback_manager, "markers"):
+        rollback_manager.markers = write_region_markers
 
     runtime = ControllerRuntime(state=ControllerState(prefix=""))
     runtime.extractor_state = generator.capture_output_extractor_state()
     trace: list[TraceEvent] = []
 
     base_messages: list[GenerateMessage] = []
-    if prompt_prefix:
-        base_messages.append(GenerateMessage(role="user", content=prompt_prefix, stop=True))
+    contract_prompt = _render_write_region_contract(feedback_lang_config.name, write_region_markers)
+    user_prompt = contract_prompt if not prompt_prefix else f"{prompt_prefix.rstrip()}\n\n{contract_prompt}"
+    base_messages.append(GenerateMessage(role="user", content=user_prompt, stop=True))
     base_messages.append(
-        GenerateMessage(role="assistant", content=AssistantContent.empty(), stop=False)
+        GenerateMessage(role="assistant", content=AssistantContent.empty(markers=write_region_markers), stop=False)
     )
     context = GenerateContext(messages=base_messages, steps=0, max_new_length=max_new_length)
 
@@ -1128,7 +1178,7 @@ def run_dtv_loop(
             pending_patch=runtime.pending_patch,
             repair_base_prefix=runtime.repair_base_prefix,
             repair_scope=runtime.repair_scope,
-            fence_state=generator.get_output_extractor_state(),
+            write_region_state=generator.get_output_extractor_state(),
         )
         op = policy.next_action(ctx)
         logger.info(
@@ -1218,6 +1268,7 @@ def run_dtv_loop(
                 feedback_state,
                 repair_feedback_format_config,
                 feedback_lang_config,
+                write_region_markers,
                 trace,
             )
             runtime.state.step += 1

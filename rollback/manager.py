@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Sequence
 
-from core.llm_output import AssistantContent, OutputExtractorState
+from core.llm_output import AssistantContent, DEFAULT_WRITE_REGION_MARKERS, OutputExtractorState, WriteRegionMarkers
 from core.types import Granularity, GroupEvent, GroupEventAction, GroupStackFrame
 
 
@@ -24,7 +24,8 @@ class RollbackManager:
     retry_counters: dict[str, int] = field(default_factory=dict)  # Per-key retry counts.
     max_stmt_retries: int = 3
     max_block_retries: int = 2
-    fence_anchor: Checkpoint | None = None
+    markers: WriteRegionMarkers = DEFAULT_WRITE_REGION_MARKERS
+    write_anchor: Checkpoint | None = None
 
     def add_stmt_checkpoint(
         self,
@@ -40,14 +41,14 @@ class RollbackManager:
             )
         )
 
-    def set_fence_anchor(
+    def set_write_anchor(
         self,
         assistant_prefix: AssistantContent,
         extractor_state: OutputExtractorState | None,
     ) -> None:
-        if self.fence_anchor is not None:
+        if self.write_anchor is not None:
             return
-        self.fence_anchor = Checkpoint(
+        self.write_anchor = Checkpoint(
             code_prefix="",
             assistant_prefix=assistant_prefix,
             extractor_state=extractor_state,
@@ -127,7 +128,7 @@ class RollbackManager:
         if keep_count == 0:
             return Checkpoint(
                 code_prefix="",
-                assistant_prefix=AssistantContent.empty(),
+                assistant_prefix=AssistantContent.empty(markers=self.markers),
                 extractor_state=None,
             )
         return self.stmt_checkpoints[keep_count - 1]
@@ -136,17 +137,17 @@ class RollbackManager:
         if not self.stmt_checkpoints:
             return Checkpoint(
                 code_prefix="",
-                assistant_prefix=AssistantContent.empty(),
+                assistant_prefix=AssistantContent.empty(markers=self.markers),
                 extractor_state=None,
             )
         return self.stmt_checkpoints[-1]
 
-    def _apply_fence_anchor_floor(self, checkpoint: Checkpoint) -> Checkpoint:
-        if self.fence_anchor is None:
+    def _apply_write_anchor_floor(self, checkpoint: Checkpoint) -> Checkpoint:
+        if self.write_anchor is None:
             return checkpoint
-        if len(checkpoint.code_prefix) > len(self.fence_anchor.code_prefix):
+        if len(checkpoint.code_prefix) > len(self.write_anchor.code_prefix):
             return checkpoint
-        return self.fence_anchor
+        return self.write_anchor
 
     def _target_start_for_scope(self, scope: Granularity) -> int | None:
         if scope == Granularity.BLOCK:
@@ -165,15 +166,19 @@ class RollbackManager:
         if scope == Granularity.PROGRAM:
             self.stmt_checkpoints.clear()
             self.group_stack.clear()
-            return self._apply_fence_anchor_floor(
-                Checkpoint(code_prefix="", assistant_prefix=AssistantContent.empty(), extractor_state=None)
+            return self._apply_write_anchor_floor(
+                Checkpoint(
+                    code_prefix="",
+                    assistant_prefix=AssistantContent.empty(markers=self.markers),
+                    extractor_state=None,
+                )
             )
         if scope == Granularity.STMT:
-            return self._apply_fence_anchor_floor(self._last_checkpoint())
+            return self._apply_write_anchor_floor(self._last_checkpoint())
         target_start = self._target_start_for_scope(scope)
         if target_start is None:
-            return self._apply_fence_anchor_floor(self._last_checkpoint())
-        return self._apply_fence_anchor_floor(self._truncate_to(target_start))
+            return self._apply_write_anchor_floor(self._last_checkpoint())
+        return self._apply_write_anchor_floor(self._truncate_to(target_start))
 
     def record_retry(self, key: str) -> int:
         self.retry_counters[key] = self.retry_counters.get(key, 0) + 1

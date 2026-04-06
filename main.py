@@ -5,7 +5,7 @@ from controller.adapters import GeneratorAdapter
 from controller.loop import ControllerOp, run_dtv_loop, select_oracles_by_granularity
 from controller.policy import DefaultPolicy
 from controller.stop_criteria import DTVStoppingCriteria, RUST_PROFILE
-from core.llm_output import FenceParser
+from core.llm_output import WriteRegionParser
 from core.budget import Budget
 from core.types import Action, Artifact, Granularity, RenderResult, RenderStatus, Verdict
 from feedback.feedback import FeedbackState
@@ -48,15 +48,15 @@ class DemoPolicy:
 
 
 def main() -> None:
-    fence_parser = FenceParser(allowed_langs=("rust", "rs"))
+    write_region_parser = WriteRegionParser()
 
     def stop_factory(tokenizer):
-        return [DTVStoppingCriteria(tokenizer, RUST_PROFILE, fence_parser=fence_parser)]
+        return [DTVStoppingCriteria(tokenizer, RUST_PROFILE, write_region_parser=write_region_parser)]
 
     generator = GeneratorAdapter(
         model_name="Qwen/Qwen3-4B-Instruct-2507",
         stop_criteria_factory=stop_factory,
-        fence_parser=fence_parser,
+        write_region_parser=write_region_parser,
     )
     budget = Budget(gen_tokens_budget=512)
     feedback_state = FeedbackState()

@@ -7,14 +7,14 @@ import tempfile
 from pathlib import Path
 
 from js_ts.feedback import TS_FEEDBACK_LANG
-from js_ts.oracles import EslintOracle, TscOracle, TscProgramOracle
+from js_ts.oracles import EslintOracle, TscOracle
 from js_ts.oracles.compiler_oracle.tsc_driver import _find_type_roots
 from js_ts.render import JSToTSRenderer
 from controller.adapters import GeneratorAdapter
 from controller.loop import run_dtv_loop
 from controller.policy import DefaultPolicy, DefaultPolicyConfig
 from controller.stop_criteria import DTVStoppingCriteria, TS_PROFILE
-from core.llm_output import FenceParser
+from core.llm_output import WriteRegionParser
 from core.budget import Budget
 from core.types import RenderStatus, TestCase, TranslationSample
 from feedback.formatter import RepairFeedbackFormatConfig
@@ -148,18 +148,17 @@ def main() -> None:
         test_cases=test_cases,
     )
 
-    fence_parser = FenceParser(allowed_langs=("typescript", "ts"))
+    write_region_parser = WriteRegionParser()
     generator = GeneratorAdapter(
         model_name=MODEL_NAME,
         stop_criteria_factory=lambda tok: [
-            DTVStoppingCriteria(tok, TS_PROFILE, fence_parser=fence_parser)
+            DTVStoppingCriteria(tok, TS_PROFILE, write_region_parser=write_region_parser)
         ],
-        fence_parser=fence_parser,
+        write_region_parser=write_region_parser,
     )
     print("Model loaded:", MODEL_NAME)
     renderer = JSToTSRenderer(sample=sample)
-    # TODO: Add FunctionOracle and ProgramDiffTestOracle when implemented
-    oracles = [TscOracle(), TscProgramOracle(), EslintOracle()]
+    oracles = [TscOracle(), EslintOracle()]
     budget = Budget(gen_tokens_budget=TOKEN_BUDGET)
     feedback_state = FeedbackState()
     rollback_manager = RollbackManager()

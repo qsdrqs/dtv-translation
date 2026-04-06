@@ -5,13 +5,13 @@ import sys
 from pathlib import Path
 
 from c_rust.feedback import RUST_FEEDBACK_LANG
-from c_rust.oracles import FunctionOracle, ProgramOracle, RustcOracle
+from c_rust.oracles import FunctionOracle, RustcOracle
 from c_rust.render import CRustRenderer
 from controller.adapters import GeneratorAdapter
 from controller.loop import run_dtv_loop
 from controller.policy import DefaultPolicy, DefaultPolicyConfig
 from controller.stop_criteria import DTVStoppingCriteria, RUST_PROFILE
-from core.llm_output import FenceParser
+from core.llm_output import WriteRegionParser
 from core.budget import Budget
 from core.types import TestCase, TranslationSample
 from feedback.formatter import RepairFeedbackFormatConfig
@@ -137,17 +137,17 @@ fn main() {
         test_cases=test_cases,
     )
 
-    fence_parser = FenceParser(allowed_langs=("rust", "rs"))
+    write_region_parser = WriteRegionParser()
     generator = GeneratorAdapter(
         model_name=MODEL_NAME,
         stop_criteria_factory=lambda tok: [
-            DTVStoppingCriteria(tok, RUST_PROFILE, fence_parser=fence_parser)
+            DTVStoppingCriteria(tok, RUST_PROFILE, write_region_parser=write_region_parser)
         ],
-        fence_parser=fence_parser,
+        write_region_parser=write_region_parser,
     )
     print("Model loaded:", MODEL_NAME)
     renderer = CRustRenderer(sample=sample)
-    oracles = [RustcOracle(), FunctionOracle(), ProgramOracle()]
+    oracles = [RustcOracle(), FunctionOracle()]
     budget = Budget(gen_tokens_budget=TOKEN_BUDGET)
     feedback_state = FeedbackState()
     rollback_manager = RollbackManager()

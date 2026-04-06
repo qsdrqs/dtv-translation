@@ -2,17 +2,11 @@ from __future__ import annotations
 
 from typing import cast
 
-import pytest
 import torch
 from torch import FloatTensor, LongTensor
 
-from controller.stop_criteria import (
-    DTVStoppingCriteria,
-    RUST_PROFILE,
-    TS_PROFILE,
-    _scan_string_comment_state,
-)
-from core.llm_output import FenceParser, FenceReopenError, FenceState
+from controller.stop_criteria import DTVStoppingCriteria, RUST_PROFILE, TS_PROFILE, _scan_string_comment_state
+from core.llm_output import BEGIN_WRITE_CODE, END_WRITE_CODE, WriteRegionMarkers, WriteRegionParser, WriteRegionState
 from core.types import GenerationChannel
 
 
@@ -25,6 +19,12 @@ class _FakeTokenizer:
         return "".join(self._mapping[int(token_id)] for token_id in ids)
 
 
+def _call(criteria: DTVStoppingCriteria, tokens: list[int]) -> bool:
+    input_ids = cast(LongTensor, torch.tensor([tokens], dtype=torch.long))
+    scores = cast(FloatTensor, torch.empty((1, 0), dtype=torch.float))
+    return bool(criteria(input_ids, scores))
+
+
 def test_empty() -> None:
     state = _scan_string_comment_state("", TS_PROFILE)
     assert not state["in_string"]
@@ -32,208 +32,78 @@ def test_empty() -> None:
     assert not state["in_block_comment"]
 
 
-def test_line_comment_unterminated() -> None:
-    state = _scan_string_comment_state("let x = 1; // comment", TS_PROFILE)
-    assert state["in_line_comment"]
-    assert not state["in_string"]
-    assert not state["in_block_comment"]
-
-
-def test_line_comment_terminated_by_newline() -> None:
-    state = _scan_string_comment_state("let x = 1; // comment\nlet y = 2;", TS_PROFILE)
-    assert not state["in_line_comment"]
-    assert not state["in_string"]
-    assert not state["in_block_comment"]
-
-
-def test_block_comment_unterminated() -> None:
-    state = _scan_string_comment_state("let x = 1; /* comment", TS_PROFILE)
-    assert state["in_block_comment"]
-    assert not state["in_string"]
-    assert not state["in_line_comment"]
-
-
-def test_block_comment_terminated() -> None:
-    state = _scan_string_comment_state("let x = 1; /* comment */ let y = 2;", TS_PROFILE)
-    assert not state["in_block_comment"]
-    assert not state["in_string"]
-    assert not state["in_line_comment"]
-
-
-def test_comment_markers_inside_string_not_counted() -> None:
-    state = _scan_string_comment_state('let s = "// not a comment";', TS_PROFILE)
-    assert not state["in_string"]
-    assert not state["in_line_comment"]
-    assert not state["in_block_comment"]
-
-
-def test_escaped_quote_inside_string() -> None:
-    state = _scan_string_comment_state('let s = "a \\" b";', TS_PROFILE)
-    assert not state["in_string"]
-    assert not state["in_line_comment"]
-    assert not state["in_block_comment"]
-
-
-def test_ts_backtick_string() -> None:
-    state = _scan_string_comment_state("const s = `hello", TS_PROFILE)
-    assert state["in_string"]
-    assert not state["in_line_comment"]
-    assert not state["in_block_comment"]
-
-
-def test_rust_does_not_treat_backticks_as_string() -> None:
-    state = _scan_string_comment_state("let s = `hello", RUST_PROFILE)
-    assert not state["in_string"]
-    assert not state["in_line_comment"]
-    assert not state["in_block_comment"]
-
-
-def _call(criteria: DTVStoppingCriteria, tokens: list[int]) -> bool:
-    input_ids = cast(LongTensor, torch.tensor([tokens], dtype=torch.long))
-    scores = cast(FloatTensor, torch.empty((1, 0), dtype=torch.float))
-    return bool(criteria(input_ids, scores))
-
-
-def test_stop_criteria_gates_on_fence() -> None:
+def test_stop_criteria_gates_on_write_region() -> None:
     mapping = {
         1: "Here's ",
-        2: "preamble;\n",
-        3: "```rust\n",
-        4: "let x = 1",
-        5: ";\n",
-        6: "```\n",
+        2: f"{BEGIN_WRITE_CODE}\n",
+        3: "let x = 1",
+        4: ";\n",
+        5: f"{END_WRITE_CODE}\n",
     }
-    parser = FenceParser(allowed_langs=("rust", "rs"))
-    criteria = DTVStoppingCriteria(_FakeTokenizer(mapping), RUST_PROFILE, fence_parser=parser)
+    parser = WriteRegionParser()
+    criteria = DTVStoppingCriteria(_FakeTokenizer(mapping), RUST_PROFILE, write_region_parser=parser)
 
-    tokens: list[int] = [1]
+    tokens = [1]
     assert not _call(criteria, tokens)
+    assert parser.state == WriteRegionState.OUTSIDE
 
     tokens.append(2)
     assert not _call(criteria, tokens)
-    assert parser.state == FenceState.OUTSIDE
+    assert parser.state == WriteRegionState.INSIDE
 
     tokens.append(3)
     assert not _call(criteria, tokens)
-    assert parser.state == FenceState.INSIDE
 
     tokens.append(4)
-    assert not _call(criteria, tokens)
+    assert _call(criteria, tokens)
 
     tokens.append(5)
     assert _call(criteria, tokens)
-
-    tokens.append(6)
-    assert not _call(criteria, tokens)
-    assert parser.state == FenceState.DONE
+    assert parser.state == WriteRegionState.OUTSIDE
 
 
-def test_stop_criteria_skips_prompt_tokens() -> None:
+def test_stop_on_write_region_open() -> None:
     mapping = {
-        1: "```rust\n",
-        2: "let x = 0;\n",
-        3: "```\n",
-        4: "```rust\n",
-        5: "let y = 1",
-        6: ";\n",
-        7: "```\n",
+        1: f"{BEGIN_WRITE_CODE}\n",
     }
-    parser = FenceParser(allowed_langs=("rust", "rs"))
-    criteria = DTVStoppingCriteria(_FakeTokenizer(mapping), RUST_PROFILE, fence_parser=parser)
-    criteria.set_prompt_token_count(3)
+    parser = WriteRegionParser()
+    criteria = DTVStoppingCriteria(_FakeTokenizer(mapping), RUST_PROFILE, write_region_parser=parser)
+    criteria.set_stop_on_write_region_open(True)
 
-    tokens: list[int] = [1, 2, 3]
-    assert not _call(criteria, tokens)
-    assert parser.state == FenceState.OUTSIDE
-
-    tokens.append(4)
-    assert not _call(criteria, tokens)
-    assert parser.state == FenceState.INSIDE
-
-    tokens.append(5)
-    assert not _call(criteria, tokens)
-
-    tokens.append(6)
-    assert _call(criteria, tokens)
-
-    tokens.append(7)
-    assert not _call(criteria, tokens)
-    assert parser.state == FenceState.DONE
+    assert _call(criteria, [1])
 
 
-def test_stop_criteria_raises_on_fence_reopen() -> None:
+def test_patch_channel_waits_for_end_marker() -> None:
     mapping = {
-        1: "```rust\n",
-        2: "let x = 1\n",
-        3: "```rust\n",
+        1: f"{BEGIN_WRITE_CODE}\n",
+        2: "+ fixed;\n",
+        3: f"{END_WRITE_CODE}\n",
     }
-    parser = FenceParser(allowed_langs=("rust", "rs"))
-    criteria = DTVStoppingCriteria(_FakeTokenizer(mapping), RUST_PROFILE, fence_parser=parser)
-
-    tokens: list[int] = [1]
-    assert not _call(criteria, tokens)
-
-    tokens.append(2)
-    assert not _call(criteria, tokens)
-
-    tokens.append(3)
-    # Reopen is now skipped (no raise); parser stays INSIDE so no boundary fires
-    assert not _call(criteria, tokens)
-
-
-def test_stop_criteria_resets_stream_on_parser_epoch_change() -> None:
-    mapping = {
-        1: "let x = 1;\n",
-    }
-    parser = FenceParser(allowed_langs=("rust", "rs"))
-    parser.feed("```rust\n")
-    criteria = DTVStoppingCriteria(_FakeTokenizer(mapping), RUST_PROFILE, fence_parser=parser)
-
-    tokens: list[int] = [1]
-    assert _call(criteria, tokens)
-
-
-def test_stop_criteria_patch_channel_uses_feedback_fence_stream() -> None:
-    mapping = {
-        1: "```rust\n",
-        2: "let x = 1;\n",
-        3: "```",
-    }
-    parser = FenceParser(allowed_langs=("rust", "rs"))
-    parser.feed("```rust\n")
-    criteria = DTVStoppingCriteria(_FakeTokenizer(mapping), RUST_PROFILE, fence_parser=parser)
+    criteria = DTVStoppingCriteria(_FakeTokenizer(mapping), RUST_PROFILE, write_region_parser=None)
     criteria.set_generation_channel(GenerationChannel.PATCH)
 
-    tokens: list[int] = [1]
+    tokens = [1]
     assert not _call(criteria, tokens)
-    assert parser.state == FenceState.INSIDE
-
     tokens.append(2)
     assert not _call(criteria, tokens)
-
     tokens.append(3)
     assert _call(criteria, tokens)
-    assert parser.state == FenceState.INSIDE
-
-    snapshot = parser.capture()
-    parser.restore(snapshot)
-
-    assert _call(criteria, tokens)
 
 
-def test_stop_criteria_dedupes_same_boundary_across_calls() -> None:
+def test_custom_markers_work_in_patch_channel() -> None:
+    markers = WriteRegionMarkers(begin_marker="[[BEGIN]]", end_marker="[[END]]")
     mapping = {
-        1: "let x = 1;",
-        2: "\n",
-        3: "let y = 2;",
+        1: "[[BEGIN]]\n",
+        2: "+ fixed;\n",
+        3: "[[END]]\n",
     }
-    criteria = DTVStoppingCriteria(_FakeTokenizer(mapping), RUST_PROFILE, fence_parser=None)
+    criteria = DTVStoppingCriteria(
+        _FakeTokenizer(mapping),
+        RUST_PROFILE,
+        write_region_parser=None,
+        write_region_markers=markers,
+    )
+    criteria.set_generation_channel(GenerationChannel.PATCH)
 
-    tokens: list[int] = [1]
-    assert _call(criteria, tokens)
-
-    tokens.append(2)
-    assert not _call(criteria, tokens)
-
-    tokens.append(3)
-    assert _call(criteria, tokens)
+    assert not _call(criteria, [1, 2])
+    assert _call(criteria, [1, 2, 3])

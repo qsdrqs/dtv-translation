@@ -1,15 +1,8 @@
 from __future__ import annotations
 
-from typing import cast
-
-import pytest
-import torch
-from torch import FloatTensor, LongTensor
-
 from controller.adapters import GeneratorAdapter
-from controller.stop_criteria import DTVStoppingCriteria, RUST_PROFILE
-from core.llm_output import FenceParser, FenceReopenError
 from core.generator_backend import GeneratorBackend
+from core.llm_output import BEGIN_WRITE_CODE, END_WRITE_CODE, WriteRegionMarkers, WriteRegionParser
 from core.types import GenerateContext, GenerateResult, StopReason
 
 
@@ -34,55 +27,12 @@ class _StubBackend(GeneratorBackend):
         return _STEPS[_CALLS - 1]
 
 
-class _FakeTokenizer:
-    def __init__(self, mapping: dict[int, str]) -> None:
-        self._mapping = mapping
-
-    def decode(self, ids, skip_special_tokens: bool = True) -> str:
-        _ = skip_special_tokens
-        return "".join(self._mapping[int(token_id)] for token_id in ids)
-
-
-class _StopCriteriaBackend(GeneratorBackend):
-    def __init__(self, model_name: str, stop_criteria_factory=None, **kwargs) -> None:
-        super().__init__(model_name=model_name, stop_criteria_factory=stop_criteria_factory, **kwargs)
-        mapping = {
-            1: "```rust\n",
-            2: "let x = 1;\n",
-            3: "```\n",
-        }
-        self._tokenizer = _FakeTokenizer(mapping)
-        self._criteria = stop_criteria_factory(self._tokenizer) if stop_criteria_factory else []
-
-    def generate_step(self, context: GenerateContext) -> GenerateResult:
-        _ = context
-        input_ids = cast(LongTensor, torch.tensor([[1, 2, 3]], dtype=torch.long))
-        scores = cast(FloatTensor, torch.empty((1, 0), dtype=torch.float))
-        for criteria in self._criteria:
-            _ = criteria(input_ids, scores)
-        return GenerateResult(
-            delta_text="",
-            delta_tokens=3,
-            stop_reason=StopReason(kind="eos"),
-        )
-
-
-class _TrackingStoppingCriteria(DTVStoppingCriteria):
-    def __init__(self, tokenizer, language_profile, fence_parser=None) -> None:
-        super().__init__(tokenizer, language_profile, fence_parser=fence_parser)
-        self.stream_resets = 0
-
-    def _reset_stream_state(self) -> None:
-        self.stream_resets += 1
-        super()._reset_stream_state()
-
-
-def _context(*, extract_fence: bool, steps: int = 0) -> GenerateContext:
+def _context(*, extract_write_region: bool, steps: int = 0) -> GenerateContext:
     return GenerateContext(
         messages=(),
         steps=steps,
         max_new_length=16,
-        extract_fence=extract_fence,
+        extract_write_region=extract_write_region,
     )
 
 
@@ -96,9 +46,9 @@ def test_adapter_continues_until_code_extracted() -> None:
     adapter = GeneratorAdapter(model_name="stub", backend_cls=_StubBackend)
     _set_steps([
         GenerateResult(
-            delta_text="preface\n```rust\n",
+            delta_text=f"preface\n{BEGIN_WRITE_CODE}\n",
             delta_tokens=2,
-            stop_reason=StopReason(kind="boundary"),
+            stop_reason=StopReason(kind="unknown"),
         ),
         GenerateResult(
             delta_text="line1\n",
@@ -107,19 +57,18 @@ def test_adapter_continues_until_code_extracted() -> None:
         ),
     ])
 
-    result = adapter.generate_step(_context(extract_fence=True))
+    result = adapter.generate_step(_context(extract_write_region=True))
 
     assert result.delta_text == "line1\n"
     assert result.delta_tokens == 3
     assert result.stop_reason.kind == "boundary"
     assert result.assistant_delta is not None
-    assert result.assistant_delta.pre_fence == "preface\n"
-    assert result.assistant_delta.fence_lang == "rust"
+    assert result.assistant_delta.prelude == "preface\n"
+    assert result.assistant_delta.has_begin_marker
     assert result.assistant_delta.code == "line1\n"
-    assert _CALLS == 2
 
 
-def test_adapter_no_fence_eos_terminates() -> None:
+def test_adapter_no_write_region_eos_terminates() -> None:
     adapter = GeneratorAdapter(model_name="stub", backend_cls=_StubBackend)
     _set_steps([
         GenerateResult(
@@ -129,13 +78,29 @@ def test_adapter_no_fence_eos_terminates() -> None:
         ),
     ])
 
-    result = adapter.generate_step(_context(extract_fence=True))
+    result = adapter.generate_step(_context(extract_write_region=True))
 
     assert result.delta_text == ""
     assert result.delta_tokens == 2
-    assert result.stop_reason.kind == "no_fence_eos"
+    assert result.stop_reason.kind == "no_write_region_eos"
     assert result.assistant_delta is not None
-    assert result.assistant_delta.pre_fence == "header\n"
+    assert result.assistant_delta.prelude == "header\n"
+
+
+def test_adapter_emits_write_region_closed() -> None:
+    adapter = GeneratorAdapter(model_name="stub", backend_cls=_StubBackend)
+    _set_steps([
+        GenerateResult(
+            delta_text=f"{BEGIN_WRITE_CODE}\nline1\n{END_WRITE_CODE}\n",
+            delta_tokens=3,
+            stop_reason=StopReason(kind="unknown"),
+        ),
+    ])
+
+    result = adapter.generate_step(_context(extract_write_region=True))
+
+    assert result.delta_text == "line1\n"
+    assert result.stop_reason.kind == "write_region_closed"
 
 
 def test_adapter_passes_through_when_extraction_disabled() -> None:
@@ -148,95 +113,44 @@ def test_adapter_passes_through_when_extraction_disabled() -> None:
         ),
     ])
 
-    result = adapter.generate_step(_context(extract_fence=False))
+    result = adapter.generate_step(_context(extract_write_region=False))
 
     assert result.delta_text == "raw output"
     assert result.delta_tokens == 1
 
 
-def test_adapter_fence_reopen_skips_marker() -> None:
+def test_adapter_rejects_inner_fence() -> None:
     adapter = GeneratorAdapter(model_name="stub", backend_cls=_StubBackend)
     _set_steps([
         GenerateResult(
-            delta_text="```rust\nline1\n```rust\nline2\n",
-            delta_tokens=3,
-            stop_reason=StopReason(kind="boundary"),
+            delta_text=f"{BEGIN_WRITE_CODE}\n```rust\n",
+            delta_tokens=2,
+            stop_reason=StopReason(kind="unknown"),
         ),
     ])
 
-    result = adapter.generate_step(_context(extract_fence=True))
-    assert "line1" in result.delta_text
-    assert "line2" in result.delta_text
+    result = adapter.generate_step(_context(extract_write_region=True))
+
+    assert result.stop_reason.kind == "invalid_write_region_payload"
 
 
-def test_adapter_keeps_fence_parser_state_from_stop_criteria() -> None:
-    parser = FenceParser(allowed_langs=("rust", "rs"))
-
-    def _criteria_factory(tokenizer):
-        return [DTVStoppingCriteria(tokenizer, RUST_PROFILE, fence_parser=parser)]
-
+def test_adapter_accepts_custom_markers() -> None:
+    markers = WriteRegionMarkers(begin_marker="[[BEGIN]]", end_marker="[[END]]")
     adapter = GeneratorAdapter(
         model_name="stub",
-        backend_cls=_StopCriteriaBackend,
-        stop_criteria_factory=_criteria_factory,
-        fence_parser=parser,
+        backend_cls=_StubBackend,
+        write_region_markers=markers,
     )
+    _set_steps([
+        GenerateResult(
+            delta_text="intro\n[[BEGIN]]\nline1\n[[END]]\n",
+            delta_tokens=3,
+            stop_reason=StopReason(kind="unknown"),
+        ),
+    ])
 
-    result = adapter.generate_step(_context(extract_fence=True))
+    result = adapter.generate_step(_context(extract_write_region=True))
 
-    assert result.stop_reason.kind == "eos"
-
-
-def test_adapter_restore_round_trip_replays_extraction_with_shared_parser() -> None:
-    parser = FenceParser(allowed_langs=("rust", "rs"))
-
-    def _criteria_factory(tokenizer):
-        return [DTVStoppingCriteria(tokenizer, RUST_PROFILE, fence_parser=parser)]
-
-    adapter = GeneratorAdapter(
-        model_name="stub",
-        backend_cls=_StopCriteriaBackend,
-        stop_criteria_factory=_criteria_factory,
-        fence_parser=parser,
-    )
-    initial_state = adapter.capture_output_extractor_state()
-
-    first = adapter.generate_step(_context(extract_fence=True))
-
-    adapter.restore_output_extractor_state(initial_state)
-    second = adapter.generate_step(_context(extract_fence=True, steps=1))
-
-    assert first.delta_text == "let x = 1;\n"
-    assert second.delta_text == "let x = 1;\n"
-    assert first.stop_reason.kind == "eos"
-    assert second.stop_reason.kind == "eos"
-
-
-def test_adapter_restore_triggers_stop_criteria_epoch_sync_with_shared_parser() -> None:
-    parser = FenceParser(allowed_langs=("rust", "rs"))
-    criteria_refs: list[_TrackingStoppingCriteria] = []
-
-    def _criteria_factory(tokenizer):
-        criteria = _TrackingStoppingCriteria(tokenizer, RUST_PROFILE, fence_parser=parser)
-        criteria_refs.append(criteria)
-        return [criteria]
-
-    adapter = GeneratorAdapter(
-        model_name="stub",
-        backend_cls=_StopCriteriaBackend,
-        stop_criteria_factory=_criteria_factory,
-        fence_parser=parser,
-    )
-    initial_state = adapter.capture_output_extractor_state()
-
-    first = adapter.generate_step(_context(extract_fence=True))
-    criteria = criteria_refs[0]
-    resets_after_first = criteria.stream_resets
-
-    adapter.restore_output_extractor_state(initial_state)
-    second = adapter.generate_step(_context(extract_fence=True, steps=1))
-
-    assert first.delta_text == "let x = 1;\n"
-    assert second.delta_text == "let x = 1;\n"
-    assert criteria.stream_resets == resets_after_first + 1
-    assert criteria._calls == 1
+    assert result.delta_text == "line1\n"
+    assert result.assistant_delta is not None
+    assert result.assistant_delta.markers == markers

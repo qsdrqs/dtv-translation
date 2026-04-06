@@ -7,26 +7,28 @@ Runs each case twice (DTV config, naive config) and compares:
 - Number of verify/feedback/rollback cycles
 
 Usage:
-    .venv/bin/python run_ab_experiment.py [OPTIONS] [case_id ...]
+    .venv/bin/python run_ab_experiment_js_ts.py [OPTIONS] [case_id ...]
 
 Options:
-    --output PATH           Output JSON path (default: result/ab_experiment_results.json)
+    --all                   Run all cases found in the dataset directory
+    --dataset-dir PATH      Dataset directory (default: DTV_JS_TS_DATASET_DIR or dataset_js_ts)
+    --output PATH           Output JSON path (default: result/ab_experiment_js_ts_results.json)
     --model-name NAME       HuggingFace model ID (default: Qwen/Qwen3-4B-Instruct-2507)
-    --token-budget N        Fixed token budget (default: 6144)
-    --budget-k K            Per-case budget = K * C_source_tokens (overrides --token-budget)
+    --token-budget N        Fixed token budget (default: 20480)
+    --budget-k K            Per-case budget = K * JS_source_tokens (overrides --token-budget)
     --greedy                Use greedy decoding (do_sample=False)
 
-If no case IDs given, uses the default 10-case smoke set.
-Use --output to write results to a custom path (default: result/ab_experiment_results.json).
+Pass explicit case IDs or use --all to scan the dataset directory.
+Use --output to write results to a custom path.
 """
 
 from __future__ import annotations
-import argparse
 
+import argparse
 import json
 import os
 import re
-import sys
+import subprocess
 import tempfile
 import time
 from contextlib import contextmanager
@@ -34,14 +36,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Protocol, cast
 
-from c_rust.feedback import RUST_FEEDBACK_LANG
-from c_rust.oracles import FunctionOracle, RustcOracle, RustcProgramOracle
-from c_rust.oracles.program_diff_test_oracle.execution_driver import compile_and_run
-from c_rust.render import CRustRenderer
 from controller.adapters import GeneratorAdapter
 from controller.loop import run_dtv_loop
 from controller.policy import DefaultPolicy, DefaultPolicyConfig
-from controller.stop_criteria import DTVStoppingCriteria, RUST_PROFILE
+from controller.stop_criteria import DTVStoppingCriteria, TS_PROFILE
 from core.budget import Budget
 from core.llm_output import WriteRegionParser
 from core.types import (
@@ -51,34 +49,29 @@ from core.types import (
     GenerateMessage,
     Granularity,
     RenderStatus,
-    TestCase,
     TraceEvent,
     TranslationSample,
     Verdict,
 )
 from feedback.feedback import FeedbackState
 from feedback.formatter import RepairFeedbackFormatConfig
+from js_ts.feedback import TS_FEEDBACK_LANG
+from js_ts.oracles import EslintOracle, TscOracle, TscProgramOracle
+from js_ts.oracles.compiler_oracle.tsc_driver import _find_type_roots
+from js_ts.render import JSToTSRenderer
 from rollback.manager import RollbackManager
 from transformers import PreTrainedTokenizerBase, StoppingCriteriaList
 
-# -- Constants -----------------------------------------------------------------
-
-MODEL_NAME = "Qwen/Qwen3-4B-Instruct-2507"
-OUTPUT_TOKEN_CAP = 6144
+MODEL_NAME = "Qwen/Qwen3.5-4B"
+OUTPUT_TOKEN_CAP = 20480
 TOKEN_BUDGET = OUTPUT_TOKEN_CAP
-MAX_NEW_LENGTH = 2048
+MAX_NEW_LENGTH = 16384
 MAX_STEPS = 2000
-PROMPT_PREFIX = "Translate the following C code into Rust, keep the same function order:"
-DATASET_DIR = Path(os.environ.get("DTV_DATASET_DIR", "/home/qsdrqs/projects/agent_fuzz/selected_data_output"))
+PROMPT_PREFIX = "Translate the following JavaScript code into TypeScript with strict type annotations:"
+DATASET_DIR = Path(os.environ.get("DTV_JS_TS_DATASET_DIR", "dataset_js_ts"))
 RESULT_DIR = Path("result")
-OUTPUT_PATH = RESULT_DIR / "ab_experiment_results.json"
+OUTPUT_PATH = RESULT_DIR / "ab_experiment_js_ts_results.json"
 
-DEFAULT_CASE_IDS = [
-    "s236602409", "s628961975", "s126370263", "s672064666", "s476074975",
-    "s780263580", "s660236723", "s168939986", "s488265727", "s763753836",
-]
-
-# DTV: verify at every statement boundary, stmt-level rollback + repair
 DTV_CONFIG = DefaultPolicyConfig(
     verify_on_boundary=True,
     verify_on_close=False,
@@ -90,7 +83,6 @@ DTV_CONFIG = DefaultPolicyConfig(
     repair_verify_granularity=Granularity.STMT,
 )
 
-# Naive: verify only after full generation (EOS), program-level rollback + repair
 NAIVE_CONFIG = DefaultPolicyConfig(
     verify_on_boundary=False,
     verify_on_close=False,
@@ -111,11 +103,9 @@ class _TokenizerBackend(Protocol):
     tokenizer: PreTrainedTokenizerBase
 
 
-_RUST_FENCE_RE = re.compile(r"```(?:rust|rs)\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
+_TS_FENCE_RE = re.compile(r"```(?:typescript|ts)\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _ANY_FENCE_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
 
-
-# ── Metrics ────────────────────────────────────────────────────────────────────
 
 @dataclass
 class RunResult:
@@ -149,7 +139,6 @@ class NaiveLoopResult:
 
 
 def _all_pass(outputs: tuple) -> bool:
-    """Same logic as the policy: at least one PASS and no FAIL."""
     saw_pass = False
     for output in outputs:
         if output.verdict == Verdict.FAIL:
@@ -216,86 +205,27 @@ def extract_metrics(trace: list[TraceEvent]) -> dict:
     }
 
 
-# ── Runner ─────────────────────────────────────────────────────────────────────
-
-def load_test_cases(case_dir: Path) -> list[TestCase]:
-    testcases_dir = case_dir / "testcases"
-    cases: list[TestCase] = []
-    skipped = 0
-    for f in sorted(testcases_dir.iterdir()):
-        if f.name.startswith("input_"):
-            raw = f.read_bytes()
-            try:
-                stdin = raw.decode("utf-8")
-            except UnicodeDecodeError:
-                skipped += 1
-                continue
-            cases.append(TestCase(stdin=stdin, test_id=f.stem))
-    if skipped:
-        print(f"    (skipped {skipped} binary test inputs in {case_dir.name})")
-    return cases
+def load_sample(case_dir: Path) -> TranslationSample:
+    js_source = (case_dir / "source.js").read_text(encoding="utf-8").strip()
+    return TranslationSample(source_code=js_source, source_lang="js", test_cases=[])
 
 
 def evaluate_final_program(
     final_prefix: str,
-    renderer: CRustRenderer,
-    c_source: str,
-    test_cases: list[TestCase],
+    renderer: JSToTSRenderer,
 ) -> tuple[bool, int, int]:
-    """Returns (compiles, test_passed, test_total)."""
     render_result = renderer.try_render(final_prefix)
     if render_result.status != RenderStatus.OK or render_result.artifact is None:
-        return False, 0, len(test_cases)
+        return False, 0, 0
 
-    rust_code = render_result.artifact.code
-
-    with tempfile.TemporaryDirectory(prefix="dtv-eval-") as tmpdir:
-        c_dir = Path(tmpdir) / "c"
-        c_dir.mkdir()
-        rust_dir = Path(tmpdir) / "rust"
-        rust_dir.mkdir()
-
-        c_compile, c_results = compile_and_run(c_source, test_cases, "c", c_dir)
-        if c_compile.compilation_failed:
-            return False, 0, len(test_cases)
-
-        rust_compile, rust_results = compile_and_run(rust_code, test_cases, "rust", rust_dir)
-        if rust_compile.compilation_failed:
-            return False, 0, len(test_cases)
-
-        passed = 0
-        for c_res, rust_res in zip(c_results, rust_results):
-            if c_res.stdout == rust_res.stdout and c_res.exit_code == rust_res.exit_code:
-                passed += 1
-
-    return True, passed, len(test_cases)
+    ts_code = render_result.artifact.code
+    compiles, _ = _compile_ts_code(ts_code)
+    return compiles, 0, 0
 
 
-def evaluate_final_rust_code(
-    rust_code: str,
-    c_source: str,
-    test_cases: list[TestCase],
-) -> tuple[bool, int, int]:
-    with tempfile.TemporaryDirectory(prefix="dtv-eval-naive-") as tmpdir:
-        c_dir = Path(tmpdir) / "c"
-        c_dir.mkdir()
-        rust_dir = Path(tmpdir) / "rust"
-        rust_dir.mkdir()
-
-        c_compile, c_results = compile_and_run(c_source, test_cases, "c", c_dir)
-        if c_compile.compilation_failed:
-            return False, 0, len(test_cases)
-
-        rust_compile, rust_results = compile_and_run(rust_code, test_cases, "rust", rust_dir)
-        if rust_compile.compilation_failed:
-            return False, 0, len(test_cases)
-
-        passed = 0
-        for c_res, rust_res in zip(c_results, rust_results):
-            if c_res.stdout == rust_res.stdout and c_res.exit_code == rust_res.exit_code:
-                passed += 1
-
-    return True, passed, len(test_cases)
+def evaluate_final_ts_code(ts_code: str) -> tuple[bool, int, int]:
+    compiles, _ = _compile_ts_code(ts_code)
+    return compiles, 0, 0
 
 
 def _remaining_tokens(budget: Budget) -> int:
@@ -313,10 +243,10 @@ def _temporary_no_stopping_criteria(generator: GeneratorAdapter):
         backend.stop_criteria = original_stop_criteria
 
 
-def _extract_rust_code(raw_text: str) -> str:
-    rust_match = _RUST_FENCE_RE.search(raw_text)
-    if rust_match is not None:
-        return rust_match.group(1).strip()
+def _extract_ts_code(raw_text: str) -> str:
+    ts_match = _TS_FENCE_RE.search(raw_text)
+    if ts_match is not None:
+        return ts_match.group(1).strip()
 
     any_match = _ANY_FENCE_RE.search(raw_text)
     if any_match is not None:
@@ -325,25 +255,43 @@ def _extract_rust_code(raw_text: str) -> str:
     return raw_text.strip()
 
 
-def _compile_rust_code(rust_code: str) -> tuple[bool, str]:
-    with tempfile.TemporaryDirectory(prefix="naive-rustc-") as tmpdir:
-        compile_result, _ = compile_and_run(
-            rust_code,
-            [],
-            "rust",
-            Path(tmpdir),
+def _compile_ts_code(ts_code: str) -> tuple[bool, str]:
+    with tempfile.TemporaryDirectory(prefix="naive-tsc-") as tmpdir:
+        ts_file = Path(tmpdir) / "output.ts"
+        ts_file.write_text(ts_code, encoding="utf-8")
+        type_roots = _find_type_roots()
+        type_roots_args = ["--typeRoots", type_roots] if type_roots else []
+        tsc_result = subprocess.run(
+            [
+                "tsc",
+                "--pretty",
+                "false",
+                "--strict",
+                "--noEmit",
+                "--target",
+                "ES2020",
+                "--lib",
+                "ES2020,DOM",
+                "--skipLibCheck",
+                *type_roots_args,
+                str(ts_file),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10.0,
+            check=False,
         )
 
-    outputs = [part for part in (compile_result.stderr, compile_result.stdout) if part]
+    outputs = [part for part in (tsc_result.stderr, tsc_result.stdout) if part]
     compiler_output = "\n".join(outputs).strip()
-    compiles = not compile_result.compilation_failed and not compile_result.timed_out
+    compiles = tsc_result.returncode == 0
     return compiles, compiler_output
 
 
 def _format_compile_feedback(compiler_output: str, max_lines: int = 20) -> str:
     lines = [line.strip() for line in compiler_output.splitlines() if line.strip()]
     if not lines:
-        return "- rustc did not emit diagnostics"
+        return "- tsc did not emit diagnostics"
 
     shown = lines[:max_lines]
     if len(lines) > max_lines:
@@ -354,9 +302,9 @@ def _format_compile_feedback(compiler_output: str, max_lines: int = 20) -> str:
 def _build_repair_prompt(compiler_output: str) -> str:
     diagnostics_text = _format_compile_feedback(compiler_output)
     return (
-        "Your previous Rust translation failed to compile.\n"
-        "Fix the compile errors and return a full corrected Rust program.\n"
-        "Do not explain. Return exactly one fenced Rust code block.\n\n"
+        "Your previous TypeScript translation failed to compile.\n"
+        "Fix the compile errors and return a full corrected TypeScript program.\n"
+        "Do not explain. Return exactly one fenced TypeScript code block.\n\n"
         f"Compiler diagnostics:\n{diagnostics_text}\n"
     )
 
@@ -418,10 +366,10 @@ def run_naive_minimal(
             break
 
         _set_last_assistant(messages, raw_output, stop=True)
-        final_prefix = _extract_rust_code(raw_output)
+        final_prefix = _extract_ts_code(raw_output)
 
         verify_count += 1
-        compiles, compiler_output = _compile_rust_code(final_prefix)
+        compiles, compiler_output = _compile_ts_code(final_prefix)
         trace_log.append({
             "round": total_steps,
             "tokens_used": budget.gen_tokens_used,
@@ -464,27 +412,26 @@ def run_naive_minimal(
 
 def run_single(
     case_id: str,
+    case_dir: Path,
     config: DefaultPolicyConfig,
     config_name: str,
     generator: GeneratorAdapter,
     token_budget: int,
     budget_k: float | None = None,
 ) -> RunResult:
-    case_dir = DATASET_DIR / case_id
-    c_source = (case_dir / "source.c").read_text(encoding="utf-8").strip()
-    test_cases = load_test_cases(case_dir)
-    sample = TranslationSample(source_code=c_source, source_lang="c", test_cases=test_cases)
+    sample = load_sample(case_dir)
+    js_source = sample.source_code
 
     if budget_k is not None:
         backend = cast(_TokenizerBackend, generator.backend)
-        c_token_count = len(backend.tokenizer.encode(c_source))
-        effective_budget = int(budget_k * c_token_count)
+        js_token_count = len(backend.tokenizer.encode(js_source))
+        effective_budget = int(budget_k * js_token_count)
     else:
         effective_budget = token_budget
 
-    prompt = f"\n{PROMPT_PREFIX}\n```c\n{c_source}\n```\n"
+    prompt = f"\n{PROMPT_PREFIX}\n```javascript\n{js_source}\n```\n"
 
-    renderer = CRustRenderer(sample=sample)
+    renderer = JSToTSRenderer(sample=sample)
     if config_name == "naive":
         t0 = time.time()
         with _temporary_no_stopping_criteria(generator):
@@ -506,7 +453,7 @@ def run_single(
             "trace_log": naive_result.trace_log,
         }
     else:
-        oracles = [RustcOracle(), FunctionOracle(), RustcProgramOracle()]
+        oracles = [TscOracle(), TscProgramOracle(), EslintOracle()]
         budget = Budget(gen_tokens_budget=effective_budget)
         feedback_state = FeedbackState()
         rollback_manager = RollbackManager()
@@ -523,7 +470,7 @@ def run_single(
             feedback_state=feedback_state,
             rollback_manager=rollback_manager,
             policy=policy,
-            feedback_lang_config=RUST_FEEDBACK_LANG,
+            feedback_lang_config=TS_FEEDBACK_LANG,
             repair_feedback_format_config=RepairFeedbackFormatConfig(include_failed_snippet=True),
             max_steps=MAX_STEPS,
             max_new_length=MAX_NEW_LENGTH,
@@ -533,17 +480,11 @@ def run_single(
         metrics = extract_metrics(trace)
 
     if config_name == "naive":
-        compiles, test_passed, test_total = evaluate_final_rust_code(
-            rust_code=final_prefix,
-            c_source=c_source,
-            test_cases=test_cases,
-        )
+        compiles, test_passed, test_total = evaluate_final_ts_code(ts_code=final_prefix)
     else:
         compiles, test_passed, test_total = evaluate_final_program(
             final_prefix=final_prefix,
             renderer=renderer,
-            c_source=c_source,
-            test_cases=test_cases,
         )
     return RunResult(
         case_id=case_id,
@@ -556,7 +497,18 @@ def run_single(
     )
 
 
-# ── Output ─────────────────────────────────────────────────────────────────────
+def _discover_case_ids(dataset_dir: Path) -> list[str]:
+    if not dataset_dir.is_dir():
+        raise FileNotFoundError(f"dataset directory not found: {dataset_dir}")
+    case_ids = sorted(
+        path.name
+        for path in dataset_dir.iterdir()
+        if path.is_dir() and (path / "source.js").is_file()
+    )
+    if not case_ids:
+        raise ValueError(f"no JS->TS cases found in dataset directory: {dataset_dir}")
+    return case_ids
+
 
 def print_summary(
     results: list[RunResult],
@@ -575,10 +527,10 @@ def print_summary(
     )
     budget_desc = f"BudgetK={budget_k}" if budget_k is not None else f"TokenBudget={token_budget}"
     print(f"\n{'=' * 95}")
-    print("A/B COMPARISON: DTV vs Naive Feedback")
+    print("A/B COMPARISON: JS->TS DTV vs Naive Feedback")
     print(f"Model={model_name}  {budget_desc}  MaxSteps={MAX_STEPS}")
     print(f"{'=' * 95}")
-    print(f"{'':15}   {'--- DTV ---':^40}   {'--- Naive ---':^40}")
+    print(f"{'':15}   {'--- DTV (JS->TS) ---':^40}   {'--- Naive (JS->TS) ---':^40}")
     print(col)
     print("-" * 95)
 
@@ -612,7 +564,7 @@ def print_summary(
 
     legend = (
         "Legend: Verd=final verdict, Tok=tokens used, Stp=loop steps, "
-        "V=verify, F=feedback, R=rollback, C=final Rust compiles, Tests=passed/total"
+        "V=verify, F=feedback, R=rollback, C=final TS compiles, Tests=passed/total"
     )
     print(legend)
     print(f"\nPass rate:    DTV {dtv_pass}/{len(dtv_list)}    Naive {naive_pass}/{len(naive_list)}")
@@ -625,20 +577,33 @@ def print_summary(
     print(f"{'=' * 95}")
 
 
-# ── Main ───────────────────────────────────────────────────────────────────────
-
 def main() -> None:
-    parser = argparse.ArgumentParser(description="A/B experiment: DTV vs naive feedback")
-    parser.add_argument("case_ids", nargs="*", default=DEFAULT_CASE_IDS, help="Case IDs to run")
+    parser = argparse.ArgumentParser(description="A/B experiment: JS->TS DTV vs naive feedback")
+    parser.add_argument("case_ids", nargs="*", help="Case IDs to run")
+    parser.add_argument("--all", action="store_true", help="Run all cases in the dataset directory")
+    parser.add_argument("--dataset-dir", type=Path, default=DATASET_DIR, help="Dataset directory")
     parser.add_argument("--output", type=Path, default=OUTPUT_PATH, help="Output JSON path")
     parser.add_argument("--model-name", default=MODEL_NAME, help="HuggingFace model ID")
     parser.add_argument("--token-budget", type=int, default=OUTPUT_TOKEN_CAP, help="Fixed token budget")
-    parser.add_argument("--budget-k", type=float, default=None,
-                        help="Per-case budget = k * C_source_tokens (overrides --token-budget)")
+    parser.add_argument(
+        "--budget-k",
+        type=float,
+        default=None,
+        help="Per-case budget = k * JS_source_tokens (overrides --token-budget)",
+    )
     parser.add_argument("--greedy", action="store_true", help="Greedy decoding (do_sample=False)")
     args = parser.parse_args()
 
-    case_ids: list[str] = args.case_ids
+    dataset_dir: Path = args.dataset_dir
+    if args.all:
+        if args.case_ids:
+            parser.error("pass case IDs or --all, not both")
+        case_ids = _discover_case_ids(dataset_dir)
+    else:
+        if not args.case_ids:
+            parser.error("provide case IDs or use --all")
+        case_ids = args.case_ids
+
     output_path: Path = args.output
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -651,7 +616,7 @@ def main() -> None:
     generator = GeneratorAdapter(
         model_name=model_name,
         stop_criteria_factory=lambda tok: [
-            DTVStoppingCriteria(tok, RUST_PROFILE, write_region_parser=write_region_parser)
+            DTVStoppingCriteria(tok, TS_PROFILE, write_region_parser=write_region_parser)
         ],
         write_region_parser=write_region_parser,
         do_sample=do_sample,
@@ -661,21 +626,29 @@ def main() -> None:
     sampling_desc = "greedy" if args.greedy else "default"
     print(f"Model loaded: {model_name}")
     print(f"Cases: {len(case_ids)}, {budget_desc}, MaxSteps={MAX_STEPS}, Sampling={sampling_desc}")
+    print(f"Dataset: {dataset_dir}")
     print(f"Output: {output_path}")
 
     results: list[RunResult] = []
     configs = [("dtv", DTV_CONFIG), ("naive", NAIVE_CONFIG)]
 
     for i, case_id in enumerate(case_ids, 1):
+        case_dir = dataset_dir / case_id
         for config_name, config in configs:
             print(f"\n[{i}/{len(case_ids)}] {case_id} / {config_name} ...", flush=True)
             try:
                 result = run_single(
-                    case_id, config, config_name, generator,
-                    token_budget=token_budget, budget_k=budget_k,
+                    case_id,
+                    case_dir,
+                    config,
+                    config_name,
+                    generator,
+                    token_budget=token_budget,
+                    budget_k=budget_k,
                 )
             except Exception as exc:
                 import traceback
+
                 traceback.print_exc()
                 print(f"  !! CRASH: {case_id}/{config_name}: {exc}", flush=True)
                 result = RunResult(

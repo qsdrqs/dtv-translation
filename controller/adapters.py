@@ -3,21 +3,23 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 
 import transformers
+from transformers import StoppingCriteria
 
 from core.generator_backend import GeneratorBackend
+from core.interfaces import Generator
 from core.llm_output import (
     AssistantContent,
-    FenceParser,
-    FenceParserSnapshot,
-    FenceState,
+    DEFAULT_WRITE_REGION_MARKERS,
     OutputExtractorState,
+    WriteRegionParser,
+    WriteRegionParserSnapshot,
+    WriteRegionMarkers,
+    WriteRegionState,
     merge_assistant_content,
 )
 from core.logger import get_logger
 from core.qwen_generator_backend import QwenGeneratorBackend
-from core.interfaces import Generator
 from core.types import GenerateContext, GenerateResult, StopReason
-from transformers import StoppingCriteria
 
 
 logger = get_logger(__name__)
@@ -32,7 +34,8 @@ class GeneratorAdapter(Generator):
             Sequence[StoppingCriteria],
         ]
         | None = None,
-        fence_parser: FenceParser | None = None,
+        write_region_parser: WriteRegionParser | None = None,
+        write_region_markers: WriteRegionMarkers = DEFAULT_WRITE_REGION_MARKERS,
         backend_cls: type[GeneratorBackend] = QwenGeneratorBackend,
         do_sample: bool | None = None,
         temperature: float | None = None,
@@ -43,26 +46,28 @@ class GeneratorAdapter(Generator):
             do_sample=do_sample,
             temperature=temperature,
         )
-        self._fence_parser = fence_parser
-        allowed_langs = fence_parser.allowed_langs if fence_parser is not None else ("rust", "rs")
-        self._segment_parser = FenceParser(allowed_langs=allowed_langs)
-        self._extract_parser = FenceParser(allowed_langs=allowed_langs)
+        self._write_region_parser = write_region_parser
+        self._write_region_markers = (
+            write_region_parser.markers if write_region_parser is not None else write_region_markers
+        )
+        self._segment_parser = WriteRegionParser(markers=self._write_region_markers)
+        self._extract_parser = WriteRegionParser(markers=self._write_region_markers)
         self._warning_emitted = False
 
     def reset_output_extractor(self) -> None:
-        if self._fence_parser is not None:
-            self._fence_parser.reset()
+        if self._write_region_parser is not None:
+            self._write_region_parser.reset()
         self._segment_parser.reset()
         self._extract_parser.reset()
         self._warning_emitted = False
 
-    def get_output_extractor_state(self) -> FenceState:
-        if self._fence_parser is not None:
-            return self._fence_parser.state
+    def get_output_extractor_state(self) -> WriteRegionState:
+        if self._write_region_parser is not None:
+            return self._write_region_parser.state
         return self._extract_parser.state
 
     def capture_output_extractor_state(self) -> OutputExtractorState:
-        shared_snapshot = self._fence_parser.capture() if self._fence_parser is not None else None
+        shared_snapshot = self._write_region_parser.capture() if self._write_region_parser is not None else None
         return OutputExtractorState(
             segment=self._segment_parser.capture(),
             extract=self._extract_parser.capture(),
@@ -73,38 +78,47 @@ class GeneratorAdapter(Generator):
     def restore_output_extractor_state(self, state: OutputExtractorState) -> None:
         self._segment_parser.restore(state.segment)
         self._extract_parser.restore(state.extract)
-        if self._fence_parser is not None:
+        if self._write_region_parser is not None:
             shared_state = state.shared
             if shared_state is None:
-                shared_state = FenceParserSnapshot(
+                shared_state = WriteRegionParserSnapshot(
                     state=state.extract.state,
-                    saw_fence=state.extract.saw_fence,
+                    saw_begin=state.extract.saw_begin,
+                    saw_end=state.extract.saw_end,
                     buffer=state.extract.buffer,
-                    inside_parts=state.extract.inside_parts,
+                    code_parts=state.extract.code_parts,
+                    invalid_payload=state.extract.invalid_payload,
+                    invalid_reason=state.extract.invalid_reason,
                 )
-            self._fence_parser.restore(shared_state)
+            self._write_region_parser.restore(shared_state)
         self._warning_emitted = state.warning_emitted
 
-    def set_stop_on_fence_open(self, enabled: bool) -> None:
-        self.backend.set_stop_on_fence_open(enabled)
+    def set_stop_on_write_region_open(self, enabled: bool) -> None:
+        self.backend.set_stop_on_write_region_open(enabled)
 
     def generate_step(self, context: GenerateContext) -> GenerateResult:
         logger.info(
-            "generate_step: steps=%s extract_fence=%s max_new_length=%s",
+            "generate_step: steps=%s extract_write_region=%s max_new_length=%s",
             context.steps,
-            context.extract_fence,
+            context.extract_write_region,
             context.max_new_length,
         )
         if context.steps == 0:
-            if self._fence_parser is not None:
-                self._fence_parser.reset()
+            if self._write_region_parser is not None:
+                self._write_region_parser.reset()
             self._segment_parser.reset()
             self._extract_parser.reset()
             self._warning_emitted = False
+
         self.backend.set_generation_channel(context.channel)
+        previous_shared = self._write_region_parser.capture() if self._write_region_parser is not None else None
         result = self.backend.generate_step(context)
-        if not context.extract_fence:
-            assistant_delta = AssistantContent.from_unfenced(result.delta_text)
+
+        if not context.extract_write_region:
+            assistant_delta = AssistantContent.from_text(
+                result.delta_text,
+                markers=self._write_region_markers,
+            )
             logger.info(
                 "generate_step complete: delta_tokens=%s stop_reason=%s",
                 result.delta_tokens,
@@ -118,16 +132,16 @@ class GeneratorAdapter(Generator):
             )
 
         assistant_accum = self._segment_parser.feed(result.delta_text)
-        if self._fence_parser is not None:
+        if self._write_region_parser is not None:
             if result.stop_reason.kind == "eos":
-                self._fence_parser.flush()
-            extracted = self._fence_parser.consume_inside()
-            stop_reason = result.stop_reason
-            if stop_reason.kind == "eos" and not self._fence_parser.saw_fence:
-                if not self._warning_emitted:
-                    logger.warning("No rust fenced block found in model output; terminating")
-                    self._warning_emitted = True
-                stop_reason = StopReason(kind="no_fence_eos", detail="")
+                self._write_region_parser.flush()
+            extracted = self._write_region_parser.consume_code()
+            current_shared = self._write_region_parser.capture()
+            stop_reason = _normalize_stop_reason(
+                result.stop_reason,
+                previous=previous_shared,
+                current=current_shared,
+            )
             assistant_accum = assistant_accum.with_code(extracted)
             logger.info(
                 "generate_step complete: delta_tokens=%s stop_reason=%s extracted_chars=%s",
@@ -142,60 +156,48 @@ class GeneratorAdapter(Generator):
                 assistant_delta=assistant_accum,
             )
 
-        # Keep calling the backend until we extract fenced code or hit a terminal condition.
         total_tokens = 0
         stop_reason = result.stop_reason
         extracted = ""
         remaining = context.max_new_length
+        previous_extract = self._extract_parser.capture()
 
         while True:
             total_tokens += result.delta_tokens
-            stop_reason = result.stop_reason
-            extracted_piece = ""
-            logger.debug(
-                "backend step: delta_tokens=%s stop_reason=%s fence_state=%s saw_fence=%s",
-                result.delta_tokens,
-                stop_reason.kind,
-                self._extract_parser.state,
-                self._extract_parser.saw_fence,
-            )
             if result.delta_text:
                 self._extract_parser.feed(result.delta_text)
-                extracted_piece = self._extract_parser.consume_inside()
+            if result.stop_reason.kind == "eos":
+                self._extract_parser.flush()
+            current_extract = self._extract_parser.capture()
+            stop_reason = _normalize_stop_reason(
+                result.stop_reason,
+                previous=previous_extract,
+                current=current_extract,
+            )
+            extracted_piece = self._extract_parser.consume_code()
             if extracted_piece:
-                logger.debug(
-                    "fence extracted: chars=%s state=%s",
-                    len(extracted_piece),
-                    self._extract_parser.state,
-                )
-                extracted = extracted_piece
+                extracted += extracted_piece
                 break
-            # Nothing new to process or nothing left to emit from the extractor.
+            if stop_reason.kind in {
+                "write_region_closed",
+                "no_write_region_eos",
+                "unterminated_write_region",
+                "invalid_write_region_payload",
+            }:
+                break
             if not result.delta_text:
-                break
-            if self._extract_parser.state == FenceState.DONE:
-                break
-            if stop_reason.kind == "eos":
-                if not self._extract_parser.saw_fence:
-                    if not self._warning_emitted:
-                        logger.warning("No rust fenced block found in model output; terminating")
-                        self._warning_emitted = True
-                    stop_reason = StopReason(kind="no_fence_eos", detail="")
                 break
             if result.delta_tokens <= 0:
                 break
-            # Consume remaining budget locally to avoid exceeding the caller's max_new_length.
             remaining = max(0, remaining - result.delta_tokens)
             context.max_new_length = remaining
             if remaining <= 0:
                 logger.info("generation halted: remaining token budget exhausted")
                 break
+            previous_extract = current_extract
             result = self.backend.generate_step(context)
             assistant_delta = self._segment_parser.feed(result.delta_text)
             assistant_accum = merge_assistant_content(assistant_accum, assistant_delta)
-
-        if not extracted:
-            extracted = self._extract_parser.consume_inside()
 
         logger.info(
             "generate_step complete: delta_tokens=%s stop_reason=%s extracted_chars=%s",
@@ -209,3 +211,23 @@ class GeneratorAdapter(Generator):
             stop_reason=stop_reason,
             assistant_delta=assistant_accum.with_code(extracted),
         )
+
+
+def _normalize_stop_reason(
+    stop_reason: StopReason,
+    *,
+    previous: WriteRegionParserSnapshot | None,
+    current: WriteRegionParserSnapshot,
+) -> StopReason:
+    previous_saw_begin = previous.saw_begin if previous is not None else False
+    previous_saw_end = previous.saw_end if previous is not None else False
+    previous_invalid = previous.invalid_payload if previous is not None else False
+    if current.invalid_payload and not previous_invalid:
+        return StopReason(kind="invalid_write_region_payload", detail=current.invalid_reason)
+    if current.saw_end and not previous_saw_end:
+        return StopReason(kind="write_region_closed", detail="")
+    if stop_reason.kind == "eos" and not current.saw_begin and not previous_saw_begin:
+        return StopReason(kind="no_write_region_eos", detail="")
+    if stop_reason.kind == "eos" and current.state == WriteRegionState.INSIDE:
+        return StopReason(kind="unterminated_write_region", detail="")
+    return stop_reason

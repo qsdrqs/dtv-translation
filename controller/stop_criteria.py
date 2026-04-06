@@ -5,10 +5,10 @@ from typing import cast
 
 from transformers import StoppingCriteria
 
-from core.llm_output import FenceParser, FenceState
+from core.llm_output import DEFAULT_WRITE_REGION_MARKERS, WriteRegionMarkers, WriteRegionParser, WriteRegionState
 from core.logger import get_logger
 from core.types import GenerationChannel
-from feedback.output_parser import FeedbackFenceStreamParser
+from feedback.output_parser import FeedbackWriteRegionStreamParser
 import torch
 from torch import BoolTensor
 
@@ -116,11 +116,15 @@ class DTVStoppingCriteria(StoppingCriteria):
         self,
         tokenizer,
         language_profile: LanguageProfile,
-        fence_parser: FenceParser | None = None,
+        write_region_parser: WriteRegionParser | None = None,
+        write_region_markers: WriteRegionMarkers = DEFAULT_WRITE_REGION_MARKERS,
     ) -> None:
         self.tokenizer = tokenizer
         self.language_profile = language_profile
-        self.fence_parser = fence_parser
+        self.write_region_parser = write_region_parser
+        self._write_region_markers = (
+            write_region_parser.markers if write_region_parser is not None else write_region_markers
+        )
         self._calls = 0
         self._boundary_checks = 0
         self._boundary_suppressed = 0
@@ -129,10 +133,10 @@ class DTVStoppingCriteria(StoppingCriteria):
         self._prompt_token_count: int | None = None
         self._code_text = ""
         self._last_boundary_len: int | None = None
-        self._parser_epoch = fence_parser.epoch if fence_parser is not None else None
+        self._parser_epoch = write_region_parser.epoch if write_region_parser is not None else None
         self._generation_channel = GenerationChannel.CONTINUATION
-        self._feedback_fence_parser = FeedbackFenceStreamParser()
-        self._stop_on_fence_open = False
+        self._feedback_region_parser = FeedbackWriteRegionStreamParser(self._write_region_markers)
+        self._stop_on_write_region_open = False
 
     def _reset_stream_state(self) -> None:
         self._calls = 0
@@ -142,7 +146,7 @@ class DTVStoppingCriteria(StoppingCriteria):
         self._last_token_count = self._prompt_token_count or 0
         self._code_text = ""
         self._last_boundary_len = None
-        self._feedback_fence_parser.reset()
+        self._feedback_region_parser.reset()
 
     def set_prompt_token_count(self, prompt_token_count: int) -> None:
         if prompt_token_count < 0:
@@ -151,8 +155,8 @@ class DTVStoppingCriteria(StoppingCriteria):
         self._last_token_count = prompt_token_count
         self._calls = 0
 
-    def set_stop_on_fence_open(self, enabled: bool) -> None:
-        self._stop_on_fence_open = enabled
+    def set_stop_on_write_region_open(self, enabled: bool) -> None:
+        self._stop_on_write_region_open = enabled
 
     def set_generation_channel(self, generation_channel: GenerationChannel | str) -> None:
         next_channel = GenerationChannel(generation_channel)
@@ -165,8 +169,8 @@ class DTVStoppingCriteria(StoppingCriteria):
         TORCH_FALSE = cast(BoolTensor, torch.tensor([False], dtype=torch.bool, device=input_ids.device))
         TORCH_TRUE = cast(BoolTensor, torch.tensor([True], dtype=torch.bool, device=input_ids.device))
 
-        if self.fence_parser is not None and self._parser_epoch != self.fence_parser.epoch:
-            self._parser_epoch = self.fence_parser.epoch
+        if self.write_region_parser is not None and self._parser_epoch != self.write_region_parser.epoch:
+            self._parser_epoch = self.write_region_parser.epoch
             self._reset_stream_state()
 
         token_count = input_ids.shape[-1]
@@ -184,21 +188,25 @@ class DTVStoppingCriteria(StoppingCriteria):
 
         if self._generation_channel == GenerationChannel.PATCH:
             if new_text:
-                self._feedback_fence_parser.feed(new_text)
-            if self._feedback_fence_parser.complete:
+                self._feedback_region_parser.feed(new_text)
+            if self._feedback_region_parser.complete:
                 return TORCH_TRUE
             return TORCH_FALSE
 
-        if self.fence_parser is not None:
+        if self.write_region_parser is not None:
             if new_text:
-                assistant_delta = self.fence_parser.feed(new_text)
+                assistant_delta = self.write_region_parser.feed(new_text)
                 inside_piece = assistant_delta.code
                 if inside_piece:
                     self._code_text += inside_piece
-            if self.fence_parser.state != FenceState.INSIDE:
+                if self.write_region_parser.invalid_payload:
+                    return TORCH_TRUE
+                if assistant_delta.has_end_marker:
+                    return TORCH_TRUE
+                if assistant_delta.has_begin_marker and self._stop_on_write_region_open:
+                    return TORCH_TRUE
+            if self.write_region_parser.state != WriteRegionState.INSIDE:
                 return TORCH_FALSE
-            if self._stop_on_fence_open:
-                return TORCH_TRUE
             stripped = self._code_text.rstrip()
         else:
             decoded = self.tokenizer.decode(input_ids[0], skip_special_tokens=True)

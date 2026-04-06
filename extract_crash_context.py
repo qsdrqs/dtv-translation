@@ -21,7 +21,7 @@ def extract_crash(log_path: Path) -> None:
 
     crash_line = None
     for i, line in enumerate(lines):
-        if "FenceReopenError" in line or "fence state diverged" in line:
+        if "invalid_write_region_payload" in line or "write-region state diverged" in line:
             crash_line = i
             break
 
@@ -46,7 +46,11 @@ def extract_crash(log_path: Path) -> None:
             crash_config = m.group(2)
             break
 
-    error_type = "FenceReopenError" if "FenceReopenError" in lines[crash_line] else "fence_state_diverged"
+    error_type = (
+        "invalid_write_region_payload"
+        if "invalid_write_region_payload" in lines[crash_line]
+        else "write_region_state_diverged"
+    )
 
     print(f"\n{'='*80}")
     print(f"FILE: {log_path.name}")

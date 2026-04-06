@@ -26,7 +26,7 @@ class GenerateContext:
     messages: Sequence[GenerateMessage | dict[str, Any]]
     steps: int = 0
     max_new_length: int = 1024
-    extract_fence: bool = False
+    extract_write_region: bool = False
     channel: GenerationChannel = GenerationChannel.CONTINUATION
 
 

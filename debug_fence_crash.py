@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Reproduce fence-related crashes and dump model input at the crash point.
+"""Reproduce write-region crashes and dump model input at the crash point.
 
 Usage:
     .venv/bin/python debug_fence_crash.py <case_id>
 
 Crash cases from the 79-case experiment:
-  FenceReopenError:     s972128356  s775589530  s661065982  s842128761
-  fence state diverged: s329328806  s763753836
+  invalid_write_region_payload: s972128356  s775589530  s661065982  s842128761
+  write-region state diverged:  s329328806  s763753836
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from c_rust.feedback import RUST_FEEDBACK_LANG
-from core.llm_output import AssistantContent, FenceReopenError, FenceState, OutputExtractorState
+from core.llm_output import AssistantContent, OutputExtractorState
 from core.types import GenerateContext, GenerateMessage, GenerationChannel
 from run_ab_experiment import (
     DATASET_DIR,
@@ -39,11 +39,12 @@ def _serialize_message(msg: GenerateMessage) -> dict[str, Any]:
         return {
             "role": msg.role,
             "content_rendered": rendered,
-            "fence_state": content.fence_state.value,
-            "pre_fence_len": len(content.pre_fence),
+            "region_state": content.region_state.value,
+            "prelude_len": len(content.prelude),
             "code_len": len(content.code),
-            "post_fence_len": len(content.post_fence),
-            "fence_lang": content.fence_lang,
+            "postlude_len": len(content.postlude),
+            "has_begin_marker": content.has_begin_marker,
+            "has_end_marker": content.has_end_marker,
             "stop": msg.stop,
         }
     return {"role": msg.role, "content": str(content), "stop": msg.stop}
@@ -54,7 +55,8 @@ def _serialize_extractor_state(state: OutputExtractorState | None) -> dict[str, 
         return None
     return {
         "segment_state": state.segment.state.value,
-        "segment_saw_fence": state.segment.saw_fence,
+        "segment_saw_begin": state.segment.saw_begin,
+        "segment_saw_end": state.segment.saw_end,
         "segment_buffer": repr(state.segment.buffer),
         "extract_state": state.extract.state.value,
         "shared_state": state.shared.state.value if state.shared else None,
@@ -84,18 +86,18 @@ def main() -> None:
         crash_context["step"] = runtime.state.step
         crash_context["prefix_len"] = len(runtime.state.prefix)
         crash_context["prefix_tail_500"] = runtime.state.prefix[-500:]
-        crash_context["assistant_prefix_fence_state"] = runtime.assistant_prefix.fence_state.value
+        crash_context["assistant_prefix_region_state"] = runtime.assistant_prefix.region_state.value
         crash_context["assistant_prefix_code_tail_300"] = runtime.assistant_prefix.code[-300:]
         crash_context["extractor_state"] = _serialize_extractor_state(runtime.extractor_state)
 
-        context.extract_fence = True
+        context.extract_write_region = True
         context.channel = GenerationChannel.CONTINUATION
         loop_mod.update_last_assistant(base_messages, runtime.assistant_prefix)
         crash_context["messages"] = [_serialize_message(m) for m in base_messages]
 
         try:
             return original_handle_generate(runtime, base_messages, context, generator, *args, **kwargs)
-        except (FenceReopenError, RuntimeError) as exc:
+        except RuntimeError as exc:
             crash_context["error"] = str(exc)
             crash_context["error_type"] = type(exc).__name__
             crash_context["traceback"] = traceback.format_exc()
@@ -106,7 +108,7 @@ def main() -> None:
         crash_context["step"] = runtime.state.step
         crash_context["prefix_len"] = len(runtime.state.prefix)
         crash_context["prefix_tail_500"] = runtime.state.prefix[-500:]
-        crash_context["assistant_prefix_fence_state"] = runtime.assistant_prefix.fence_state.value
+        crash_context["assistant_prefix_region_state"] = runtime.assistant_prefix.region_state.value
         crash_context["assistant_prefix_code_tail_300"] = runtime.assistant_prefix.code[-300:]
         crash_context["extractor_state"] = _serialize_extractor_state(runtime.extractor_state)
         crash_context["repair_base_prefix_len"] = (
@@ -119,7 +121,7 @@ def main() -> None:
 
         try:
             return original_handle_feedback(runtime, op, base_messages, context, generator, *args, **kwargs)
-        except (FenceReopenError, RuntimeError) as exc:
+        except RuntimeError as exc:
             crash_context["error"] = str(exc)
             crash_context["error_type"] = type(exc).__name__
             crash_context["traceback"] = traceback.format_exc()
@@ -135,7 +137,7 @@ def main() -> None:
     from c_rust.oracles import FunctionOracle, RustcOracle, RustcProgramOracle
     from controller.adapters import GeneratorAdapter
     from controller.stop_criteria import DTVStoppingCriteria, RUST_PROFILE
-    from core.llm_output import FenceParser
+    from core.llm_output import WriteRegionParser
     from core.budget import Budget
     from controller.loop import run_dtv_loop
     from controller.policy import DefaultPolicy
@@ -144,13 +146,13 @@ def main() -> None:
     from rollback.manager import RollbackManager
     from core.types import TranslationSample
 
-    fence_parser = FenceParser(allowed_langs=("rust", "rs"))
+    write_region_parser = WriteRegionParser()
     generator = GeneratorAdapter(
         model_name=MODEL_NAME,
         stop_criteria_factory=lambda tok: [
-            DTVStoppingCriteria(tok, RUST_PROFILE, fence_parser=fence_parser)
+            DTVStoppingCriteria(tok, RUST_PROFILE, write_region_parser=write_region_parser)
         ],
-        fence_parser=fence_parser,
+        write_region_parser=write_region_parser,
     )
     print("Model loaded.")
 
@@ -185,7 +187,7 @@ def main() -> None:
             prompt_prefix=prompt,
         )
         print(f"\nCompleted without crash. Final prefix length: {len(final_prefix)}")
-    except (FenceReopenError, RuntimeError) as exc:
+    except RuntimeError as exc:
         print(f"\n{'='*80}")
         print(f"CRASH: {type(exc).__name__}: {exc}")
         print(f"{'='*80}")
@@ -198,7 +200,7 @@ def main() -> None:
         print(f"Trigger:       {crash_context.get('trigger')}")
         print(f"Step:          {crash_context.get('step')}")
         print(f"Prefix len:    {crash_context.get('prefix_len')}")
-        print(f"Fence state:   {crash_context.get('assistant_prefix_fence_state')}")
+        print(f"Region state:  {crash_context.get('assistant_prefix_region_state')}")
         print(f"Extractor:     {crash_context.get('extractor_state')}")
         print(f"Num messages:  {len(crash_context.get('messages', []))}")
 
@@ -207,7 +209,7 @@ def main() -> None:
             role = msg["role"]
             if "content_rendered" in msg:
                 content = msg["content_rendered"]
-                print(f"\n[{role}] fence_state={msg['fence_state']} code_len={msg['code_len']}")
+                print(f"\n[{role}] region_state={msg['region_state']} code_len={msg['code_len']}")
                 if len(content) > 2000:
                     print(f"  (first 500 chars):\n{content[:500]}")
                     print(f"  ...<{len(content) - 1000} chars omitted>...")
