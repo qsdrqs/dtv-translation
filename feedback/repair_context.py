@@ -23,7 +23,7 @@ class RepairContext:
         scope_filter: Granularity | None = None,
         parser_error_context: str | None = None,
     ) -> RepairContext:
-        snippet = bad_snippet.strip() or "(empty)"
+        snippet = _normalize_failed_snippet(bad_snippet)
         parser_context = parser_error_context.strip() if parser_error_context else None
         outputs = feedback_state.active_snapshot()
         if scope_filter is not None:
@@ -34,3 +34,9 @@ class RepairContext:
             outputs=outputs,
             parser_error_context=parser_context,
         )
+
+
+def _normalize_failed_snippet(bad_snippet: str) -> str:
+    if not bad_snippet.strip():
+        return "(empty)"
+    return bad_snippet.strip("\n")

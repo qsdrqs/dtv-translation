@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from core.types import Diagnostic, Granularity
+from core.types import Diagnostic
 from feedback.feedback import FeedbackState
 from feedback.repair_context import RepairContext
 
@@ -27,22 +28,37 @@ def render_repair_feedback(
     format_config: RepairFeedbackFormatConfig | None = None,
 ) -> str:
     config = format_config or RepairFeedbackFormatConfig()
+    # Keep the feedback block anchored at the current generation position,
+    # which is best approximated by the first non-empty snippet line.
+    block_indent = ""
+    for line in repair_context.failed_snippet.splitlines():
+        if line.strip():
+            block_indent = line[: len(line) - len(line.lstrip(" \t"))]
+            break
     diagnostic_blocks = tuple(_iter_diagnostic_blocks(repair_context))
     diagnostics_text = "\n".join(diagnostic_blocks) if diagnostic_blocks else "(no diagnostics)"
     sections: list[str] = []
     if config.include_failed_snippet:
+        # Normalize the displayed snippet separately so mixed-indent snippets keep
+        # their internal shape without inheriting the block indent twice.
+        snippet_indent = _shared_leading_indent(repair_context.failed_snippet)
+        failed_snippet = _strip_leading_indent(repair_context.failed_snippet, snippet_indent)
         sections.append(
             f"""failed snippet:
-{repair_context.failed_snippet}"""
+{failed_snippet}"""
         )
     sections.append(
         f"""diagnostics:
 {diagnostics_text}"""
     )
     body = "\n\n".join(sections)
-    return f"""/* repair feedback:
+    block = f"""/* repair feedback:
 {body}
 */"""
+    # Indent every non-empty line to match the current generation position.
+    if block_indent:
+        block = "\n".join(f"{block_indent}{line}" if line else "" for line in block.split("\n"))
+    return block
 
 
 def _iter_diagnostic_blocks(repair_context: RepairContext) -> Iterable[str]:
@@ -61,7 +77,7 @@ message: {diag.message}{hints_block}"""
 
 
 def _build_header(oracle_name: str, diag: Diagnostic) -> str:
-    hint_scope = _format_scope(diag.hint_scope)
+    hint_scope = diag.hint_scope.value if diag.hint_scope is not None else None
     primary = next((s for s in diag.spans if s.is_primary), None)
     fields = [
         f"oracle={oracle_name}",
@@ -73,7 +89,31 @@ def _build_header(oracle_name: str, diag: Diagnostic) -> str:
     return " ".join(fields)
 
 
-def _format_scope(scope: Granularity | None) -> str | None:
-    if scope is None:
-        return None
-    return scope.value
+def _shared_leading_indent(snippet: str) -> str:
+    indent: str | None = None
+    for line in snippet.splitlines():
+        if not line.strip():
+            continue
+        line_indent = line[: len(line) - len(line.lstrip(" \t"))]
+        if indent is None:
+            indent = line_indent
+            continue
+        # os.path.commonprefix does plain character-by-character comparison
+        # with no path-specific logic, so it is safe for whitespace-only strings.
+        indent = os.path.commonprefix([indent, line_indent])
+        if not indent:
+            return ""
+    return indent or ""
+
+
+def _strip_leading_indent(block: str, indent: str) -> str:
+    if not indent:
+        return block
+    lines: list[str] = []
+    for line in block.split("\n"):
+        if line.startswith(indent):
+            lines.append(line[len(indent) :])
+            continue
+        lines.append(line)
+    return "\n".join(lines)
+

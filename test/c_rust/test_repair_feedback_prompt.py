@@ -482,6 +482,100 @@ message: test failure
 */"""
 
 
+def test_build_repair_feedback_preserves_snippet_indentation() -> None:
+    fail_output = OracleOutput(
+        oracle_name="function_diff",
+        verdict=Verdict.FAIL,
+        diagnostics=(
+            Diagnostic(
+                message="test failure",
+                severity="error",
+            ),
+        ),
+        rollback_scope=Granularity.STMT,
+    )
+    feedback_state = FeedbackState()
+    feedback_state.on_verify([fail_output], selected_scope=Granularity.STMT)
+
+    prompt = build_repair_feedback(
+        feedback_state,
+        "    let result = buggy_call();\n    return result;\n",
+    )
+
+    assert prompt == """    /* repair feedback:
+    failed snippet:
+    let result = buggy_call();
+    return result;
+
+    diagnostics:
+    - oracle=function_diff severity=error
+    message: test failure
+    */"""
+
+
+def test_build_repair_feedback_preserves_relative_nested_indentation() -> None:
+    fail_output = OracleOutput(
+        oracle_name="function_diff",
+        verdict=Verdict.FAIL,
+        diagnostics=(
+            Diagnostic(
+                message="test failure",
+                severity="error",
+            ),
+        ),
+        rollback_scope=Granularity.STMT,
+    )
+    feedback_state = FeedbackState()
+    feedback_state.on_verify([fail_output], selected_scope=Granularity.STMT)
+
+    prompt = build_repair_feedback(
+        feedback_state,
+        "    if cond {\n        return buggy_call();\n    }\n",
+    )
+
+    assert prompt == """    /* repair feedback:
+    failed snippet:
+    if cond {
+        return buggy_call();
+    }
+
+    diagnostics:
+    - oracle=function_diff severity=error
+    message: test failure
+    */"""
+
+
+def test_build_repair_feedback_uses_shared_indent_for_uneven_lines() -> None:
+    fail_output = OracleOutput(
+        oracle_name="function_diff",
+        verdict=Verdict.FAIL,
+        diagnostics=(
+            Diagnostic(
+                message="test failure",
+                severity="error",
+            ),
+        ),
+        rollback_scope=Granularity.STMT,
+    )
+    feedback_state = FeedbackState()
+    feedback_state.on_verify([fail_output], selected_scope=Granularity.STMT)
+
+    prompt = build_repair_feedback(
+        feedback_state,
+        "    expr1();\n  expr2();\n",
+    )
+
+    assert prompt == """    /* repair feedback:
+    failed snippet:
+      expr1();
+    expr2();
+
+    diagnostics:
+    - oracle=function_diff severity=error
+    message: test failure
+    */"""
+
+
 def test_feedback_preserves_deterministic_oracle_and_diagnostic_order() -> None:
     from core.types import Diagnostic, Granularity
 
