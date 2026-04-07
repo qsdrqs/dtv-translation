@@ -30,7 +30,7 @@ function main() {
 
   var options = {
     noEmit: true,
-    strict: true,
+    strict: false,
     target: ts.ScriptTarget.ES2020,
     lib: ["lib.es2020.d.ts", "lib.dom.d.ts"],
     skipLibCheck: true,

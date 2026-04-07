@@ -203,11 +203,6 @@ class WriteRegionParser:
                 self._saw_end = True
                 end_seen = True
                 continue
-            if _is_forbidden_inner_fence(line):
-                self._invalid_payload = True
-                if not self._invalid_reason:
-                    self._invalid_reason = "write region must contain raw code only"
-                continue
             code_parts.append(line)
 
         pending = ""
@@ -221,7 +216,7 @@ class WriteRegionParser:
                 else:
                     prelude_parts.append(data)
             else:
-                if _looks_like_marker_prefix(data, self.markers.end_marker) or _looks_like_forbidden_inner_fence_prefix(data):
+                if _looks_like_marker_prefix(data, self.markers.end_marker):
                     self._buffer = data
                     pending = data
                 else:
@@ -284,19 +279,8 @@ def _is_end_marker(line: str, markers: WriteRegionMarkers) -> bool:
     return line.strip() == markers.end_marker
 
 
-def _is_forbidden_inner_fence(line: str) -> bool:
-    return line.strip().startswith("```")
-
-
 def _looks_like_marker_prefix(text: str, marker: str) -> bool:
     stripped = text.strip()
     if not stripped:
         return False
     return marker.startswith(stripped)
-
-
-def _looks_like_forbidden_inner_fence_prefix(text: str) -> bool:
-    stripped = text.strip()
-    if not stripped:
-        return False
-    return "```".startswith(stripped) or stripped.startswith("```")

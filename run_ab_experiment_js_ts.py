@@ -27,26 +27,35 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
-import tempfile
 import time
+from collections.abc import Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Callable, Protocol, cast
 
 from controller.adapters import GeneratorAdapter
 from controller.loop import render_write_region_contract, run_dtv_loop
 from controller.policy import DefaultPolicy, DefaultPolicyConfig
 from controller.stop_criteria import DTVStoppingCriteria, TS_PROFILE
 from core.budget import Budget
-from core.llm_output import DEFAULT_WRITE_REGION_MARKERS, WriteRegionMarkers, WriteRegionParser
+from core.interfaces import Oracle
+from core.llm_output import (
+    AssistantContent,
+    DEFAULT_WRITE_REGION_MARKERS,
+    WriteRegionMarkers,
+    WriteRegionParser,
+)
 from core.types import (
     Action,
+    Artifact,
+    ControllerState,
     GenerateContext,
     GenerationChannel,
     GenerateMessage,
     Granularity,
+    OracleContext,
+    OracleOutput,
     RenderStatus,
     TraceEvent,
     TranslationSample,
@@ -55,15 +64,14 @@ from core.types import (
 from feedback.feedback import FeedbackState
 from feedback.formatter import RepairFeedbackFormatConfig
 from js_ts.feedback import TS_FEEDBACK_LANG
-from js_ts.oracles import EslintOracle, TscOracle
-from js_ts.oracles.compiler_oracle.tsc_driver import _find_type_roots
+from js_ts.oracles import EslintOracle, TscOracle, TscProgramOracle
 from js_ts.render import JSToTSRenderer
 from rollback.manager import RollbackManager
 from transformers import PreTrainedTokenizerBase, StoppingCriteriaList
 
 # -- Constants -----------------------------------------------------------------
 
-MODEL_NAME = "Qwen/Qwen3.5-4B"
+MODEL_NAME = "Qwen/Qwen3-4B-Instruct-2507"
 OUTPUT_TOKEN_CAP = 20480
 TOKEN_BUDGET = OUTPUT_TOKEN_CAP
 MAX_NEW_LENGTH = 16384
@@ -113,7 +121,7 @@ class RunResult:
     trace_log: list[dict] | None = None
 
 
-def _all_pass(outputs: tuple) -> bool:
+def _all_pass(outputs: Sequence[OracleOutput]) -> bool:
     """Same logic as the policy: at least one PASS and no FAIL."""
     saw_pass = False
     for output in outputs:
@@ -124,7 +132,7 @@ def _all_pass(outputs: tuple) -> bool:
     return saw_pass
 
 
-def _trace_verdict(oracle_outputs: tuple) -> str | None:
+def _trace_verdict(oracle_outputs: Sequence[OracleOutput]) -> str | None:
     if not oracle_outputs:
         return None
     return "pass" if _all_pass(oracle_outputs) else "fail"
@@ -180,6 +188,37 @@ def _build_prompt(
     return f"{raw_prompt.rstrip()}\n\n{contract}"
 
 
+def _wrap_in_write_region(code: str, markers: WriteRegionMarkers) -> str:
+    return f"{markers.begin_marker}\n{code}\n{markers.end_marker}"
+
+
+def _dtv_terminated_without_write_region(trace: list[TraceEvent], final_prefix: str) -> bool:
+    if final_prefix:
+        return False
+    for event in reversed(trace):
+        if event.action == Action.GENERATE:
+            return event.stop_reason is not None and event.stop_reason.kind == "no_write_region_eos"
+    return False
+
+
+def _normalize_open_assistant_message(
+    messages: list[GenerateMessage],
+    markers: WriteRegionMarkers,
+) -> list[GenerateMessage]:
+    normalized = list(messages)
+    for idx in range(len(normalized) - 1, -1, -1):
+        message = normalized[idx]
+        if message.role != "assistant" or message.stop:
+            continue
+        normalized[idx] = GenerateMessage(
+            role="assistant",
+            content=AssistantContent.empty(markers=markers),
+            stop=False,
+        )
+        break
+    return normalized
+
+
 def _extract_write_region_code(raw_text: str, markers: WriteRegionMarkers) -> str | None:
     begin_idx = raw_text.find(markers.begin_marker)
     if begin_idx < 0:
@@ -225,57 +264,56 @@ def _generate_full_round(
     return result.delta_text, result.delta_tokens
 
 
-def _compile_ts_code(ts_code: str) -> tuple[bool, str]:
-    with tempfile.TemporaryDirectory(prefix="naive-tsc-") as tmpdir:
-        ts_file = Path(tmpdir) / "output.ts"
-        ts_file.write_text(ts_code, encoding="utf-8")
-        type_roots = _find_type_roots()
-        type_roots_args = ["--typeRoots", type_roots] if type_roots else []
-        tsc_result = subprocess.run(
-            [
-                "tsc",
-                "--pretty",
-                "false",
-                "--strict",
-                "--noEmit",
-                "--target",
-                "ES2020",
-                "--lib",
-                "ES2020,DOM",
-                "--skipLibCheck",
-                *type_roots_args,
-                str(ts_file),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10.0,
-            check=False,
-        )
-
-    outputs = [part for part in (tsc_result.stderr, tsc_result.stdout) if part]
-    compiler_output = "\n".join(outputs).strip()
-    compiles = tsc_result.returncode == 0
-    return compiles, compiler_output
+def _run_oracles(
+    oracles: list[Oracle],
+    ts_code: str,
+    sample: TranslationSample,
+) -> list[OracleOutput]:
+    state = ControllerState(prefix=ts_code)
+    artifact = Artifact(code=ts_code, sample=sample)
+    context = OracleContext(sample=sample, artifact=artifact)
+    return [oracle.run(state, artifact, context) for oracle in oracles]
 
 
-def _format_compile_feedback(compiler_output: str, max_lines: int = 20) -> str:
-    lines = [line.strip() for line in compiler_output.splitlines() if line.strip()]
+def _format_oracle_feedback(outputs: list[OracleOutput], max_lines: int = 20) -> str:
+    lines: list[str] = []
+    for output in outputs:
+        if output.verdict != Verdict.FAIL:
+            continue
+        if not output.diagnostics:
+            lines.append(f"[{output.oracle_name}] verification failed")
+            continue
+        for diagnostic in output.diagnostics:
+            primary = next((span for span in diagnostic.spans if span.is_primary), None)
+            location = f" line {primary.line}:" if primary is not None else ""
+            code_suffix = f" code={diagnostic.error_code}" if diagnostic.error_code else ""
+            lines.append(f"[{output.oracle_name}]{location}{code_suffix} {diagnostic.message}".strip())
     if not lines:
-        return "- tsc did not emit diagnostics"
+        return "- verification failed without diagnostics"
     shown = lines[:max_lines]
     if len(lines) > max_lines:
         shown.append(f"... {len(lines) - max_lines} more lines omitted")
     return "\n".join(f"- {line}" for line in shown)
 
 
-def _build_repair_prompt(compiler_output: str, markers: WriteRegionMarkers) -> str:
-    diagnostics_text = _format_compile_feedback(compiler_output)
+def _verify_program(
+    ts_code: str,
+    sample: TranslationSample,
+    oracles: list[Oracle],
+) -> tuple[bool, str, list[OracleOutput]]:
+    outputs = _run_oracles(oracles, ts_code, sample)
+    passed = _all_pass(outputs)
+    feedback = _format_oracle_feedback(outputs)
+    return passed, feedback, outputs
+
+
+def _build_repair_prompt(feedback_text: str, markers: WriteRegionMarkers) -> str:
     return (
-        "Your previous TypeScript translation failed to compile.\n"
-        "Fix the compile errors and return a full corrected TypeScript program.\n"
+        "Your previous TypeScript translation failed verification.\n"
+        "Fix the verification errors and return a full corrected TypeScript program.\n"
         f"Output the corrected code inside {markers.begin_marker} ... {markers.end_marker} markers.\n"
         "Do not use markdown fences inside the write region.\n\n"
-        f"Compiler diagnostics:\n{diagnostics_text}\n"
+        f"Diagnostics:\n{feedback_text}\n"
     )
 
 
@@ -294,9 +332,13 @@ def load_sample(case_dir: Path) -> TranslationSample:
     return TranslationSample(source_code=js_source, source_lang="js", test_cases=[])
 
 
-def evaluate_final_ts_code(ts_code: str) -> tuple[bool, int, int]:
-    compiles, _ = _compile_ts_code(ts_code)
-    return compiles, 0, 0
+def evaluate_final_ts_code(
+    ts_code: str,
+    sample: TranslationSample,
+    oracles: list[Oracle],
+) -> tuple[bool, int, int]:
+    passed, _, _ = _verify_program(ts_code, sample, oracles)
+    return passed, 0, 0
 
 
 # -- Shared program-level eval + reprompt loop ---------------------------------
@@ -306,15 +348,114 @@ class ProgramEvalLoopResult:
     final_code: str
     compiles: bool
     rounds: int
+    total_steps: int
+    verify_count: int
+    feedback_count: int
+    rollback_count: int
+    commit_count: int
     trace: list[dict]
+
+
+@dataclass
+class RegenerationRoundResult:
+    strategy: str
+    raw_output: str
+    delta_tokens: int
+    total_steps: int
+    verify_count: int
+    feedback_count: int
+    rollback_count: int
+    commit_count: int
+    trace_log: list[dict]
+
+
+def _make_naive_regenerator(generator: GeneratorAdapter) -> Callable[[list[GenerateMessage], Budget], RegenerationRoundResult]:
+    def regenerate_round(
+        messages: list[GenerateMessage],
+        budget: Budget,
+    ) -> RegenerationRoundResult:
+        with _temporary_no_stopping_criteria(generator):
+            raw_output, delta_tokens = _generate_full_round(generator, messages, budget)
+        return RegenerationRoundResult(
+            strategy="naive",
+            raw_output=raw_output,
+            delta_tokens=delta_tokens,
+            total_steps=1,
+            verify_count=0,
+            feedback_count=0,
+            rollback_count=0,
+            commit_count=0,
+            trace_log=[{
+                "action": "GENERATE",
+                "tokens_used": budget.gen_tokens_used,
+                "delta_tokens": delta_tokens,
+            }],
+        )
+
+    return regenerate_round
+
+
+def _make_dtv_regenerator(
+    generator: GeneratorAdapter,
+    renderer_factory: Callable[[], JSToTSRenderer],
+    oracle_factory: Callable[[], list[Oracle]],
+    config: DefaultPolicyConfig,
+    markers: WriteRegionMarkers,
+    max_steps: int,
+    max_new_length: int,
+) -> Callable[[list[GenerateMessage], Budget], RegenerationRoundResult]:
+    def regenerate_round(
+        messages: list[GenerateMessage],
+        budget: Budget,
+    ) -> RegenerationRoundResult:
+        feedback_state = FeedbackState()
+        rollback_manager = RollbackManager()
+        policy = DefaultPolicy(config)
+        generator.reset_output_extractor()
+        normalized_messages = _normalize_open_assistant_message(messages, markers)
+        tokens_before = budget.gen_tokens_used
+        final_prefix, trace = run_dtv_loop(
+            generator=generator,
+            renderer=renderer_factory(),
+            oracles=oracle_factory(),
+            budget=budget,
+            feedback_state=feedback_state,
+            rollback_manager=rollback_manager,
+            policy=policy,
+            feedback_lang_config=TS_FEEDBACK_LANG,
+            repair_feedback_format_config=RepairFeedbackFormatConfig(include_failed_snippet=True),
+            max_steps=max_steps,
+            max_new_length=max_new_length,
+            prompt_prefix="",
+            inject_write_region_contract=False,
+            initial_messages=normalized_messages,
+        )
+        delta_tokens = budget.gen_tokens_used - tokens_before
+        dtv_metrics = _extract_dtv_metrics(trace)
+        raw_output = "" if _dtv_terminated_without_write_region(trace, final_prefix) else _wrap_in_write_region(final_prefix, markers)
+        return RegenerationRoundResult(
+            strategy="dtv",
+            raw_output=raw_output,
+            delta_tokens=delta_tokens,
+            total_steps=dtv_metrics["total_steps"],
+            verify_count=dtv_metrics["verify_count"],
+            feedback_count=dtv_metrics["feedback_count"],
+            rollback_count=dtv_metrics["rollback_count"],
+            commit_count=dtv_metrics["commit_count"],
+            trace_log=dtv_metrics["trace_log"],
+        )
+
+    return regenerate_round
 
 
 def program_eval_loop(
     initial_code: str | None,
     prompt: str,
-    generator: GeneratorAdapter,
     budget: Budget,
     markers: WriteRegionMarkers,
+    sample: TranslationSample,
+    program_oracles: list[Oracle],
+    regenerate_round: Callable[[list[GenerateMessage], Budget], RegenerationRoundResult],
     last_raw_output: str = "",
     max_rounds: int | None = MAX_STEPS,
 ) -> ProgramEvalLoopResult:
@@ -322,6 +463,11 @@ def program_eval_loop(
     last_raw = last_raw_output
     trace: list[dict] = []
     rounds = 0
+    total_steps = 0
+    verify_count = 0
+    feedback_count = 0
+    rollback_count = 0
+    commit_count = 0
 
     while max_rounds is None or rounds < max_rounds:
         if _remaining_tokens(budget) <= 0:
@@ -331,11 +477,16 @@ def program_eval_loop(
 
         if code is None:
             trace.append({
+                "phase": "outer",
                 "round": rounds,
+                "action": "MISSING_MARKERS",
                 "tokens_used": budget.gen_tokens_used,
                 "compiles": False,
                 "missing_markers": True,
             })
+            total_steps += 1
+            feedback_count += 1
+            rollback_count += 1
             if _remaining_tokens(budget) <= 0:
                 break
             feedback = _build_missing_markers_prompt(markers)
@@ -345,32 +496,54 @@ def program_eval_loop(
                 GenerateMessage(role="user", content=feedback, stop=True),
                 GenerateMessage(role="assistant", content="", stop=False),
             ]
-            with _temporary_no_stopping_criteria(generator):
-                raw_output, delta_tokens = _generate_full_round(
-                    generator, messages, budget,
-                )
-            if delta_tokens <= 0:
+            round_result = regenerate_round(messages, budget)
+            total_steps += round_result.total_steps
+            verify_count += round_result.verify_count
+            feedback_count += round_result.feedback_count
+            rollback_count += round_result.rollback_count
+            commit_count += round_result.commit_count
+            trace.extend({
+                **entry,
+                "phase": "outer_generate",
+                "outer_round": rounds,
+                "strategy": round_result.strategy,
+            } for entry in round_result.trace_log)
+            if round_result.delta_tokens <= 0:
                 break
-            last_raw = raw_output
-            code = _extract_write_region_code(raw_output, markers)
+            last_raw = round_result.raw_output
+            code = _extract_write_region_code(round_result.raw_output, markers)
             continue
 
-        compiles, compiler_output = _compile_ts_code(code)
+        passed, feedback_text, _ = _verify_program(code, sample, program_oracles)
         trace.append({
+            "phase": "outer",
             "round": rounds,
+            "action": "VERIFY_PROGRAM",
             "tokens_used": budget.gen_tokens_used,
-            "compiles": compiles,
+            "compiles": passed,
         })
+        total_steps += 1
+        verify_count += 1
 
-        if compiles:
+        if passed:
             return ProgramEvalLoopResult(
-                final_code=code, compiles=True, rounds=rounds, trace=trace,
+                final_code=code,
+                compiles=True,
+                rounds=rounds,
+                total_steps=total_steps,
+                verify_count=verify_count,
+                feedback_count=feedback_count,
+                rollback_count=rollback_count,
+                commit_count=commit_count,
+                trace=trace,
             )
 
         if _remaining_tokens(budget) <= 0:
             break
 
-        repair_prompt = _build_repair_prompt(compiler_output, markers)
+        feedback_count += 1
+        rollback_count += 1
+        repair_prompt = _build_repair_prompt(feedback_text, markers)
         messages = [
             GenerateMessage(role="user", content=prompt, stop=True),
             GenerateMessage(
@@ -382,16 +555,34 @@ def program_eval_loop(
             GenerateMessage(role="assistant", content="", stop=False),
         ]
 
-        with _temporary_no_stopping_criteria(generator):
-            raw_output, delta_tokens = _generate_full_round(generator, messages, budget)
-        if delta_tokens <= 0:
+        round_result = regenerate_round(messages, budget)
+        total_steps += round_result.total_steps
+        verify_count += round_result.verify_count
+        feedback_count += round_result.feedback_count
+        rollback_count += round_result.rollback_count
+        commit_count += round_result.commit_count
+        trace.extend({
+            **entry,
+            "phase": "outer_generate",
+            "outer_round": rounds,
+            "strategy": round_result.strategy,
+        } for entry in round_result.trace_log)
+        if round_result.delta_tokens <= 0:
             break
-        last_raw = raw_output
-        code = _extract_write_region_code(raw_output, markers)
+        last_raw = round_result.raw_output
+        code = _extract_write_region_code(round_result.raw_output, markers)
 
     final_code = code if code is not None else ""
     return ProgramEvalLoopResult(
-        final_code=final_code, compiles=False, rounds=rounds, trace=trace,
+        final_code=final_code,
+        compiles=False,
+        rounds=rounds,
+        total_steps=total_steps,
+        verify_count=verify_count,
+        feedback_count=feedback_count,
+        rollback_count=rollback_count,
+        commit_count=commit_count,
+        trace=trace,
     )
 
 
@@ -419,11 +610,14 @@ def run_single(
 
     prompt = _build_prompt(js_source, PROMPT_PREFIX, "TypeScript", markers)
     budget = Budget(gen_tokens_budget=effective_budget)
-    renderer = JSToTSRenderer(sample=sample)
+    renderer_factory = lambda: JSToTSRenderer(sample=sample)
+    oracle_factory = lambda: cast(list[Oracle], [TscOracle(), EslintOracle()])
+    program_oracles = cast(list[Oracle], [TscProgramOracle(), EslintOracle()])
 
     t0 = time.time()
 
     if config_name == "naive":
+        regenerate_round = _make_naive_regenerator(generator)
         messages = [
             GenerateMessage(role="user", content=prompt, stop=True),
             GenerateMessage(role="assistant", content="", stop=False),
@@ -439,7 +633,17 @@ def run_single(
         gen_commit = 0
         gen_trace: list[dict] = []
     else:
-        oracles = [TscOracle(), EslintOracle()]
+        regenerate_round = _make_dtv_regenerator(
+            generator=generator,
+            renderer_factory=renderer_factory,
+            oracle_factory=oracle_factory,
+            config=config,
+            markers=markers,
+            max_steps=MAX_STEPS,
+            max_new_length=MAX_NEW_LENGTH,
+        )
+        renderer = renderer_factory()
+        oracles = oracle_factory()
         feedback_state = FeedbackState()
         rollback_manager = RollbackManager()
         policy = DefaultPolicy(config)
@@ -468,19 +672,24 @@ def run_single(
         gen_commit = dtv_metrics["commit_count"]
         gen_trace = dtv_metrics["trace_log"]
 
-        render_result = renderer.try_render(final_prefix)
-        if render_result.status == RenderStatus.OK and render_result.artifact is not None:
-            initial_code = render_result.artifact.code
+        if _dtv_terminated_without_write_region(trace, final_prefix):
+            initial_code = None
         else:
-            initial_code = final_prefix
+            render_result = renderer.try_render(final_prefix)
+            if render_result.status == RenderStatus.OK and render_result.artifact is not None:
+                initial_code = render_result.artifact.code
+            else:
+                initial_code = final_prefix
         last_raw_output = ""
 
     eval_result = program_eval_loop(
         initial_code=initial_code,
         prompt=prompt,
-        generator=generator,
         budget=budget,
         markers=markers,
+        sample=sample,
+        program_oracles=program_oracles,
+        regenerate_round=regenerate_round,
         last_raw_output=last_raw_output,
     )
 
@@ -488,10 +697,11 @@ def run_single(
 
     compiles, test_passed, test_total = evaluate_final_ts_code(
         ts_code=eval_result.final_code,
+        sample=sample,
+        oracles=program_oracles,
     )
 
-    outer_feedbacks = max(0, eval_result.rounds - 1)
-    combined_trace = gen_trace + [{"phase": "outer", **e} for e in eval_result.trace]
+    combined_trace = gen_trace + eval_result.trace
 
     if compiles:
         final_verdict = "pass"
@@ -503,12 +713,12 @@ def run_single(
         config=config_name,
         final_verdict=final_verdict,
         total_tokens=budget.gen_tokens_used,
-        total_steps=gen_steps + eval_result.rounds,
+        total_steps=gen_steps + eval_result.total_steps,
         elapsed_s=round(elapsed, 1),
-        verify_count=gen_verify + eval_result.rounds,
-        feedback_count=gen_feedback + outer_feedbacks,
-        rollback_count=gen_rollback + outer_feedbacks,
-        commit_count=gen_commit,
+        verify_count=gen_verify + eval_result.verify_count,
+        feedback_count=gen_feedback + eval_result.feedback_count,
+        rollback_count=gen_rollback + eval_result.rollback_count,
+        commit_count=gen_commit + eval_result.commit_count,
         compiles=compiles,
         test_passed=test_passed,
         test_total=test_total,

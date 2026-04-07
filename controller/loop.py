@@ -1135,6 +1135,7 @@ def run_dtv_loop(
     oracle_runner: OracleRunner | None = None,
     write_region_markers: WriteRegionMarkers = DEFAULT_WRITE_REGION_MARKERS,
     inject_write_region_contract: bool = True,
+    initial_messages: Sequence[GenerateMessage] | None = None,
 ) -> tuple[str, list[TraceEvent]]:
     """
     State machine (MVP):
@@ -1156,16 +1157,27 @@ def run_dtv_loop(
     runtime.extractor_state = generator.capture_output_extractor_state()
     trace: list[TraceEvent] = []
 
-    base_messages: list[GenerateMessage] = []
-    if inject_write_region_contract:
-        contract_prompt = render_write_region_contract(feedback_lang_config.name, write_region_markers)
-        user_prompt = contract_prompt if not prompt_prefix else f"{prompt_prefix.rstrip()}\n\n{contract_prompt}"
+    if initial_messages is not None:
+        if prompt_prefix:
+            raise ValueError("prompt_prefix must be empty when initial_messages are provided")
+        if inject_write_region_contract:
+            raise ValueError(
+                "inject_write_region_contract must be False when initial_messages are provided",
+            )
+        base_messages = list(initial_messages)
+        if not base_messages:
+            raise ValueError("initial_messages must not be empty")
     else:
-        user_prompt = prompt_prefix
-    base_messages.append(GenerateMessage(role="user", content=user_prompt, stop=True))
-    base_messages.append(
-        GenerateMessage(role="assistant", content=AssistantContent.empty(markers=write_region_markers), stop=False)
-    )
+        base_messages = []
+        if inject_write_region_contract:
+            contract_prompt = render_write_region_contract(feedback_lang_config.name, write_region_markers)
+            user_prompt = contract_prompt if not prompt_prefix else f"{prompt_prefix.rstrip()}\n\n{contract_prompt}"
+        else:
+            user_prompt = prompt_prefix
+        base_messages.append(GenerateMessage(role="user", content=user_prompt, stop=True))
+        base_messages.append(
+            GenerateMessage(role="assistant", content=AssistantContent.empty(markers=write_region_markers), stop=False)
+        )
     context = GenerateContext(messages=base_messages, steps=0, max_new_length=max_new_length)
 
     while max_steps is None or runtime.state.step < max_steps:

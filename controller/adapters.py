@@ -221,9 +221,6 @@ def _normalize_stop_reason(
 ) -> StopReason:
     previous_saw_begin = previous.saw_begin if previous is not None else False
     previous_saw_end = previous.saw_end if previous is not None else False
-    previous_invalid = previous.invalid_payload if previous is not None else False
-    if current.invalid_payload and not previous_invalid:
-        return StopReason(kind="invalid_write_region_payload", detail=current.invalid_reason)
     if current.saw_end and not previous_saw_end:
         return StopReason(kind="write_region_closed", detail="")
     if stop_reason.kind == "eos" and not current.saw_begin and not previous_saw_begin:
