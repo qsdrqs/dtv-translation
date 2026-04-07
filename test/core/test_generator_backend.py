@@ -5,6 +5,12 @@ from core.qwen_generator_backend import QwenGeneratorBackend
 from core.types import GenerateContext, GenerateMessage
 
 
+def _make_backend(*, enable_thinking: bool | None = None) -> QwenGeneratorBackend:
+    backend = QwenGeneratorBackend.__new__(QwenGeneratorBackend)
+    backend.enable_thinking = enable_thinking
+    return backend
+
+
 def test_infer_stop_reason_eos_precedence() -> None:
     reason = infer_stop_reason("let x = 1;", delta_tokens=1, max_new_length=1, eos_reached=True)
     assert reason.kind == "eos"
@@ -32,7 +38,7 @@ def test_infer_stop_reason_unknown() -> None:
 
 
 def test_build_prompt_trailing_assistant_no_stop() -> None:
-    backend = QwenGeneratorBackend.__new__(QwenGeneratorBackend)
+    backend = _make_backend()
     context = GenerateContext(
         messages=(
             GenerateMessage(role="user", content="hello", stop=True),
@@ -46,7 +52,7 @@ def test_build_prompt_trailing_assistant_no_stop() -> None:
 
 
 def test_build_prompt_trailing_assistant_with_stop() -> None:
-    backend = QwenGeneratorBackend.__new__(QwenGeneratorBackend)
+    backend = _make_backend()
     context = GenerateContext(
         messages=(
             GenerateMessage(role="user", content="hello", stop=True),
@@ -60,7 +66,7 @@ def test_build_prompt_trailing_assistant_with_stop() -> None:
 
 
 def test_build_prompt_trailing_empty_assistant_no_stop() -> None:
-    backend = QwenGeneratorBackend.__new__(QwenGeneratorBackend)
+    backend = _make_backend()
     context = GenerateContext(messages=(
         GenerateMessage(role="user", content="hello", stop=True),
         GenerateMessage(role="assistant", content="", stop=False),
@@ -72,9 +78,66 @@ def test_build_prompt_trailing_empty_assistant_no_stop() -> None:
 
 
 def test_build_prompt_user_only() -> None:
-    backend = QwenGeneratorBackend.__new__(QwenGeneratorBackend)
+    backend = _make_backend()
     context = GenerateContext(messages=(GenerateMessage(role="user", content="hello", stop=True),))
 
     prompt = backend._build_prompt(context)
 
     assert prompt == "<|im_start|>user\nhello\n<|im_end|>"
+
+
+def test_build_prompt_thinking_enabled_empty_assistant() -> None:
+    backend = _make_backend(enable_thinking=True)
+    context = GenerateContext(messages=(
+        GenerateMessage(role="user", content="hello", stop=True),
+        GenerateMessage(role="assistant", content="", stop=False),
+    ))
+
+    prompt = backend._build_prompt(context)
+
+    assert prompt == (
+        "<|im_start|>user\nhello\n<|im_end|>\n"
+        "<|im_start|>assistant\n<think>\n"
+    )
+
+
+def test_build_prompt_thinking_disabled_empty_assistant() -> None:
+    backend = _make_backend(enable_thinking=False)
+    context = GenerateContext(messages=(
+        GenerateMessage(role="user", content="hello", stop=True),
+        GenerateMessage(role="assistant", content="", stop=False),
+    ))
+
+    prompt = backend._build_prompt(context)
+
+    assert prompt == (
+        "<|im_start|>user\nhello\n<|im_end|>\n"
+        "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    )
+
+
+def test_build_prompt_thinking_enabled_nonempty_assistant_skips_prefix() -> None:
+    backend = _make_backend(enable_thinking=True)
+    context = GenerateContext(messages=(
+        GenerateMessage(role="user", content="hello", stop=True),
+        GenerateMessage(role="assistant", content="existing code", stop=False),
+    ))
+
+    prompt = backend._build_prompt(context)
+
+    assert prompt == (
+        "<|im_start|>user\nhello\n<|im_end|>\n"
+        "<|im_start|>assistant\nexisting code"
+    )
+
+
+def test_build_prompt_thinking_none_no_prefix() -> None:
+    backend = _make_backend(enable_thinking=None)
+    context = GenerateContext(messages=(
+        GenerateMessage(role="user", content="hello", stop=True),
+        GenerateMessage(role="assistant", content="", stop=False),
+    ))
+
+    prompt = backend._build_prompt(context)
+
+    assert prompt == "<|im_start|>user\nhello\n<|im_end|>\n<|im_start|>assistant\n"

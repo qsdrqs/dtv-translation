@@ -26,12 +26,14 @@ class QwenGeneratorBackend(GeneratorBackend):
         | None = None,
         do_sample: bool | None = None,
         temperature: float | None = None,
+        enable_thinking: bool | None = None,
     ) -> None:
         super().__init__(
             model_name=model_name,
             stop_criteria_factory=stop_criteria_factory,
             do_sample=do_sample,
             temperature=temperature,
+            enable_thinking=enable_thinking,
         )
         self.model_name = model_name
         use_cuda = torch.cuda.is_available()
@@ -64,8 +66,9 @@ class QwenGeneratorBackend(GeneratorBackend):
         if not context.messages:
             return ""
 
+        num_messages = len(context.messages)
         parts: list[str] = []
-        for msg in context.messages:
+        for idx, msg in enumerate(context.messages):
             if isinstance(msg, dict):
                 if "stop" not in msg:
                     raise ValueError("GenerateMessage requires explicit stop")
@@ -80,11 +83,25 @@ class QwenGeneratorBackend(GeneratorBackend):
                 content = msg.content
                 stop = msg.stop
 
-            content = self._render_content(content)
+            rendered = self._render_content(content)
 
-            segment = f"<|im_start|>{role}\n{content}"
+            segment = f"<|im_start|>{role}\n"
+            # Inject thinking prefix on the last open assistant turn
+            # when the content is still empty (initial generation prompt).
+            if (
+                self.enable_thinking is not None
+                and role == "assistant"
+                and not stop
+                and idx == num_messages - 1
+                and not rendered.strip()
+            ):
+                if self.enable_thinking:
+                    segment += "<think>\n"
+                else:
+                    segment += "<think>\n\n</think>\n\n"
+            segment += rendered
             if stop:
-                segment = f"{segment}\n<|im_end|>"
+                segment += "\n<|im_end|>"
             parts.append(segment)
         return "\n".join(parts)
 

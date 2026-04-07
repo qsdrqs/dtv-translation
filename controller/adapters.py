@@ -39,12 +39,14 @@ class GeneratorAdapter(Generator):
         backend_cls: type[GeneratorBackend] = QwenGeneratorBackend,
         do_sample: bool | None = None,
         temperature: float | None = None,
+        enable_thinking: bool | None = None,
     ) -> None:
         self.backend = backend_cls(
             model_name=model_name,
             stop_criteria_factory=stop_criteria_factory,
             do_sample=do_sample,
             temperature=temperature,
+            enable_thinking=enable_thinking,
         )
         self._write_region_parser = write_region_parser
         self._write_region_markers = (

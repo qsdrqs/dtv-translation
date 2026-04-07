@@ -25,7 +25,7 @@ from rollback.manager import RollbackManager
 MODEL_NAME = "Qwen/Qwen3-4B-Instruct-2507"
 TOKEN_BUDGET = 20480
 MAX_NEW_LENGTH = 1024
-PROMPT_PREFIX = "Translate the following JavaScript code into TypeScript with strict type annotations:"
+PROMPT_PREFIX = "Adding type annotations to the following JavaScript code to convert it to TypeScript. Only add type annotations, do not change the code structure or logic. If you are unsure about the type, use 'any'.\n\n"
 
 
 def _load_tests(path: Path) -> list[TestCase]:
@@ -155,6 +155,7 @@ def main() -> None:
             DTVStoppingCriteria(tok, TS_PROFILE, write_region_parser=write_region_parser)
         ],
         write_region_parser=write_region_parser,
+        enable_thinking=None,
     )
     print("Model loaded:", MODEL_NAME)
     renderer = JSToTSRenderer(sample=sample)
@@ -173,7 +174,7 @@ def main() -> None:
         rollback_manager=rollback_manager,
         policy=policy,
         feedback_lang_config=TS_FEEDBACK_LANG,
-        repair_feedback_format_config=RepairFeedbackFormatConfig(include_failed_snippet=True),
+        repair_feedback_format_config=RepairFeedbackFormatConfig(include_failed_snippet=False),
         max_steps=500,
         max_new_length=MAX_NEW_LENGTH,
         prompt_prefix=prompt,
