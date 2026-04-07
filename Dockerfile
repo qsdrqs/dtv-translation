@@ -13,6 +13,7 @@ RUN cd /opt/dtv-flake && \
     nix profile install --profile /nix/var/nix/profiles/dtv \
         --inputs-from . \
         nixpkgs#python3 \
+        nixpkgs#nodejs \
         nixpkgs#rustup \
         nixpkgs#uv \
         nixpkgs#tree-sitter \
@@ -48,7 +49,7 @@ RUN nix-collect-garbage -d
 
 # Verify
 RUN export LD_LIBRARY_PATH="$(cat /opt/gcc-lib-path):${LD_LIBRARY_PATH:-}" && \
-    python3 --version && rustc --version && uv --version && gcc --version && echo "ALL_OK"
+    python3 --version && node --version && npm --version && rustc --version && uv --version && gcc --version && echo "ALL_OK"
 
 ENV PATH="/nix/var/nix/profiles/dtv/bin:/opt/cargo/bin:${PATH}"
 ENV RUSTUP_HOME=/opt/rustup
@@ -59,7 +60,12 @@ COPY . /opt/dtv-project
 RUN export LD_LIBRARY_PATH="$(cat /opt/gcc-lib-path):${LD_LIBRARY_PATH:-}" && \
     cd /opt/dtv-project && \
     uv sync && \
-    echo 'uv sync OK'
+    npm install --include=dev --no-audit --no-fund && \
+    node -e "require.resolve('typescript'); require.resolve('typescript-eslint'); require.resolve('eslint');" && \
+    echo 'uv sync and npm install OK'
+
+ENV NODE_PATH=/opt/dtv-project/node_modules
+ENV PATH="/opt/dtv-project/node_modules/.bin:/nix/var/nix/profiles/dtv/bin:/opt/cargo/bin:${PATH}"
 
 # Set LD_LIBRARY_PATH permanently
 # (shell reads /opt/gcc-lib-path at runtime; ENV can't expand file contents,
