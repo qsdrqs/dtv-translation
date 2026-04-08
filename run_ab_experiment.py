@@ -119,6 +119,7 @@ class RunResult:
     compiles: bool
     test_passed: int
     test_total: int
+    saved_output_path: str | None = None
     trace_log: list[dict] | None = None
 
 
@@ -235,6 +236,23 @@ def _extract_write_region_code(raw_text: str, markers: WriteRegionMarkers) -> st
 
 def _remaining_tokens(budget: Budget) -> int:
     return max(0, budget.gen_tokens_budget - budget.gen_tokens_used)
+
+
+def _sanitize_case_id(case_id: str) -> str:
+    return case_id.replace("/", "__")
+
+
+def _save_pass_output(
+    pass_output_dir: Path,
+    case_id: str,
+    config_name: str,
+    final_code: str,
+) -> str:
+    target_dir = pass_output_dir / config_name
+    target_dir.mkdir(parents=True, exist_ok=True)
+    output_path = target_dir / f"{_sanitize_case_id(case_id)}.rs"
+    output_path.write_text(final_code, encoding="utf-8")
+    return str(output_path)
 
 
 @contextmanager
@@ -601,6 +619,7 @@ def run_single(
     config_name: str,
     generator: GeneratorAdapter,
     token_budget: int,
+    pass_output_dir: Path,
     markers: WriteRegionMarkers = DEFAULT_WRITE_REGION_MARKERS,
     budget_k: float | None = None,
 ) -> RunResult:
@@ -713,6 +732,15 @@ def run_single(
     else:
         final_verdict = "fail"
 
+    saved_output_path = None
+    if final_verdict == "pass":
+        saved_output_path = _save_pass_output(
+            pass_output_dir=pass_output_dir,
+            case_id=case_id,
+            config_name=config_name,
+            final_code=eval_result.final_code,
+        )
+
     return RunResult(
         case_id=case_id,
         config=config_name,
@@ -727,6 +755,7 @@ def run_single(
         compiles=compiles,
         test_passed=test_passed,
         test_total=test_total,
+        saved_output_path=saved_output_path,
         trace_log=combined_trace,
     )
 
@@ -816,6 +845,7 @@ def main() -> None:
     case_ids: list[str] = args.case_ids
     output_path: Path = args.output
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    pass_output_dir = output_path.parent / f"{output_path.stem}_pass_outputs"
 
     model_name: str = args.model_name
     token_budget: int = args.token_budget
@@ -848,7 +878,10 @@ def main() -> None:
             try:
                 result = run_single(
                     case_id, config, config_name, generator,
-                    token_budget=token_budget, markers=markers, budget_k=budget_k,
+                    token_budget=token_budget,
+                    pass_output_dir=pass_output_dir,
+                    markers=markers,
+                    budget_k=budget_k,
                 )
             except Exception as exc:
                 import traceback

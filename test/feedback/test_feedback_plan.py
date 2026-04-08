@@ -160,6 +160,40 @@ def test_build_feedback_plan_maps_mechanism_b_to_patch_write_region() -> None:
     assert plan.post_region_injection is not None
 
 
+def test_render_feedback_prompt_includes_diagnostic_hints_for_mechanism_b() -> None:
+    state = FeedbackState()
+    state.on_verify([
+        OracleOutput(
+            oracle_name="eslint",
+            verdict=Verdict.FAIL,
+            diagnostics=(
+                Diagnostic(
+                    message="Expected readline to have a type annotation.",
+                    severity="error",
+                    error_code="@typescript-eslint/typedef",
+                    hints=("Add an explicit type annotation, for example: `const readline: <add_type_annotation>`",),
+                ),
+            ),
+            rollback_scope=Granularity.STMT,
+        )
+    ],
+    selected_scope=Granularity.STMT,)
+    repair_context = RepairContext.from_feedback_state(
+        state,
+        bad_snippet='const readline = require("readline");',
+    )
+
+    plan = build_feedback_plan(
+        mechanism=FeedbackMechanism.B,
+        repair_context=repair_context,
+        repair_feedback_format_config=None,
+        lang_config=TS_FEEDBACK_LANG,
+    )
+
+    assert "- [eslint] @typescript-eslint/typedef: Expected readline to have a type annotation." in plan.prompt
+    assert "  hint: Add an explicit type annotation, for example: `const readline: <add_type_annotation>`" in plan.prompt
+
+
 def test_build_feedback_plan_puts_diff_in_post_region_injection() -> None:
     state = FeedbackState()
     state.on_verify([

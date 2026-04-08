@@ -96,13 +96,14 @@ def test_parser_converts_to_diagnostics() -> None:
             "line": 1,
             "column": 14,
         }
-    ])
+    ], source_code="const x = 1;\n")
     assert diagnostics == (
         Diagnostic(
             message="Expected x to have a type annotation.",
             severity="error",
             spans=(DiagnosticSpan(line=1, col=14, is_primary=True),),
             error_code="@typescript-eslint/typedef",
+            hints=("Add an explicit type annotation, for example: `const x: <add_type_annotation>`",),
         ),
     )
 
@@ -133,6 +134,47 @@ def test_parser_extracts_line_col_as_span() -> None:
     primary = next(s for s in diagnostics[0].spans if s.is_primary)
     assert (primary.line, primary.col) == (3, 7)
     assert diagnostics[0].severity == "warning"
+
+
+def test_parser_adds_typedef_hint_for_variable_declaration() -> None:
+    diagnostics = parse_eslint_messages([
+        {
+            "ruleId": "@typescript-eslint/typedef",
+            "severity": 2,
+            "message": "Expected readline to have a type annotation.",
+            "line": 1,
+            "column": 7,
+        }
+    ], source_code='const readline = require("readline");\n')
+    assert diagnostics[0].hints == (
+        'Add an explicit type annotation, for example: `const readline: <add_type_annotation>`',
+    )
+
+
+def test_parser_skips_typedef_hint_when_line_is_not_simple_variable_declaration() -> None:
+    diagnostics = parse_eslint_messages([
+        {
+            "ruleId": "@typescript-eslint/typedef",
+            "severity": 2,
+            "message": "Expected value to have a type annotation.",
+            "line": 1,
+            "column": 11,
+        }
+    ], source_code="({ value } = source);\n")
+    assert diagnostics[0].hints == ()
+
+
+def test_parser_skips_typedef_hint_for_multi_declarator_statement() -> None:
+    diagnostics = parse_eslint_messages([
+        {
+            "ruleId": "@typescript-eslint/typedef",
+            "severity": 2,
+            "message": "Expected second to have a type annotation.",
+            "line": 1,
+            "column": 18,
+        }
+    ], source_code="const first = 1, second = 2;\n")
+    assert diagnostics[0].hints == ()
 
 
 def test_filter_post_prefix_diagnostics_drops_renderer_only_diagnostic() -> None:
@@ -211,6 +253,14 @@ def test_oracle_fail_on_missing_annotations() -> None:
     assert output.verdict == Verdict.FAIL
     assert output.oracle_name == "eslint"
     assert any(d.error_code == "@typescript-eslint/typedef" for d in output.diagnostics)
+
+
+def test_oracle_adds_typedef_hint_for_simple_variable_declaration() -> None:
+    output = _run_oracle('const readline = require("readline");\n')
+    typedef_diag = next(d for d in output.diagnostics if d.error_code == "@typescript-eslint/typedef")
+    assert typedef_diag.hints == (
+        'Add an explicit type annotation, for example: `const readline: <add_type_annotation>`',
+    )
 
 
 def test_oracle_pass_on_typed_code() -> None:

@@ -76,7 +76,7 @@ OUTPUT_TOKEN_CAP = 20480
 TOKEN_BUDGET = OUTPUT_TOKEN_CAP
 MAX_NEW_LENGTH = 16384
 MAX_STEPS = 2000
-PROMPT_PREFIX = "Translate the following JavaScript code into TypeScript with strict type annotations:"
+PROMPT_PREFIX = "Adding type annotations to the following JavaScript code to convert it to TypeScript. Only add type annotations, do not change the code structure or logic. If you are unsure about the type, use 'any'.\n\n"
 DATASET_DIR = Path(os.environ.get("DTV_JS_TS_DATASET_DIR", "dataset_js_ts"))
 RESULT_DIR = Path("result")
 OUTPUT_PATH = RESULT_DIR / "ab_experiment_js_ts_results.json"
@@ -118,6 +118,7 @@ class RunResult:
     compiles: bool
     test_passed: int
     test_total: int
+    saved_output_path: str | None = None
     trace_log: list[dict] | None = None
 
 
@@ -236,6 +237,23 @@ def _remaining_tokens(budget: Budget) -> int:
     return max(0, budget.gen_tokens_budget - budget.gen_tokens_used)
 
 
+def _sanitize_case_id(case_id: str) -> str:
+    return case_id.replace("/", "__")
+
+
+def _save_pass_output(
+    pass_output_dir: Path,
+    case_id: str,
+    config_name: str,
+    final_code: str,
+) -> str:
+    target_dir = pass_output_dir / config_name
+    target_dir.mkdir(parents=True, exist_ok=True)
+    output_path = target_dir / f"{_sanitize_case_id(case_id)}.ts"
+    output_path.write_text(final_code, encoding="utf-8")
+    return str(output_path)
+
+
 @contextmanager
 def _temporary_no_stopping_criteria(generator: GeneratorAdapter):
     backend = cast(_StopCriteriaBackend, generator.backend)
@@ -281,19 +299,23 @@ def _format_oracle_feedback(outputs: list[OracleOutput], max_lines: int = 20) ->
         if output.verdict != Verdict.FAIL:
             continue
         if not output.diagnostics:
-            lines.append(f"[{output.oracle_name}] verification failed")
+            lines.append(f"- [{output.oracle_name}] verification failed")
             continue
         for diagnostic in output.diagnostics:
             primary = next((span for span in diagnostic.spans if span.is_primary), None)
             location = f" line {primary.line}:" if primary is not None else ""
             code_suffix = f" code={diagnostic.error_code}" if diagnostic.error_code else ""
-            lines.append(f"[{output.oracle_name}]{location}{code_suffix} {diagnostic.message}".strip())
+            lines.append(f"- [{output.oracle_name}]{location}{code_suffix} {diagnostic.message}".strip())
+            for hint in diagnostic.hints:
+                stripped_hint = hint.strip()
+                if stripped_hint:
+                    lines.append(f"  hint: {stripped_hint}")
     if not lines:
         return "- verification failed without diagnostics"
     shown = lines[:max_lines]
     if len(lines) > max_lines:
         shown.append(f"... {len(lines) - max_lines} more lines omitted")
-    return "\n".join(f"- {line}" for line in shown)
+    return "\n".join(shown)
 
 
 def _verify_program(
@@ -595,6 +617,7 @@ def run_single(
     config_name: str,
     generator: GeneratorAdapter,
     token_budget: int,
+    pass_output_dir: Path,
     markers: WriteRegionMarkers = DEFAULT_WRITE_REGION_MARKERS,
     budget_k: float | None = None,
 ) -> RunResult:
@@ -708,6 +731,15 @@ def run_single(
     else:
         final_verdict = "fail"
 
+    saved_output_path = None
+    if final_verdict == "pass":
+        saved_output_path = _save_pass_output(
+            pass_output_dir=pass_output_dir,
+            case_id=case_id,
+            config_name=config_name,
+            final_code=eval_result.final_code,
+        )
+
     return RunResult(
         case_id=case_id,
         config=config_name,
@@ -722,6 +754,7 @@ def run_single(
         compiles=compiles,
         test_passed=test_passed,
         test_total=test_total,
+        saved_output_path=saved_output_path,
         trace_log=combined_trace,
     )
 
@@ -839,6 +872,7 @@ def main() -> None:
 
     output_path: Path = args.output
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    pass_output_dir = output_path.parent / f"{output_path.stem}_pass_outputs"
 
     model_name: str = args.model_name
     token_budget: int = args.token_budget
@@ -878,6 +912,7 @@ def main() -> None:
                     config_name,
                     generator,
                     token_budget=token_budget,
+                    pass_output_dir=pass_output_dir,
                     markers=markers,
                     budget_k=budget_k,
                 )

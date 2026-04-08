@@ -29,7 +29,11 @@ class EslintOracle(Oracle):
     def run(self, state: ControllerState, artifact: Artifact, context: OracleContext) -> OracleOutput:
         del context
         result = self.driver.check(artifact.code, timeout_s=self.timeout_s)
-        diagnostics = parse_eslint_messages(result.messages)
+        diagnostics = parse_eslint_messages(
+            result.messages,
+            source_code=artifact.code,
+            ast_tree=artifact.ast_tree,
+        )
         diagnostics = filter_post_prefix_diagnostics(diagnostics, state.prefix)
         verdict = Verdict.FAIL if has_errors(diagnostics) else Verdict.PASS
         return OracleOutput(

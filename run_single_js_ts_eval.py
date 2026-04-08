@@ -174,7 +174,7 @@ def main() -> None:
         rollback_manager=rollback_manager,
         policy=policy,
         feedback_lang_config=TS_FEEDBACK_LANG,
-        repair_feedback_format_config=RepairFeedbackFormatConfig(include_failed_snippet=False),
+        repair_feedback_format_config=RepairFeedbackFormatConfig(include_failed_snippet=True),
         max_steps=500,
         max_new_length=MAX_NEW_LENGTH,
         prompt_prefix=prompt,

@@ -145,10 +145,15 @@ def _render_diagnostics(repair_context: RepairContext) -> str:
     for output in repair_context.outputs:
         for diag in output.diagnostics:
             message = diag.message.strip() or "(empty diagnostic)"
+            hints = tuple(hint.strip() for hint in diag.hints if hint.strip())
             if diag.error_code:
-                lines.append(f"- [{output.oracle_name}] {diag.error_code}: {message}")
+                line = f"- [{output.oracle_name}] {diag.error_code}: {message}"
             else:
-                lines.append(f"- [{output.oracle_name}] {message}")
+                line = f"- [{output.oracle_name}] {message}"
+            if hints:
+                hint_lines = "\n".join(f"  hint: {hint}" for hint in hints)
+                line = f"{line}\n{hint_lines}"
+            lines.append(line)
     return "\n".join(lines)
 
 
