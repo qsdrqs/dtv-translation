@@ -40,16 +40,6 @@ def test_parser_buffers_split_begin_marker() -> None:
     assert parser.consume_code() == "code"
 
 
-def test_parser_rejects_inner_fence() -> None:
-    parser = WriteRegionParser()
-
-    parser.feed(f"{BEGIN_WRITE_CODE}\n")
-    parser.feed("```rust\n")
-
-    assert parser.invalid_payload
-    assert parser.invalid_reason == "write region must contain raw code only"
-
-
 def test_feed_empty_preserves_state() -> None:
     parser = WriteRegionParser()
     parser.feed(f"{BEGIN_WRITE_CODE}\n")

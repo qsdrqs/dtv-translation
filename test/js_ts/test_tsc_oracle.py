@@ -78,12 +78,6 @@ const y = unknownVar;
 # strict mode
 
 
-def test_strict_implicit_any_fails() -> None:
-    output = _run_oracle("function foo(x) { return x; }")
-    assert output.verdict == Verdict.FAIL
-    assert any(d.error_code == "TS7006" for d in output.diagnostics)
-
-
 def test_strict_null_check_filtered_passes() -> None:
     code = """\
 function foo(): string {

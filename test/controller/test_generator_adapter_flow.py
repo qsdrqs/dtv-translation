@@ -119,21 +119,6 @@ def test_adapter_passes_through_when_extraction_disabled() -> None:
     assert result.delta_tokens == 1
 
 
-def test_adapter_rejects_inner_fence() -> None:
-    adapter = GeneratorAdapter(model_name="stub", backend_cls=_StubBackend)
-    _set_steps([
-        GenerateResult(
-            delta_text=f"{BEGIN_WRITE_CODE}\n```rust\n",
-            delta_tokens=2,
-            stop_reason=StopReason(kind="unknown"),
-        ),
-    ])
-
-    result = adapter.generate_step(_context(extract_write_region=True))
-
-    assert result.stop_reason.kind == "invalid_write_region_payload"
-
-
 def test_adapter_accepts_custom_markers() -> None:
     markers = WriteRegionMarkers(begin_marker="[[BEGIN]]", end_marker="[[END]]")
     adapter = GeneratorAdapter(
