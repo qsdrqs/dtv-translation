@@ -23,6 +23,7 @@ from typing import Protocol, cast
 
 from controller.adapters import GeneratorAdapter
 from controller.stop_criteria import DTVStoppingCriteria, TS_PROFILE
+from core.gemma_generator_backend import GemmaGeneratorBackend
 from core.budget import Budget
 from core.interfaces import Oracle
 from core.llm_output import WriteRegionParser
@@ -42,8 +43,8 @@ from js_ts.oracles import EslintOracle, TscOracle, TscProgramOracle
 from js_ts.oracles.compiler_oracle.tsc_driver import _find_type_roots
 from transformers import StoppingCriteriaList
 
-MODEL_NAME = "Qwen/Qwen3-4B-Instruct-2507"
-TOKEN_BUDGET = 20480
+MODEL_NAME = "google/gemma-4-E4B-it"
+TOKEN_BUDGET = 2048
 MAX_NEW_LENGTH = 1024
 MAX_STEPS = 100
 PROMPT_PREFIX = "Translate the following JavaScript code into TypeScript with strict type annotations:"
@@ -353,6 +354,7 @@ def main() -> None:
             DTVStoppingCriteria(tok, TS_PROFILE, write_region_parser=write_region_parser)
         ],
         write_region_parser=write_region_parser,
+        backend_cls=GemmaGeneratorBackend,
     )
     print("Model loaded:", MODEL_NAME)
 

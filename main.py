@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from c_rust.feedback import RUST_FEEDBACK_LANG
 from controller.adapters import GeneratorAdapter
+from core.qwen_generator_backend import QwenGeneratorBackend
 from controller.loop import ControllerOp, run_dtv_loop, select_oracles_by_granularity
 from controller.policy import DefaultPolicy
 from controller.stop_criteria import DTVStoppingCriteria, RUST_PROFILE
@@ -57,6 +58,7 @@ def main() -> None:
         model_name="Qwen/Qwen3-4B-Instruct-2507",
         stop_criteria_factory=stop_factory,
         write_region_parser=write_region_parser,
+        backend_cls=QwenGeneratorBackend,
     )
     budget = Budget(gen_tokens_budget=512)
     feedback_state = FeedbackState()

@@ -18,7 +18,6 @@ from core.llm_output import (
     merge_assistant_content,
 )
 from core.logger import get_logger
-from core.qwen_generator_backend import QwenGeneratorBackend
 from core.types import GenerateContext, GenerateResult, StopReason
 
 
@@ -36,11 +35,13 @@ class GeneratorAdapter(Generator):
         | None = None,
         write_region_parser: WriteRegionParser | None = None,
         write_region_markers: WriteRegionMarkers = DEFAULT_WRITE_REGION_MARKERS,
-        backend_cls: type[GeneratorBackend] = QwenGeneratorBackend,
+        backend_cls: type[GeneratorBackend] | None = None,
         do_sample: bool | None = None,
         temperature: float | None = None,
         enable_thinking: bool | None = None,
     ) -> None:
+        if backend_cls is None:
+            raise ValueError("backend_cls must be specified explicitly")
         self.backend = backend_cls(
             model_name=model_name,
             stop_criteria_factory=stop_criteria_factory,

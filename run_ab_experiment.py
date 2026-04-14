@@ -36,6 +36,7 @@ from c_rust.oracles import FunctionOracle, RustcOracle
 from c_rust.oracles.program_diff_test_oracle.execution_driver import compile_and_run
 from c_rust.render import CRustRenderer
 from controller.adapters import GeneratorAdapter
+from core.qwen_generator_backend import QwenGeneratorBackend
 from controller.loop import render_write_region_contract, run_dtv_loop
 from controller.policy import DefaultPolicy, DefaultPolicyConfig
 from controller.stop_criteria import DTVStoppingCriteria, RUST_PROFILE
@@ -860,6 +861,7 @@ def main() -> None:
             DTVStoppingCriteria(tok, RUST_PROFILE, write_region_parser=write_region_parser)
         ],
         write_region_parser=write_region_parser,
+        backend_cls=QwenGeneratorBackend,
         do_sample=do_sample,
     )
 

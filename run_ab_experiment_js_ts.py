@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Callable, Protocol, cast
 
 from controller.adapters import GeneratorAdapter
+from core.qwen_generator_backend import QwenGeneratorBackend
 from controller.loop import render_write_region_contract, run_dtv_loop
 from controller.policy import DefaultPolicy, DefaultPolicyConfig
 from controller.stop_criteria import DTVStoppingCriteria, TS_PROFILE
@@ -887,6 +888,7 @@ def main() -> None:
             DTVStoppingCriteria(tok, TS_PROFILE, write_region_parser=write_region_parser)
         ],
         write_region_parser=write_region_parser,
+        backend_cls=QwenGeneratorBackend,
         do_sample=do_sample,
     )
 

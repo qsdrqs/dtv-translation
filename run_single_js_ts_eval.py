@@ -14,6 +14,7 @@ from controller.adapters import GeneratorAdapter
 from controller.loop import run_dtv_loop
 from controller.policy import DefaultPolicy, DefaultPolicyConfig
 from controller.stop_criteria import DTVStoppingCriteria, TS_PROFILE
+from core.qwen_generator_backend import QwenGeneratorBackend
 from core.llm_output import WriteRegionParser
 from core.budget import Budget
 from core.types import RenderStatus, TestCase, TranslationSample
@@ -155,6 +156,7 @@ def main() -> None:
             DTVStoppingCriteria(tok, TS_PROFILE, write_region_parser=write_region_parser)
         ],
         write_region_parser=write_region_parser,
+        backend_cls=QwenGeneratorBackend,
         enable_thinking=None,
     )
     print("Model loaded:", MODEL_NAME)

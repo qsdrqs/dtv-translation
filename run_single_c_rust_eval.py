@@ -8,6 +8,7 @@ from c_rust.feedback import RUST_FEEDBACK_LANG
 from c_rust.oracles import FunctionOracle, RustcOracle
 from c_rust.render import CRustRenderer
 from controller.adapters import GeneratorAdapter
+from core.qwen_generator_backend import QwenGeneratorBackend
 from controller.loop import run_dtv_loop
 from controller.policy import DefaultPolicy, DefaultPolicyConfig
 from controller.stop_criteria import DTVStoppingCriteria, RUST_PROFILE
@@ -144,6 +145,7 @@ fn main() {
             DTVStoppingCriteria(tok, RUST_PROFILE, write_region_parser=write_region_parser)
         ],
         write_region_parser=write_region_parser,
+        backend_cls=QwenGeneratorBackend,
     )
     print("Model loaded:", MODEL_NAME)
     renderer = CRustRenderer(sample=sample)

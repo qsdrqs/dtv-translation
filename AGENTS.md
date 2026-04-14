@@ -105,9 +105,11 @@ This repo intentionally uses a flat top-level layout (no `src/`):
 ### Design Decisions
 - Weakened Program Oracle (project-wide):
   The program-level oracle used during DTV generation is intentionally weaker
-  than a full-correctness check. DTV only needs the oracle to catch errors the
-  model can realistically repair in-loop; enforcing full correctness during
-  generation wastes budget on unfixable diagnostics.
+  than a full-correctness check. DTV is a superset of the naive baseline: both
+  share the same post-hoc verification step, so in-generation oracles do not
+  need to enforce full correctness - that is already handled post-hoc. The
+  in-generation oracle only needs to provide actionable feedback that the model
+  can use to improve the code during decoding.
   - C -> Rust: program diff test oracle runs with relaxed matching; full
     correctness verified post-hoc.
   - JS -> TS: two layers of weakening:
@@ -116,8 +118,6 @@ This repo intentionally uses a flat top-level layout (no `src/`):
        before verdict (`filter_type_correctness` in `tsc_parser.py`).
   Full type correctness is evaluated post-hoc (strict=true recheck on pass
   outputs) rather than enforced during generation.
-  Principle: guide generation with actionable feedback only; defer
-  full-correctness judgment to post-hoc evaluation.
 - ESLint as supplementary oracle (JS -> TS):
   - `@typescript-eslint/typedef` rule checks for missing type annotations.
   - ESLint hints (e.g. "Add an explicit type annotation") are included in

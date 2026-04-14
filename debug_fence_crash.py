@@ -137,6 +137,7 @@ def main() -> None:
     from c_rust.oracles import FunctionOracle, RustcOracle, RustcProgramOracle
     from controller.adapters import GeneratorAdapter
     from controller.stop_criteria import DTVStoppingCriteria, RUST_PROFILE
+    from core.qwen_generator_backend import QwenGeneratorBackend
     from core.llm_output import WriteRegionParser
     from core.budget import Budget
     from controller.loop import run_dtv_loop
@@ -153,6 +154,7 @@ def main() -> None:
             DTVStoppingCriteria(tok, RUST_PROFILE, write_region_parser=write_region_parser)
         ],
         write_region_parser=write_region_parser,
+        backend_cls=QwenGeneratorBackend,
     )
     print("Model loaded.")
 
