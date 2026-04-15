@@ -63,6 +63,9 @@ class _GenerateOnlyPolicy:
             return ControllerOp(Action.GENERATE)
         return ControllerOp(Action.CONTINUE)
 
+    def reset_round_state(self) -> None:
+        pass
+
     def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
         _ = selection_granularity
         _ = artifact

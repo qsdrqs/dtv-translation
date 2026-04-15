@@ -162,6 +162,34 @@ class RollbackManager:
             return None
         return None
 
+    def peek_rollback(self, scope: Granularity) -> Checkpoint:
+        """Return the checkpoint that rollback(scope) would restore to, without mutating."""
+        if scope == Granularity.PROGRAM:
+            return self._apply_write_anchor_floor(
+                Checkpoint(
+                    code_prefix="",
+                    assistant_prefix=AssistantContent.empty(markers=self.markers),
+                    extractor_state=None,
+                )
+            )
+        if scope == Granularity.STMT:
+            return self._apply_write_anchor_floor(self._last_checkpoint())
+        target_start = self._target_start_for_scope(scope)
+        if target_start is None:
+            return self._apply_write_anchor_floor(self._last_checkpoint())
+        keep_count = max(0, target_start)
+        if keep_count == 0:
+            return self._apply_write_anchor_floor(
+                Checkpoint(
+                    code_prefix="",
+                    assistant_prefix=AssistantContent.empty(markers=self.markers),
+                    extractor_state=None,
+                )
+            )
+        if keep_count <= len(self.stmt_checkpoints):
+            return self._apply_write_anchor_floor(self.stmt_checkpoints[keep_count - 1])
+        return self._apply_write_anchor_floor(self._last_checkpoint())
+
     def rollback(self, scope: Granularity) -> Checkpoint:
         if scope == Granularity.PROGRAM:
             self.stmt_checkpoints.clear()

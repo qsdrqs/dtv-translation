@@ -252,6 +252,9 @@ class _RollbackScopePolicy:
             return ControllerOp(Action.ROLLBACK, rollback_scope=self.scope)
         return ControllerOp(Action.TERMINATE)
 
+    def reset_round_state(self) -> None:
+        pass
+
     def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
         if selection_granularity is None:
             raise ValueError("selection_granularity is required")
@@ -300,6 +303,9 @@ class _ProgramRollbackThenGeneratePolicy:
             return ControllerOp(Action.GENERATE)
         return ControllerOp(Action.TERMINATE)
 
+    def reset_round_state(self) -> None:
+        pass
+
     def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
         if selection_granularity is None:
             raise ValueError("selection_granularity is required")
@@ -326,6 +332,9 @@ class _SingleStepPolicy:
         if ctx.last_action in {Action.COMMIT, Action.ROLLBACK}:
             return ControllerOp(Action.TERMINATE)
         return ControllerOp(Action.GENERATE)
+
+    def reset_round_state(self) -> None:
+        pass
 
     def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
         if selection_granularity is None:
@@ -383,6 +392,9 @@ class _FunctionClosePolicy:
         if ctx.last_action == Action.COMMIT:
             return ControllerOp(Action.TERMINATE)
         return ControllerOp(Action.TERMINATE)
+
+    def reset_round_state(self) -> None:
+        pass
 
     def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
         _ = selection_granularity

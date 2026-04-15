@@ -51,6 +51,7 @@ class ControllerOp:
     verification_granularity: Granularity | None = None
     rollback_scope: Granularity | None = None
     feedback_mechanism: FeedbackMechanism | None = None
+    bailout: bool = False
 
 
 @dataclass(frozen=True)
@@ -136,6 +137,9 @@ class Policy(Protocol):
         *,
         selection_granularity: Granularity | None = None,
     ) -> list[Oracle]:
+        ...
+
+    def reset_round_state(self) -> None:
         ...
 
 
@@ -1095,17 +1099,82 @@ def _handle_continue(
     )
 
 
+def _format_bailout_diagnostics(outputs: tuple[OracleOutput, ...]) -> str:
+    """Format error-level diagnostics from oracle outputs as compact text."""
+    lines: list[str] = []
+    for output in outputs:
+        for diag in output.diagnostics:
+            if diag.severity != "error":
+                continue
+            code_part = f" code={diag.error_code}" if diag.error_code else ""
+            lines.append(
+                f"- [{output.oracle_name}] severity={diag.severity}{code_part}: {diag.message}"
+            )
+    if not lines:
+        return ""
+    return "oracle diagnostics:\n" + "\n".join(lines)
+
+
+def _handle_bailout_terminate(
+    runtime: ControllerRuntime,
+    write_region_markers: WriteRegionMarkers,
+) -> None:
+    """Construct a closed assistant message with rendered code and diagnostics.
+
+    Updates runtime.state.prefix to the rendered code and
+    runtime.assistant_prefix to the full closed write region with diagnostics.
+    """
+    rendered_code = (
+        runtime.last_artifact.code
+        if runtime.last_artifact is not None
+        else runtime.state.prefix
+    )
+    logger.info("bailout_rendered_prefix: len=%s", len(rendered_code))
+
+    diag_text = _format_bailout_diagnostics(runtime.last_outputs)
+    diag_count = sum(
+        1 for o in runtime.last_outputs
+        for d in o.diagnostics if d.severity == "error"
+    )
+    logger.info("bailout_diagnostics: count=%s", diag_count)
+
+    # Build a properly closed AssistantContent: prelude + BEGIN marker +
+    # rendered code + END marker + diagnostics postlude.
+    runtime.assistant_prefix = AssistantContent(
+        prelude=runtime.assistant_prefix.prelude,
+        code=rendered_code,
+        postlude=diag_text,
+        pending_text="",
+        has_begin_marker=True,
+        has_end_marker=True,
+        region_state=WriteRegionState.OUTSIDE,
+        markers=write_region_markers,
+    )
+    runtime.state.prefix = rendered_code
+
+    logger.info(
+        "bailout_terminate: step=%s rendered_prefix_len=%s diagnostics=%s",
+        runtime.state.step, len(rendered_code), diag_count,
+    )
+
+
 def _handle_terminate(
     runtime: ControllerRuntime,
     feedback_state: FeedbackState,
     feedback_enabled: bool,
     budget: Budget,
     trace: list[TraceEvent],
+    *,
+    op: ControllerOp | None = None,
+    write_region_markers: WriteRegionMarkers = DEFAULT_WRITE_REGION_MARKERS,
 ) -> None:
     if feedback_enabled:
         feedback_state.on_terminate()
     runtime.repair_regions.clear()
     _clear_transient_repair(runtime)
+    is_bailout = op is not None and op.bailout
+    if is_bailout:
+        _handle_bailout_terminate(runtime, write_region_markers)
     runtime.last_action = Action.TERMINATE
     logger.info("terminate: step=%s", runtime.state.step)
     _append_trace(
@@ -1115,6 +1184,7 @@ def _handle_terminate(
         action=Action.TERMINATE,
         verification_granularity=None,
         budget=budget,
+        notes="bailout" if is_bailout else "",
     )
 
 
@@ -1150,6 +1220,7 @@ def run_dtv_loop(
         oracle_runner = DummyOracleRunner()
     oracle_runner_impl: OracleRunner = oracle_runner
     feedback_enabled = _policy_feedback_enabled(policy)
+    policy.reset_round_state()
     if hasattr(rollback_manager, "markers"):
         rollback_manager.markers = write_region_markers
 
@@ -1301,7 +1372,10 @@ def run_dtv_loop(
             continue
 
         if op.action == Action.TERMINATE:
-            _handle_terminate(runtime, feedback_state, feedback_enabled, budget, trace)
+            _handle_terminate(
+                runtime, feedback_state, feedback_enabled, budget, trace,
+                op=op, write_region_markers=write_region_markers,
+            )
             break
 
         raise ValueError(f"Unsupported action: {op.action}")

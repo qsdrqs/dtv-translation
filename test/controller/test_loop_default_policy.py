@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import pytest
 
 from c_rust.feedback import RUST_FEEDBACK_LANG
-from controller.loop import run_dtv_loop
+from controller.loop import _format_bailout_diagnostics, run_dtv_loop
 from controller.policy import DefaultPolicy, DefaultPolicyConfig
 from core.budget import Budget
 from core.llm_output import AssistantContent, OutputExtractorState, WriteRegionParserSnapshot, WriteRegionState
@@ -664,3 +664,145 @@ def test_default_policy_e2e_stmt_stall_escalates_to_func_without_block_scope() -
         group_stack=(GroupStackFrame(kind=Granularity.FUNC),),
         expected_escalation_scope=Granularity.FUNC,
     )
+
+
+# bailout execution logic tests
+
+
+def test_format_bailout_diagnostics_error_only() -> None:
+    outputs = (
+        OracleOutput(
+            oracle_name="tsc",
+            verdict=Verdict.FAIL,
+            diagnostics=(
+                Diagnostic(message="mismatched types", severity="error", error_code="E0308"),
+                Diagnostic(message="consider adding a type", severity="warning"),
+            ),
+        ),
+        OracleOutput(
+            oracle_name="eslint",
+            verdict=Verdict.FAIL,
+            diagnostics=(
+                Diagnostic(message="missing annotation", severity="error"),
+            ),
+        ),
+    )
+    result = _format_bailout_diagnostics(outputs)
+    expected = (
+        "oracle diagnostics:\n"
+        "- [tsc] severity=error code=E0308: mismatched types\n"
+        "- [eslint] severity=error: missing annotation"
+    )
+    assert result == expected
+
+
+def test_format_bailout_diagnostics_empty_when_no_errors() -> None:
+    outputs = (
+        OracleOutput(
+            oracle_name="tsc",
+            verdict=Verdict.PASS,
+            diagnostics=(
+                Diagnostic(message="unused var", severity="warning"),
+            ),
+        ),
+    )
+    assert _format_bailout_diagnostics(outputs) == ""
+
+
+class _SuffixAppendingRenderer:
+    def __init__(self, suffix: str = "\n// rendered") -> None:
+        self.suffix = suffix
+
+    def try_render(self, prefix: str) -> RenderResult:
+        artifact = Artifact(code=prefix + self.suffix)
+        return RenderResult(status=RenderStatus.OK, artifact=artifact)
+
+
+class _AlwaysFailOracle:
+    name = "test_oracle"
+    required_granularity = Granularity.STMT
+    rollback_scope = Granularity.STMT
+
+    def __init__(self, diagnostics: tuple[Diagnostic, ...] = ()) -> None:
+        self._diagnostics = diagnostics or (
+            Diagnostic(message="type mismatch", severity="error", error_code="TS2322"),
+        )
+
+    def run(self, state, artifact, context) -> OracleOutput:
+        return OracleOutput(
+            oracle_name=self.name,
+            verdict=Verdict.FAIL,
+            diagnostics=self._diagnostics,
+            realized_cost=1,
+        )
+
+
+def test_bailout_terminate_returns_rendered_code_as_prefix() -> None:
+    generator = _SequenceGenerator([
+        _Step("let x = 1;", StopReason(kind="boundary")),
+    ])
+    renderer = _SuffixAppendingRenderer(suffix="\n// rendered")
+    oracle = _AlwaysFailOracle()
+    policy = DefaultPolicy(DefaultPolicyConfig(
+        enable_feedback=False,
+        bailout_visit_threshold=1,
+    ))
+    prefix, trace = run_dtv_loop(
+        generator=generator,
+        renderer=renderer,
+        oracles=[oracle],
+        budget=Budget(gen_tokens_budget=16),
+        feedback_state=FeedbackState(),
+        rollback_manager=RollbackManager(),
+        policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
+        max_steps=20,
+    )
+    # Bailout should return the rendered code (with suffix), not raw prefix.
+    assert prefix.endswith("\n// rendered")
+    actions = [e.action for e in trace]
+    assert Action.TERMINATE in actions
+
+
+def test_normal_terminate_returns_raw_prefix() -> None:
+    generator = _SequenceGenerator([
+        _Step("let x = 1;", StopReason(kind="write_region_closed"),
+              write_region_state=WriteRegionState.OUTSIDE),
+    ])
+    renderer = _OkRenderer()
+    oracle = _SequenceOracle([Verdict.PASS])
+    policy = DefaultPolicy()
+    prefix, trace = _run_loop(generator, renderer, [oracle], policy, max_steps=20)
+    # Normal terminate: prefix is the raw code, not transformed.
+    assert prefix == "let x = 1;"
+    actions = [e.action for e in trace]
+    assert Action.TERMINATE in actions
+
+
+def test_bailout_terminate_includes_diagnostics_in_assistant_prefix() -> None:
+    diags = (
+        Diagnostic(message="bad type", severity="error", error_code="E0308"),
+    )
+    generator = _SequenceGenerator([
+        _Step("bad;", StopReason(kind="boundary")),
+    ])
+    renderer = _OkRenderer()
+    oracle = _AlwaysFailOracle(diagnostics=diags)
+    policy = DefaultPolicy(DefaultPolicyConfig(
+        enable_feedback=False,
+        bailout_visit_threshold=1,
+    ))
+    prefix, trace = run_dtv_loop(
+        generator=generator,
+        renderer=renderer,
+        oracles=[oracle],
+        budget=Budget(gen_tokens_budget=16),
+        feedback_state=FeedbackState(),
+        rollback_manager=RollbackManager(),
+        policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
+        max_steps=20,
+    )
+    assert prefix == "bad;"
+    actions = [e.action for e in trace]
+    assert Action.TERMINATE in actions

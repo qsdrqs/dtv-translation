@@ -308,6 +308,9 @@ class _RepairFlowPolicy:
             return ControllerOp(Action.FEEDBACK)
         return ControllerOp(Action.TERMINATE)
 
+    def reset_round_state(self) -> None:
+        pass
+
     def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
         if selection_granularity is None:
             raise ValueError("selection_granularity is required")
@@ -341,6 +344,9 @@ class _GenerateFeedbackApplyTerminatePolicy:
             self.stage = 5
             return ControllerOp(Action.APPLY_PATCH)
         return ControllerOp(Action.TERMINATE)
+
+    def reset_round_state(self) -> None:
+        pass
 
     def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
         if selection_granularity is None:
@@ -377,6 +383,9 @@ class _ContinueGeneratePolicy:
             return ControllerOp(Action.FEEDBACK)
         return ControllerOp(Action.TERMINATE)
 
+    def reset_round_state(self) -> None:
+        pass
+
     def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
         if selection_granularity is None:
             raise ValueError("selection_granularity is required")
@@ -410,6 +419,9 @@ class _NoOraclePolicy:
         if self.stage == 4:
             return ControllerOp(Action.FEEDBACK)
         return ControllerOp(Action.TERMINATE)
+
+    def reset_round_state(self) -> None:
+        pass
 
     def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
         if selection_granularity is None:
@@ -450,6 +462,9 @@ class _MechanismBApplyPolicy:
             return ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT)
         return ControllerOp(Action.TERMINATE)
 
+    def reset_round_state(self) -> None:
+        pass
+
     def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
         if selection_granularity is None:
             raise ValueError("selection_granularity is required")
@@ -480,6 +495,9 @@ class _MechanismBRetryPolicy:
             self.stage += 1
             return ControllerOp(Action.FEEDBACK, feedback_mechanism=FeedbackMechanism.B)
         return ControllerOp(Action.TERMINATE)
+
+    def reset_round_state(self) -> None:
+        pass
 
     def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
         if selection_granularity is None:
@@ -576,6 +594,9 @@ class _ScopeAwareFeedbackPolicy:
             return ControllerOp(Action.COMMIT)
         return ControllerOp(Action.TERMINATE)
 
+    def reset_round_state(self) -> None:
+        pass
+
     def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
         if selection_granularity is None:
             raise ValueError("selection_granularity is required")
@@ -619,6 +640,9 @@ class _ScopeAwareFeedbackMechanismBPolicy:
             return ControllerOp(Action.FEEDBACK, feedback_mechanism=FeedbackMechanism.B)
         return ControllerOp(Action.TERMINATE)
 
+    def reset_round_state(self) -> None:
+        pass
+
     def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
         if selection_granularity is None:
             raise ValueError("selection_granularity is required")
@@ -652,6 +676,9 @@ class _GenerateUsesActiveFeedbackPolicy:
             self.stage = 5
             return ControllerOp(Action.GENERATE)
         return ControllerOp(Action.TERMINATE)
+
+    def reset_round_state(self) -> None:
+        pass
 
     def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
         if selection_granularity is None:
@@ -696,6 +723,9 @@ class _FeedbackThenGeneratePolicy:
             return ControllerOp(Action.GENERATE)
         return ControllerOp(Action.TERMINATE)
 
+    def reset_round_state(self) -> None:
+        pass
+
     def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
         if selection_granularity is None:
             raise ValueError("selection_granularity is required")
@@ -739,6 +769,9 @@ class _FeedbackBThenGeneratePolicy:
             return ControllerOp(Action.GENERATE)
         return ControllerOp(Action.TERMINATE)
 
+    def reset_round_state(self) -> None:
+        pass
+
     def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
         if selection_granularity is None:
             raise ValueError("selection_granularity is required")
@@ -781,6 +814,9 @@ class _StmtLiftToFuncThenGeneratePolicy:
             self.stage = 8
             return ControllerOp(Action.GENERATE)
         return ControllerOp(Action.TERMINATE)
+
+    def reset_round_state(self) -> None:
+        pass
 
     def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
         if selection_granularity is None:
@@ -1345,6 +1381,9 @@ class _BlockRollbackThenCommitThenRefeedbackPolicy:
         self.stage += 1
         return op
 
+    def reset_round_state(self) -> None:
+        pass
+
     def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
         if selection_granularity is None:
             raise ValueError("selection_granularity is required")
@@ -1433,6 +1472,9 @@ class _DualHintPolicy:
         op = actions[self.stage]
         self.stage += 1
         return op
+
+    def reset_round_state(self) -> None:
+        pass
 
     def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
         if selection_granularity is None:
@@ -1605,6 +1647,9 @@ class _FuncRollbackRetryThenGeneratePolicy:
         self.stage += 1
         return op
 
+    def reset_round_state(self) -> None:
+        pass
+
     def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
         if selection_granularity is None:
             raise ValueError("selection_granularity is required")
@@ -1644,6 +1689,9 @@ class _NestedStmtRepairWithinFuncSessionPolicy:
         op = actions[self.stage]
         self.stage += 1
         return op
+
+    def reset_round_state(self) -> None:
+        pass
 
     def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
         if selection_granularity is None:

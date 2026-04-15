@@ -193,6 +193,9 @@ class _FeedbackBApplyPatchPolicy:
             return ControllerOp(Action.APPLY_PATCH)
         return ControllerOp(Action.TERMINATE)
 
+    def reset_round_state(self) -> None:
+        pass
+
     def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
         _ = artifact
         _ = budget

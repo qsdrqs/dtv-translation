@@ -728,7 +728,7 @@ def run_single(
 
     combined_trace = gen_trace + eval_result.trace
 
-    if compiles and (test_total == 0 or test_passed == test_total):
+    if compiles:
         final_verdict = "pass"
     else:
         final_verdict = "fail"

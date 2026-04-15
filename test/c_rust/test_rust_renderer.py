@@ -574,3 +574,26 @@ fn foo(a: i32) -> i32 {
     assert result.artifact is not None
     compile = compile_rust(result.artifact.code)
     assert compile.ok, compile.stderr
+
+
+def test_multibyte_comments_do_not_break_patch_rules() -> None:
+    """Multibyte characters in comments shift byte offsets relative to
+    char offsets. Tree-sitter uses byte offsets, so patch rules that
+    locate AST nodes by prefix length can miss when multibyte content
+    precedes the target node. Reproduced from s804064392 E0317 failure.
+    """
+    prefix = (
+        "// \u6570\u5b66\u306e\u8a08\u7b97 (multibyte comment to shift byte offsets)\n"
+        "\n"
+        "struct S;\n"
+        "\n"
+        "impl S {\n"
+        "    fn f(x: i32) -> usize {\n"
+        "        if x == 0 {\n"
+        "            return 0;\n"
+    )
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK, f"unexpected status: {result.notes}"
+    assert result.artifact is not None
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr

@@ -170,7 +170,7 @@ Dataset:
   - [ ] Define aggregation rules across multiple oracles and multiple scopes.
 - [ ] Feedback as interaction protocol (not just a string append):
   - [ ] Add a `FeedbackPlan` abstraction (what to ask the model to do next) + an output parser (how to consume structured model outputs).
-  - [x] Support multi-round repair attempts per step under a fixed token budget (inference-time scaling via extra repair turns).
+  - [x] Support feedback retries within a single DTV step (bounded by `max_repair_rounds`). Multi-round generation across DTV invocations is an application-layer concern, not a DTV responsibility.
 - [ ] CDHR core component: `ScopeSelector` (diagnostics -> minimal plausible rollback scope) using oracle diagnostics + structure + rollback state.
 - [ ] Budget + trace infrastructure for research plots:
   - [x] Track token cost vs oracle cost separately (wall-clock later).

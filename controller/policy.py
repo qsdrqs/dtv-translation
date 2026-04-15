@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from controller.loop import ControllerOp, Policy, select_oracles_by_granularity
 from core.budget import Budget
 from core.interfaces import Oracle
+from core.logger import get_logger
 from core.types import (
     Action,
     Artifact,
@@ -16,6 +17,9 @@ from core.types import (
     StopReason,
     Verdict,
 )
+
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -44,6 +48,7 @@ class DefaultPolicyConfig:
     feedback_budget_reserve_tokens: int = 0
     feedback_min_tokens_a: int = 0
     feedback_min_tokens_b: int = 0
+    bailout_visit_threshold: int = 6
 
 
 @dataclass
@@ -81,6 +86,7 @@ class DefaultPolicy(Policy):
         self._pending_fail_snapshot: _FailSnapshot | None = None
         self._stmt_stall_key: tuple[str, tuple[Granularity, ...]] | None = None
         self._stmt_stall_retries: int = 0
+        self._target_visit_counts: dict[str, int] = {}
 
     def next_action(self, ctx) -> ControllerOp:
         tokens_left = _tokens_left(ctx.budget)
@@ -174,6 +180,17 @@ class DefaultPolicy(Policy):
                     return ControllerOp(Action.TERMINATE)
                 if self.config.enable_rollback:
                     scope = self._select_fail_scope(ctx)
+                    target_key = self._rollback_target_key(ctx, scope)
+                    if target_key is not None:
+                        count = self._target_visit_counts.get(target_key, 0) + 1
+                        self._target_visit_counts[target_key] = count
+                        if count >= self.config.bailout_visit_threshold:
+                            logger.info(
+                                "bailout: step=%s target_visits=%s threshold=%s",
+                                ctx.state.step, count,
+                                self.config.bailout_visit_threshold,
+                            )
+                            return ControllerOp(Action.TERMINATE, bailout=True)
                     self._pending_fail_snapshot = _FailSnapshot(
                         failed_prefix=ctx.state.prefix,
                         scope=scope,
@@ -276,9 +293,26 @@ class DefaultPolicy(Policy):
             schedule_state.b_rounds += 1
             schedule_state.locked_mechanism = FeedbackMechanism.B
 
+    def reset_round_state(self) -> None:
+        self._target_visit_counts.clear()
+        self._stmt_stall_key = None
+        self._stmt_stall_retries = 0
+        self._repair_rounds.clear()
+        self._repair_schedule.clear()
+        self._pending_fail_snapshot = None
+
     def _reset_stmt_stall_state(self) -> None:
         self._stmt_stall_key = None
         self._stmt_stall_retries = 0
+
+    def _rollback_target_key(self, ctx, scope: Granularity) -> str | None:
+        if scope == Granularity.STMT:
+            if ctx.rollback.stmt_checkpoints:
+                return ctx.rollback.stmt_checkpoints[-1].code_prefix
+            return ""
+        if scope in (Granularity.BLOCK, Granularity.FUNC):
+            return ctx.rollback.peek_rollback(scope).code_prefix
+        return None
 
     def _select_fail_scope(self, ctx) -> Granularity:
         scope = _select_fail_scope(self.config, ctx.last_outputs)

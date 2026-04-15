@@ -15,6 +15,11 @@ from js_ts.feedback import TS_FEEDBACK_LANG
 
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+FENCE_TAGS: dict[str, frozenset[str]] = {
+    "c_rust": frozenset({"rust", "rs"}),
+    "js_ts": frozenset({"typescript", "ts"}),
+}
 CASE_LINE_RE = re.compile(r"^\[(?P<idx>\d+)/(?:\d+)\]\s+(?P<case_id>\S+)\s+/\s+(?P<mode>dtv|naive)\s+\.\.\.$")
 RESULT_LINE_RE = re.compile(r"^->\s+")
 LOG_HEADER_RE = re.compile(
@@ -354,6 +359,7 @@ def enrich_with_feedback_and_patch(
     event: RollbackEvent,
     call: InferenceCall | None,
     lang_config: FeedbackLanguageConfig,
+    fence_tags: frozenset[str],
 ) -> None:
     if call is None:
         event.warnings.append("missing inference call for feedback step")
@@ -366,8 +372,6 @@ def enrich_with_feedback_and_patch(
     event.feedback_model_output_line = call.model_output_line
 
     mechanism = event.feedback_mechanism or call.feedback_mechanism or ""
-
-    fence_tags = lang_config.fence_tags
 
     if mechanism.endswith(".A"):
         input_assistant = input_chat.last_non_empty_assistant()
@@ -445,6 +449,7 @@ def collect_rollback_events(
     target_cases: set[str] | None,
     case_ids: list[str],
     lang_config: FeedbackLanguageConfig,
+    fence_tags: frozenset[str],
 ) -> dict[str, list[RollbackEvent]]:
     events_by_case: dict[str, list[RollbackEvent]] = {case_id: [] for case_id in case_ids}
     open_events: dict[str, list[RollbackEvent]] = defaultdict(list)
@@ -498,7 +503,7 @@ def collect_rollback_events(
                 event.feedback_parse_error = parse_error
 
                 call_key = (record.case_id, record.mode, step)
-                enrich_with_feedback_and_patch(event, calls.get(call_key), lang_config)
+                enrich_with_feedback_and_patch(event, calls.get(call_key), lang_config, fence_tags)
             else:
                 # Subsequent feedback retry on the same rollback.
                 event.feedback_retries.append(FeedbackRetry(
@@ -936,14 +941,16 @@ def main() -> None:
     else:
         lang_config = RUST_FEEDBACK_LANG
 
+    fence_tags = FENCE_TAGS.get(args.task, frozenset({"rust", "rs"}))
+
     out_dir = args.out_dir if args.out_dir is not None else default_out_dir(log_path)
     target_cases = set(args.case_id) if args.case_id else None
 
     records = parse_records(log_path)
     calls = collect_inference_calls(records)
     case_ids = collect_dtv_case_ids(records, target_cases)
-    events_by_case = collect_rollback_events(records, calls, target_cases, case_ids, lang_config)
-    infer_pre_rollback_context(records, calls, events_by_case, lang_config.fence_tags)
+    events_by_case = collect_rollback_events(records, calls, target_cases, case_ids, lang_config, fence_tags)
+    infer_pre_rollback_context(records, calls, events_by_case, fence_tags)
     write_outputs(out_dir, log_path, events_by_case, lang_name=lang_config.name)
 
     total_events = sum(len(events) for events in events_by_case.values())

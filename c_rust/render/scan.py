@@ -64,6 +64,15 @@ def _scan_stack(text: str) -> tuple[bool, list[tuple[str, int]], str]:
     escape = False
     stack: list[tuple[str, int]] = []
 
+    # Pre-compute char index -> UTF-8 byte offset mapping so that
+    # brace positions align with tree-sitter byte offsets (which use
+    # UTF-8 byte counts, not Python character counts).
+    char_to_byte: list[int] = []
+    byte_pos = 0
+    for ch in text:
+        char_to_byte.append(byte_pos)
+        byte_pos += len(ch.encode("utf-8"))
+
     i = 0
     n = len(text)
     while i < n:
@@ -128,7 +137,7 @@ def _scan_stack(text: str) -> tuple[bool, list[tuple[str, int]], str]:
                 continue
 
         if ch in _OPEN_TO_CLOSE:
-            stack.append((ch, i))
+            stack.append((ch, char_to_byte[i]))
             i += 1
             continue
         if ch in _CLOSE_TO_OPEN:

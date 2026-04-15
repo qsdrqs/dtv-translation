@@ -125,6 +125,9 @@ class _SingleStepPolicy:
             return ControllerOp(Action.TERMINATE)
         return ControllerOp(Action.GENERATE)
 
+    def reset_round_state(self) -> None:
+        pass
+
     def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
         if selection_granularity is None:
             raise ValueError("selection_granularity is required")
@@ -156,6 +159,9 @@ class _TwoStepPolicy:
             return ControllerOp(Action.TERMINATE)
         return ControllerOp(Action.TERMINATE)
 
+    def reset_round_state(self) -> None:
+        pass
+
     def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
         if selection_granularity is None:
             raise ValueError("selection_granularity is required")
@@ -174,6 +180,9 @@ class _GenerateVerifyTerminatePolicy:
         if ctx.last_action == Action.GENERATE:
             return ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT)
         return ControllerOp(Action.TERMINATE)
+
+    def reset_round_state(self) -> None:
+        pass
 
     def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
         if selection_granularity is None:

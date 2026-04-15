@@ -877,3 +877,264 @@ def test_default_policy_b_no_patch_escalates_to_rollback() -> None:
     escalation_op = policy.next_action(final_no_patch_ctx)
     assert escalation_op.action == Action.ROLLBACK
     assert escalation_op.rollback_scope == Granularity.STMT
+
+
+# bailout mechanism tests
+
+
+def _add_checkpoint(rm: RollbackManager, prefix: str) -> None:
+    """Add a stmt checkpoint with the given code prefix."""
+    rm.add_stmt_checkpoint(prefix, AssistantContent.empty(), None)
+
+
+def test_bailout_on_repeated_target() -> None:
+    """Policy returns TERMINATE when the same rollback target is visited
+    bailout_visit_threshold times."""
+    config = DefaultPolicyConfig(
+        bailout_visit_threshold=3,
+        enable_feedback=False,
+    )
+    policy = DefaultPolicy(config)
+
+    for i in range(3):
+        ctx = _ctx(
+            prefix="fn main() { let x = bad;",
+            last_action=Action.VERIFY,
+            last_render_status=RenderStatus.OK,
+            last_outputs=_fail_outputs(scope=Granularity.STMT),
+        )
+        _add_checkpoint(ctx.rollback, "fn main() { ")
+        op = policy.next_action(ctx)
+        if i < 2:
+            assert op.action == Action.ROLLBACK, f"iteration {i}: expected ROLLBACK"
+        else:
+            assert op.action == Action.TERMINATE, f"iteration {i}: expected TERMINATE (bailout)"
+            assert op.bailout is True
+
+
+def test_bailout_counter_tracks_per_target() -> None:
+    """Visit counter is per-target. Different targets have independent counts."""
+    config = DefaultPolicyConfig(
+        bailout_visit_threshold=3,
+        enable_feedback=False,
+    )
+    policy = DefaultPolicy(config)
+
+    for _ in range(2):
+        ctx = _ctx(
+            prefix="bad;",
+            last_action=Action.VERIFY,
+            last_render_status=RenderStatus.OK,
+            last_outputs=_fail_outputs(scope=Granularity.STMT),
+        )
+        _add_checkpoint(ctx.rollback, "target_A")
+        op = policy.next_action(ctx)
+        assert op.action == Action.ROLLBACK
+
+    ctx = _ctx(
+        prefix="bad;",
+        last_action=Action.VERIFY,
+        last_render_status=RenderStatus.OK,
+        last_outputs=_fail_outputs(scope=Granularity.STMT),
+    )
+    _add_checkpoint(ctx.rollback, "target_B")
+    op = policy.next_action(ctx)
+    assert op.action == Action.ROLLBACK
+
+    ctx = _ctx(
+        prefix="bad;",
+        last_action=Action.VERIFY,
+        last_render_status=RenderStatus.OK,
+        last_outputs=_fail_outputs(scope=Granularity.STMT),
+    )
+    _add_checkpoint(ctx.rollback, "target_A")
+    op = policy.next_action(ctx)
+    assert op.action == Action.TERMINATE
+    assert op.bailout is True
+
+
+def test_bailout_counter_persists_across_commit() -> None:
+    """COMMIT does NOT reset visit counters. Visits accumulate across commits
+    so that global oscillation patterns (fail-pass-fail at same target) are
+    detected."""
+    config = DefaultPolicyConfig(
+        bailout_visit_threshold=3,
+        enable_feedback=False,
+    )
+    policy = DefaultPolicy(config)
+
+    for _ in range(2):
+        ctx = _ctx(
+            prefix="bad;",
+            last_action=Action.VERIFY,
+            last_render_status=RenderStatus.OK,
+            last_outputs=_fail_outputs(scope=Granularity.STMT),
+        )
+        _add_checkpoint(ctx.rollback, "target_A")
+        policy.next_action(ctx)
+
+    ctx = _ctx(
+        prefix="good;",
+        last_action=Action.COMMIT,
+    )
+    policy.next_action(ctx)
+
+    ctx = _ctx(
+        prefix="bad;",
+        last_action=Action.VERIFY,
+        last_render_status=RenderStatus.OK,
+        last_outputs=_fail_outputs(scope=Granularity.STMT),
+    )
+    _add_checkpoint(ctx.rollback, "target_A")
+    op = policy.next_action(ctx)
+    assert op.action == Action.TERMINATE
+    assert op.bailout is True
+
+
+def test_bailout_on_ping_pong() -> None:
+    """Alternating STMT(target=A) and BLOCK(target=B) triggers bailout
+    when target A reaches threshold."""
+    config = DefaultPolicyConfig(
+        bailout_visit_threshold=6,
+        enable_feedback=False,
+        # Prevent stall escalation from interfering with scope control.
+        stmt_stall_max_retries_before_escalation=100,
+    )
+    policy = DefaultPolicy(config)
+
+    def _make_stmt_fail_ctx():
+        """STMT fail: target key = last checkpoint = 'prefix_A'."""
+        c = _ctx(
+            prefix="bad;",
+            last_action=Action.VERIFY,
+            last_render_status=RenderStatus.OK,
+            last_outputs=_fail_outputs(scope=Granularity.STMT),
+        )
+        _add_checkpoint(c.rollback, "prefix_B")
+        c.rollback.open_group(Granularity.FUNC)
+        c.rollback.open_group(Granularity.BLOCK)
+        _add_checkpoint(c.rollback, "prefix_A")
+        return c
+
+    def _make_block_fail_ctx():
+        """BLOCK fail: target key = peek_rollback(BLOCK) = 'prefix_B'."""
+        c = _ctx(
+            prefix="bad;",
+            last_action=Action.VERIFY,
+            last_render_status=RenderStatus.OK,
+            last_outputs=_fail_outputs(scope=Granularity.BLOCK),
+        )
+        _add_checkpoint(c.rollback, "prefix_B")
+        c.rollback.open_group(Granularity.FUNC)
+        c.rollback.open_group(Granularity.BLOCK)
+        _add_checkpoint(c.rollback, "prefix_A")
+        return c
+
+    actions = []
+
+    # Cycle 1: 3 STMT(A) + 1 BLOCK(B)
+    for _ in range(3):
+        op = policy.next_action(_make_stmt_fail_ctx())
+        actions.append(op.action)
+        assert op.action == Action.ROLLBACK
+
+    op = policy.next_action(_make_block_fail_ctx())
+    actions.append(op.action)
+    assert op.action == Action.ROLLBACK
+
+    # Cycle 2: 3 more STMT(A) -> A reaches count=6, bailout on 3rd
+    for i in range(3):
+        op = policy.next_action(_make_stmt_fail_ctx())
+        actions.append(op.action)
+        if i < 2:
+            assert op.action == Action.ROLLBACK, f"cycle 2 iter {i}"
+        else:
+            assert op.action == Action.TERMINATE, "cycle 2 iter 2: expected bailout"
+            assert op.bailout is True
+
+    assert actions.count(Action.TERMINATE) == 1
+
+
+def test_bailout_counter_survives_continue_between_rollbacks() -> None:
+    """VERIFY with render_status=CONTINUE between rollbacks must NOT reset
+    the bailout visit counter. This reproduces the real-world stuck pattern:
+    rollback -> generate -> VERIFY(CONTINUE) -> generate -> VERIFY(FAIL) -> rollback.
+    """
+    config = DefaultPolicyConfig(
+        bailout_visit_threshold=3,
+        enable_feedback=False,
+    )
+    policy = DefaultPolicy(config)
+
+    for i in range(3):
+        # Simulate VERIFY -> CONTINUE (renderer says prefix incomplete).
+        # This must NOT reset the bailout counter.
+        ctx = _ctx(
+            prefix="fn main() { let x = partial",
+            last_action=Action.VERIFY,
+            last_render_status=RenderStatus.CONTINUE,
+        )
+        op = policy.next_action(ctx)
+        assert op.action == Action.CONTINUE or op.action == Action.TERMINATE
+
+        # Simulate VERIFY -> FAIL (oracle rejects complete stmt).
+        ctx = _ctx(
+            prefix="fn main() { let x = bad;",
+            last_action=Action.VERIFY,
+            last_render_status=RenderStatus.OK,
+            last_outputs=_fail_outputs(scope=Granularity.STMT),
+        )
+        _add_checkpoint(ctx.rollback, "fn main() { ")
+        op = policy.next_action(ctx)
+        if i < 2:
+            assert op.action == Action.ROLLBACK, f"iteration {i}: expected ROLLBACK"
+        else:
+            assert op.action == Action.TERMINATE, f"iteration {i}: expected bailout"
+            assert op.bailout is True
+
+
+def test_bailout_counter_survives_commit() -> None:
+    """COMMIT must NOT reset bailout visit counter. The model can oscillate:
+    fail at target A several times, pass a small stmt (COMMIT), then fail
+    at A again. The cumulative count should still trigger bailout.
+    """
+    config = DefaultPolicyConfig(
+        bailout_visit_threshold=4,
+        enable_feedback=False,
+    )
+    policy = DefaultPolicy(config)
+
+    # 2 failures at target A
+    for _ in range(2):
+        ctx = _ctx(
+            prefix="bad;",
+            last_action=Action.VERIFY,
+            last_render_status=RenderStatus.OK,
+            last_outputs=_fail_outputs(scope=Granularity.STMT),
+        )
+        _add_checkpoint(ctx.rollback, "target_A")
+        op = policy.next_action(ctx)
+        assert op.action == Action.ROLLBACK
+
+    # Model passes one stmt -> COMMIT
+    ctx = _ctx(
+        prefix="good;",
+        last_action=Action.COMMIT,
+    )
+    policy.next_action(ctx)
+
+    # 2 more failures at target A -> should reach threshold=4
+    for i in range(2):
+        ctx = _ctx(
+            prefix="bad;",
+            last_action=Action.VERIFY,
+            last_render_status=RenderStatus.OK,
+            last_outputs=_fail_outputs(scope=Granularity.STMT),
+        )
+        _add_checkpoint(ctx.rollback, "target_A")
+        op = policy.next_action(ctx)
+        if i < 1:
+            assert op.action == Action.ROLLBACK, f"post-commit iter {i}"
+        else:
+            assert op.action == Action.TERMINATE, f"post-commit iter {i}: expected bailout"
+            assert op.bailout is True
