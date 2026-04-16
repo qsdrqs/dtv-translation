@@ -597,3 +597,38 @@ def test_multibyte_comments_do_not_break_patch_rules() -> None:
     assert result.artifact is not None
     compile = compile_rust(result.artifact.code)
     assert compile.ok, compile.stderr
+
+
+def test_fn_returning_value_closed_if_no_else_tail_compiles() -> None:
+    prefix = """\
+fn foo(x: i32) -> i32 {
+    if x < 0 {
+        return 0;
+    }
+    if x > 0 {
+    }
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_fn_returning_bool_match_arm_if_tail_compiles() -> None:
+    # A legal prefix inside a bool-returning function should render into
+    # oracle-consumable code even when a match arm ends with an incomplete
+    # value-producing if-expression.
+    prefix = """\
+fn parse_flag(input: &str) -> bool {
+    match input.parse::<i32>() {
+        Ok(value) => {
+            if value > 0 {
+                true
+            }
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr

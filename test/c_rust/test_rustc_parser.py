@@ -197,6 +197,18 @@ fn main() {
 # RustcProgramOracle
 
 
+def test_filter_partial_noise_removes_e0425_for_functions() -> None:
+    diagnostics = (
+        Diagnostic(
+            message="cannot find function `helper` in this scope",
+            error_code="E0425",
+        ),
+        Diagnostic(message="aborting due to 1 previous error", error_code=None),
+    )
+    filtered = _filter_partial_noise(diagnostics)
+    assert filtered == ()
+
+
 def test_program_oracle_attributes() -> None:
     from core.types import Granularity
     oracle = RustcProgramOracle()

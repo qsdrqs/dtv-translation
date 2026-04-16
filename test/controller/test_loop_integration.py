@@ -563,7 +563,7 @@ def test_program_rollback_then_generate_abandons_feedback_payload() -> None:
         max_steps=6,
     )
 
-    assert output == "good\n"
+    assert "good\n" in output
     assert [event.action for event in trace] == [
         Action.GENERATE,
         Action.VERIFY,

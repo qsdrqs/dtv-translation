@@ -270,7 +270,7 @@ def test_feedback_b_end_to_end_default_markers() -> None:
         write_region_markers=markers,
     )
 
-    assert output == "let x: i32 = 1;"
+    assert "let x: i32 = 1;" in output
     assert [event.action for event in trace] == [
         Action.GENERATE,
         Action.VERIFY,
@@ -327,7 +327,7 @@ def test_feedback_b_end_to_end_custom_markers() -> None:
         write_region_markers=markers,
     )
 
-    assert output == "let x: i32 = 1;"
+    assert "let x: i32 = 1;" in output
     assert [event.action for event in trace][-2:] == [Action.APPLY_PATCH, Action.TERMINATE]
 
     _, phase1_call, phase2_call = generator.calls[:3]

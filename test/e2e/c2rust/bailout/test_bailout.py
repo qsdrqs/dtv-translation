@@ -94,13 +94,12 @@ def test_bailout_end_to_end(tmp_path: Path) -> None:
         f"Expected last trace event to be TERMINATE, got {trace[-1].action}"
     )
 
-    # (b) Returned prefix is rendered code (not raw prefix).
-    assert final_prefix.rstrip().endswith("}"), (
-        "Expected rendered prefix to end with closing brace; "
-        f"got: ...{final_prefix[-40:]!r}"
-    )
+    # (b) Raw output contains rendered code in write region and bailout diagnostics.
     assert "fn main()" in final_prefix, (
-        "Expected prefix to contain fn main()"
+        "Expected raw output to contain fn main()"
+    )
+    assert "BAILOUT!" in final_prefix, (
+        "Expected raw output to contain bailout diagnostics"
     )
 
     # (c) Trace contains rollback events showing the stuck pattern.

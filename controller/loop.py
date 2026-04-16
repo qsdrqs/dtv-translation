@@ -915,8 +915,13 @@ def _handle_feedback(
             logger.warning("feedback patch rejected: %s", runtime.feedback_parser_error)
             runtime.pending_patch = None
     else:
-        runtime.pending_patch = result.delta_text
-        runtime.feedback_parser_error = None
+        if feedback_lang_config.is_comment_only(result.delta_text):
+            runtime.pending_patch = None
+            runtime.feedback_parser_error = "patch is pure comments with no code"
+            logger.warning("feedback patch rejected: %s", runtime.feedback_parser_error)
+        else:
+            runtime.pending_patch = result.delta_text
+            runtime.feedback_parser_error = None
     runtime.last_feedback_mechanism = feedback_plan.mechanism
     budget.add_tokens(total_tokens)
     runtime.last_stop_reason = result.stop_reason
@@ -1112,7 +1117,7 @@ def _format_bailout_diagnostics(outputs: tuple[OracleOutput, ...]) -> str:
             )
     if not lines:
         return ""
-    return "oracle diagnostics:\n" + "\n".join(lines)
+    return "BAILOUT! Oracle diagnostics:\n" + "\n".join(lines)
 
 
 def _handle_bailout_terminate(
@@ -1184,6 +1189,7 @@ def _handle_terminate(
         action=Action.TERMINATE,
         verification_granularity=None,
         budget=budget,
+        oracle_outputs=runtime.last_outputs if is_bailout else (),
         notes="bailout" if is_bailout else "",
     )
 
@@ -1207,14 +1213,17 @@ def run_dtv_loop(
     inject_write_region_contract: bool = True,
     initial_messages: Sequence[GenerateMessage] | None = None,
 ) -> tuple[str, list[TraceEvent]]:
-    """
-    State machine (MVP):
-    - State vars: prefix, last_stop_reason, last_render_status, last_artifact, last_outputs,
-      failed_prefix, repair_regions, pending_patch.
-    - Actions: GENERATE, VERIFY(granularity), COMMIT, ROLLBACK(scope), FEEDBACK, APPLY_PATCH,
-      CONTINUE, TERMINATE.
-    - VERIFY performs render + oracle runs; render CONTINUE/FAIL yields no oracle outputs.
-    - FEEDBACK requires a prior failed_prefix and a repair base from ROLLBACK.
+    """Run the DTV decoding loop.
+
+    Returns (raw_assistant_content, trace):
+      - raw_assistant_content: the full assistant message as a string, including
+        any write-region markers and (on bailout) appended oracle diagnostics.
+        Callers should treat this the same as raw model output.
+      - trace: debug-only list of TraceEvent. Use for logging and analysis;
+        do NOT use trace for data flow to outer loops or repair prompts.
+
+    State machine actions: GENERATE, VERIFY(granularity), COMMIT,
+    ROLLBACK(scope), FEEDBACK, APPLY_PATCH, CONTINUE, TERMINATE.
     """
     if oracle_runner is None:
         oracle_runner = DummyOracleRunner()
@@ -1380,4 +1389,4 @@ def run_dtv_loop(
 
         raise ValueError(f"Unsupported action: {op.action}")
 
-    return runtime.state.prefix, trace
+    return runtime.assistant_prefix.render(), trace

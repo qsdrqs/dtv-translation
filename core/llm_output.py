@@ -93,7 +93,7 @@ class AssistantContent:
             parts.append(f"{self.markers.begin_marker}\n")
             parts.append(self.code)
             if self.has_end_marker:
-                parts.append(f"{self.markers.end_marker}\n")
+                parts.append(f"\n{self.markers.end_marker}\n\n")
                 parts.append(self.postlude)
         else:
             parts.append(self.code)

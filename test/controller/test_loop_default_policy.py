@@ -549,7 +549,7 @@ def test_default_policy_force_b_feedback_flows_through_loop() -> None:
     assert len(feedback_events) == 1
     assert feedback_events[0].notes == "feedback_mechanism=b"
     assert generator.feedback_states == [WriteRegionState.INSIDE, WriteRegionState.INSIDE]
-    assert final_prefix == "good;"
+    assert "good;" in final_prefix
 
 
 def test_default_policy_inline_feedback_restores_extractor_before_generation() -> None:
@@ -566,7 +566,7 @@ def test_default_policy_inline_feedback_restores_extractor_before_generation() -
     feedback_idx = generator.events.index("generate_feedback:1")
     assert generator.events[feedback_idx - 1] == "restore:1"
     assert generator.events[feedback_idx + 1] == "restore:1"
-    assert final_prefix == "good;"
+    assert "good;" in final_prefix
 
 
 class _AlwaysBadFeedbackGenerator:
@@ -689,7 +689,7 @@ def test_format_bailout_diagnostics_error_only() -> None:
     )
     result = _format_bailout_diagnostics(outputs)
     expected = (
-        "oracle diagnostics:\n"
+        "BAILOUT! Oracle diagnostics:\n"
         "- [tsc] severity=error code=E0308: mismatched types\n"
         "- [eslint] severity=error: missing annotation"
     )
@@ -737,7 +737,7 @@ class _AlwaysFailOracle:
         )
 
 
-def test_bailout_terminate_returns_rendered_code_as_prefix() -> None:
+def test_bailout_terminate_returns_rendered_code_in_raw_output() -> None:
     generator = _SequenceGenerator([
         _Step("let x = 1;", StopReason(kind="boundary")),
     ])
@@ -747,7 +747,7 @@ def test_bailout_terminate_returns_rendered_code_as_prefix() -> None:
         enable_feedback=False,
         bailout_visit_threshold=1,
     ))
-    prefix, trace = run_dtv_loop(
+    raw_output, trace = run_dtv_loop(
         generator=generator,
         renderer=renderer,
         oracles=[oracle],
@@ -758,13 +758,13 @@ def test_bailout_terminate_returns_rendered_code_as_prefix() -> None:
         feedback_lang_config=RUST_FEEDBACK_LANG,
         max_steps=20,
     )
-    # Bailout should return the rendered code (with suffix), not raw prefix.
-    assert prefix.endswith("\n// rendered")
+    assert "let x = 1;\n// rendered" in raw_output
+    assert "BAILOUT! Oracle diagnostics:" in raw_output
     actions = [e.action for e in trace]
     assert Action.TERMINATE in actions
 
 
-def test_normal_terminate_returns_raw_prefix() -> None:
+def test_normal_terminate_returns_raw_assistant_content() -> None:
     generator = _SequenceGenerator([
         _Step("let x = 1;", StopReason(kind="write_region_closed"),
               write_region_state=WriteRegionState.OUTSIDE),
@@ -772,14 +772,13 @@ def test_normal_terminate_returns_raw_prefix() -> None:
     renderer = _OkRenderer()
     oracle = _SequenceOracle([Verdict.PASS])
     policy = DefaultPolicy()
-    prefix, trace = _run_loop(generator, renderer, [oracle], policy, max_steps=20)
-    # Normal terminate: prefix is the raw code, not transformed.
-    assert prefix == "let x = 1;"
+    raw_output, trace = _run_loop(generator, renderer, [oracle], policy, max_steps=20)
+    assert "let x = 1;" in raw_output
     actions = [e.action for e in trace]
     assert Action.TERMINATE in actions
 
 
-def test_bailout_terminate_includes_diagnostics_in_assistant_prefix() -> None:
+def test_bailout_terminate_includes_diagnostics_in_raw_output() -> None:
     diags = (
         Diagnostic(message="bad type", severity="error", error_code="E0308"),
     )
@@ -792,7 +791,7 @@ def test_bailout_terminate_includes_diagnostics_in_assistant_prefix() -> None:
         enable_feedback=False,
         bailout_visit_threshold=1,
     ))
-    prefix, trace = run_dtv_loop(
+    raw_output, trace = run_dtv_loop(
         generator=generator,
         renderer=renderer,
         oracles=[oracle],
@@ -803,6 +802,8 @@ def test_bailout_terminate_includes_diagnostics_in_assistant_prefix() -> None:
         feedback_lang_config=RUST_FEEDBACK_LANG,
         max_steps=20,
     )
-    assert prefix == "bad;"
+    assert "bad;" in raw_output
+    assert "E0308" in raw_output
+    assert "bad type" in raw_output
     actions = [e.action for e in trace]
     assert Action.TERMINATE in actions

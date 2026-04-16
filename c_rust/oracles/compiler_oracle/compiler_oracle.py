@@ -27,8 +27,8 @@ logger = get_logger(__name__)
 # These are filtered out before verdict at STMT/BLOCK/FUNC level;
 # PROGRAM-level compilation keeps them because the full program is available.
 _PARTIAL_COMPILATION_NOISE: frozenset[str] = frozenset({
-    "E0425",  # cannot find value/function in this scope
     "E0412",  # cannot find type in this scope
+    "E0425",  # cannot find value/function in this scope
     "E0433",  # failed to resolve: use of undeclared crate or module
 })
 
@@ -88,12 +88,16 @@ class RustcOracle(Oracle):
         )
 
 
+def _is_partial_noise(d: Diagnostic) -> bool:
+    return d.error_code in _PARTIAL_COMPILATION_NOISE
+
+
 def _filter_partial_noise(
     diagnostics: tuple[Diagnostic, ...],
 ) -> tuple[Diagnostic, ...]:
     filtered = tuple(
         d for d in diagnostics
-        if d.error_code not in _PARTIAL_COMPILATION_NOISE
+        if not _is_partial_noise(d)
     )
     removed_any = len(filtered) < len(diagnostics)
     # Only clean up orphaned summaries ("aborting due to N previous errors")

@@ -913,39 +913,49 @@ def test_bailout_on_repeated_target() -> None:
 
 
 def test_bailout_counter_tracks_per_target() -> None:
-    """Visit counter is per-target. Different targets have independent counts."""
+    """Visit counter is per diagnostic signature. Different error codes have
+    independent counts even at the same checkpoint location."""
     config = DefaultPolicyConfig(
         bailout_visit_threshold=3,
         enable_feedback=False,
     )
     policy = DefaultPolicy(config)
 
+    # 2 visits for error E0308
     for _ in range(2):
         ctx = _ctx(
             prefix="bad;",
             last_action=Action.VERIFY,
             last_render_status=RenderStatus.OK,
-            last_outputs=_fail_outputs(scope=Granularity.STMT),
+            last_outputs=_fail_outputs_with_code(
+                error_code="E0308", message="mismatched types",
+            ),
         )
         _add_checkpoint(ctx.rollback, "target_A")
         op = policy.next_action(ctx)
         assert op.action == Action.ROLLBACK
 
+    # 1 visit for a different error E0384 - should NOT push E0308 over threshold
     ctx = _ctx(
         prefix="bad;",
         last_action=Action.VERIFY,
         last_render_status=RenderStatus.OK,
-        last_outputs=_fail_outputs(scope=Granularity.STMT),
+        last_outputs=_fail_outputs_with_code(
+            error_code="E0384", message="cannot assign to immutable",
+        ),
     )
-    _add_checkpoint(ctx.rollback, "target_B")
+    _add_checkpoint(ctx.rollback, "target_A")
     op = policy.next_action(ctx)
     assert op.action == Action.ROLLBACK
 
+    # 3rd visit for E0308 -> reaches threshold=3 -> bailout
     ctx = _ctx(
         prefix="bad;",
         last_action=Action.VERIFY,
         last_render_status=RenderStatus.OK,
-        last_outputs=_fail_outputs(scope=Granularity.STMT),
+        last_outputs=_fail_outputs_with_code(
+            error_code="E0308", message="mismatched types",
+        ),
     )
     _add_checkpoint(ctx.rollback, "target_A")
     op = policy.next_action(ctx)
@@ -992,18 +1002,17 @@ def test_bailout_counter_persists_across_commit() -> None:
 
 
 def test_bailout_on_ping_pong() -> None:
-    """Alternating STMT(target=A) and BLOCK(target=B) triggers bailout
-    when target A reaches threshold."""
+    """Alternating STMT and BLOCK failures with the same diagnostic share a
+    single bailout counter. The BLOCK failure counts toward the same error
+    signature, so bailout triggers after 6 total failures (not 6 per-scope)."""
     config = DefaultPolicyConfig(
         bailout_visit_threshold=6,
         enable_feedback=False,
-        # Prevent stall escalation from interfering with scope control.
         stmt_stall_max_retries_before_escalation=100,
     )
     policy = DefaultPolicy(config)
 
     def _make_stmt_fail_ctx():
-        """STMT fail: target key = last checkpoint = 'prefix_A'."""
         c = _ctx(
             prefix="bad;",
             last_action=Action.VERIFY,
@@ -1017,7 +1026,6 @@ def test_bailout_on_ping_pong() -> None:
         return c
 
     def _make_block_fail_ctx():
-        """BLOCK fail: target key = peek_rollback(BLOCK) = 'prefix_B'."""
         c = _ctx(
             prefix="bad;",
             last_action=Action.VERIFY,
@@ -1032,7 +1040,7 @@ def test_bailout_on_ping_pong() -> None:
 
     actions = []
 
-    # Cycle 1: 3 STMT(A) + 1 BLOCK(B)
+    # 3 STMT + 1 BLOCK = 4 visits to same diagnostic key
     for _ in range(3):
         op = policy.next_action(_make_stmt_fail_ctx())
         actions.append(op.action)
@@ -1042,14 +1050,14 @@ def test_bailout_on_ping_pong() -> None:
     actions.append(op.action)
     assert op.action == Action.ROLLBACK
 
-    # Cycle 2: 3 more STMT(A) -> A reaches count=6, bailout on 3rd
-    for i in range(3):
+    # 2 more STMT -> total 6 -> bailout on 6th
+    for i in range(2):
         op = policy.next_action(_make_stmt_fail_ctx())
         actions.append(op.action)
-        if i < 2:
+        if i < 1:
             assert op.action == Action.ROLLBACK, f"cycle 2 iter {i}"
         else:
-            assert op.action == Action.TERMINATE, "cycle 2 iter 2: expected bailout"
+            assert op.action == Action.TERMINATE, "cycle 2 iter 1: expected bailout"
             assert op.bailout is True
 
     assert actions.count(Action.TERMINATE) == 1
@@ -1138,3 +1146,97 @@ def test_bailout_counter_survives_commit() -> None:
         else:
             assert op.action == Action.TERMINATE, f"post-commit iter {i}: expected bailout"
             assert op.bailout is True
+
+
+def _fail_outputs_with_code(
+    *,
+    error_code: str = "E0308",
+    message: str = "mismatched types",
+    scope: Granularity = Granularity.STMT,
+) -> tuple[OracleOutput, ...]:
+    return (
+        OracleOutput(
+            oracle_name="oracle_0",
+            verdict=Verdict.FAIL,
+            diagnostics=(
+                Diagnostic(
+                    message=message,
+                    severity="error",
+                    error_code=error_code,
+                ),
+            ),
+            rollback_scope=scope,
+        ),
+    )
+
+
+def test_bailout_accumulates_across_drifting_prefixes() -> None:
+    """Same diagnostic (error_code + message) at different checkpoint prefixes
+    should share a single stall counter, triggering bailout even though the
+    exact checkpoint text changes each time.
+
+    This reproduces the s988421966 pattern: the model keeps hitting E0308 in
+    the same code region, but small committed changes shift the checkpoint,
+    creating 'new' targets under prefix-based keying.
+    """
+    config = DefaultPolicyConfig(
+        bailout_visit_threshold=3,
+        enable_feedback=False,
+    )
+    policy = DefaultPolicy(config)
+
+    drifting_prefixes = [
+        "fn main() { let x = 1;",
+        "fn main() { let x = 1; let y = 2;",
+        "fn main() { let x = 1; let y = 2; let z = 3;",
+    ]
+
+    for i, checkpoint in enumerate(drifting_prefixes):
+        ctx = _ctx(
+            prefix=checkpoint + " bad_code;",
+            last_action=Action.VERIFY,
+            last_render_status=RenderStatus.OK,
+            last_outputs=_fail_outputs_with_code(
+                error_code="E0308",
+                message="mismatched types",
+            ),
+        )
+        _add_checkpoint(ctx.rollback, checkpoint)
+        op = policy.next_action(ctx)
+        if i < 2:
+            assert op.action == Action.ROLLBACK, f"iter {i}: expected ROLLBACK"
+        else:
+            assert op.action == Action.TERMINATE, f"iter {i}: expected bailout"
+            assert op.bailout is True
+
+
+def test_different_errors_have_separate_stall_counts() -> None:
+    """Different error codes at the same checkpoint should NOT share a stall
+    counter. Two E0308 + two E0384 at threshold=3 should not trigger bailout
+    because neither error alone reaches the threshold.
+    """
+    config = DefaultPolicyConfig(
+        bailout_visit_threshold=3,
+        enable_feedback=False,
+    )
+    policy = DefaultPolicy(config)
+
+    errors = [
+        ("E0308", "mismatched types"),
+        ("E0384", "cannot assign to immutable"),
+        ("E0308", "mismatched types"),
+        ("E0384", "cannot assign to immutable"),
+    ]
+
+    for i, (code, msg) in enumerate(errors):
+        ctx = _ctx(
+            prefix="fn main() { let x = bad;",
+            last_action=Action.VERIFY,
+            last_render_status=RenderStatus.OK,
+            last_outputs=_fail_outputs_with_code(error_code=code, message=msg),
+        )
+        _add_checkpoint(ctx.rollback, "fn main() { ")
+        op = policy.next_action(ctx)
+        assert op.action == Action.ROLLBACK, (
+            f"iter {i} ({code}): expected ROLLBACK, got {op.action}"
+        )

@@ -148,7 +148,7 @@ def test_run_dtv_loop_returns_single_closed_candidate() -> None:
         max_steps=4,
     )
 
-    assert output == "let x = 1;"
+    assert "let x = 1;" in output
     assert [event.action for event in trace] == [
         Action.GENERATE,
         Action.VERIFY,

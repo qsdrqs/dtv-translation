@@ -84,9 +84,9 @@ class DefaultPolicy(Policy):
         self._repair_rounds: dict[tuple[str, Granularity], int] = {}
         self._repair_schedule: dict[tuple[str, Granularity], _RepairScheduleState] = {}
         self._pending_fail_snapshot: _FailSnapshot | None = None
-        self._stmt_stall_key: tuple[str, tuple[Granularity, ...]] | None = None
+        self._stmt_stall_key: tuple | None = None
         self._stmt_stall_retries: int = 0
-        self._target_visit_counts: dict[str, int] = {}
+        self._target_visit_counts: dict[tuple, int] = {}
 
     def next_action(self, ctx) -> ControllerOp:
         tokens_left = _tokens_left(ctx.budget)
@@ -305,14 +305,10 @@ class DefaultPolicy(Policy):
         self._stmt_stall_key = None
         self._stmt_stall_retries = 0
 
-    def _rollback_target_key(self, ctx, scope: Granularity) -> str | None:
-        if scope == Granularity.STMT:
-            if ctx.rollback.stmt_checkpoints:
-                return ctx.rollback.stmt_checkpoints[-1].code_prefix
-            return ""
-        if scope in (Granularity.BLOCK, Granularity.FUNC):
-            return ctx.rollback.peek_rollback(scope).code_prefix
-        return None
+    def _rollback_target_key(self, ctx, scope: Granularity) -> tuple | None:
+        fid = _func_id(ctx.rollback.group_stack)
+        error_code, message = _primary_diagnostic(ctx.last_outputs)
+        return (fid, error_code, message)
 
     def _select_fail_scope(self, ctx) -> Granularity:
         scope = _select_fail_scope(self.config, ctx.last_outputs)
@@ -320,7 +316,7 @@ class DefaultPolicy(Policy):
             self._reset_stmt_stall_state()
             return scope
 
-        key = _stmt_stall_key(ctx)
+        key = _diagnostic_stall_key(ctx)
         if key != self._stmt_stall_key:
             self._stmt_stall_key = key
             self._stmt_stall_retries = 1
@@ -423,12 +419,29 @@ def _select_fail_scope(config: DefaultPolicyConfig, outputs: tuple[OracleOutput,
     return min(config.default_fail_scope, Granularity.FUNC)
 
 
-def _stmt_stall_key(ctx) -> tuple[str, tuple[Granularity, ...]]:
-    anchor_prefix = ""
-    if ctx.rollback.stmt_checkpoints:
-        anchor_prefix = ctx.rollback.stmt_checkpoints[-1].code_prefix
+def _func_id(group_stack) -> str:
+    for frame in reversed(group_stack):
+        if frame.kind == Granularity.FUNC:
+            return frame.name_id or frame.group_id or "<func>"
+    return "<root>"
+
+
+def _primary_diagnostic(
+    outputs: tuple[OracleOutput, ...],
+) -> tuple[str | None, str | None]:
+    for output in outputs:
+        if output.verdict == Verdict.FAIL:
+            for diag in output.diagnostics:
+                if diag.severity in _ERROR_LEVELS:
+                    return (diag.error_code, diag.message)
+    return (None, None)
+
+
+def _diagnostic_stall_key(ctx) -> tuple[str, str | None, str | None, tuple[Granularity, ...]]:
+    fid = _func_id(ctx.rollback.group_stack)
+    error_code, message = _primary_diagnostic(ctx.last_outputs)
     active_groups = tuple(frame.kind for frame in ctx.rollback.group_stack)
-    return (anchor_prefix, active_groups)
+    return (fid, error_code, message, active_groups)
 
 
 def _has_active_block(ctx) -> bool:

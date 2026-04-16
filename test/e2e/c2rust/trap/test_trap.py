@@ -103,7 +103,7 @@ def test_trap_end_to_end(tmp_path: Path) -> None:
         prompt_prefix=prompt,
     )
 
-    assert final_prefix == expected_rust
+    assert expected_rust.rstrip() in final_prefix
     assert trace
     verify_events = [event for event in trace if event.action == Action.VERIFY]
     assert verify_events, "Expected at least one VERIFY event"

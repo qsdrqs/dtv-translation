@@ -261,10 +261,7 @@ fn main() {{
         Action.VERIFY,
         Action.TERMINATE,
     ]
-    assert final_prefix == """fn main() {
-    let x: i32 = "1";
-}
-"""
+    assert 'fn main() {\n    let x: i32 = "1";\n}\n' in final_prefix
     verify_events = [event for event in trace if event.action == Action.VERIFY]
     assert any(
         any(output.oracle_name == "rustc" and output.verdict == Verdict.FAIL for output in event.oracle_outputs)

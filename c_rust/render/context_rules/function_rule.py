@@ -70,7 +70,8 @@ class FunctionContextRule(ContextRule):
                 and completion.if_consequence_end <= analysis.end_byte
             )
             if consequence_closed:
-                plan.add_head_expr(" else { todo!() }", raw=True)
+                plan.add_head_expr(" else { todo!() };", raw=True)
+                plan.add_head_stmt("todo!()")
                 plan.notes.append("render_patch:fn_tail_if_else_head")
             else:
                 if completion.if_in_consequence:

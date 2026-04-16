@@ -70,7 +70,7 @@ from transformers import PreTrainedTokenizerBase, StoppingCriteriaList
 MODEL_NAME = "Qwen/Qwen3-4B-Instruct-2507"
 OUTPUT_TOKEN_CAP = 6144
 TOKEN_BUDGET = OUTPUT_TOKEN_CAP
-MAX_NEW_LENGTH = 2048
+MAX_NEW_LENGTH = 1024
 MAX_STEPS = 2000
 PROMPT_PREFIX = "Translate the following C code into Rust, keep the same function order:"
 DATASET_DIR = Path(os.environ.get("DTV_DATASET_DIR", "/home/qsdrqs/projects/agent_fuzz/selected_data_output"))
@@ -191,17 +191,7 @@ def _build_prompt(
     return f"{raw_prompt.rstrip()}\n\n{contract}"
 
 
-def _wrap_in_write_region(code: str, markers: WriteRegionMarkers) -> str:
-    return f"{markers.begin_marker}\n{code}\n{markers.end_marker}"
 
-
-def _dtv_terminated_without_write_region(trace: list[TraceEvent], final_prefix: str) -> bool:
-    if final_prefix:
-        return False
-    for event in reversed(trace):
-        if event.action == Action.GENERATE:
-            return event.stop_reason is not None and event.stop_reason.kind == "no_write_region_eos"
-    return False
 
 
 def _normalize_open_assistant_message(
@@ -442,7 +432,7 @@ def _make_dtv_regenerator(
         generator.reset_output_extractor()
         normalized_messages = _normalize_open_assistant_message(messages, markers)
         tokens_before = budget.gen_tokens_used
-        final_prefix, trace = run_dtv_loop(
+        raw_output, trace = run_dtv_loop(
             generator=generator,
             renderer=renderer_factory(),
             oracles=oracle_factory(),
@@ -460,7 +450,6 @@ def _make_dtv_regenerator(
         )
         delta_tokens = budget.gen_tokens_used - tokens_before
         dtv_metrics = _extract_dtv_metrics(trace)
-        raw_output = "" if _dtv_terminated_without_write_region(trace, final_prefix) else _wrap_in_write_region(final_prefix, markers)
         return RegenerationRoundResult(
             strategy="dtv",
             raw_output=raw_output,
@@ -572,11 +561,7 @@ def program_eval_loop(
         repair_prompt = _build_repair_prompt(compiler_output, markers)
         messages = [
             GenerateMessage(role="user", content=prompt, stop=True),
-            GenerateMessage(
-                role="assistant",
-                content=f"{markers.begin_marker}\n{code}\n{markers.end_marker}",
-                stop=True,
-            ),
+            GenerateMessage(role="assistant", content=last_raw, stop=True),
             GenerateMessage(role="user", content=repair_prompt, stop=True),
             GenerateMessage(role="assistant", content="", stop=False),
         ]
@@ -676,7 +661,7 @@ def run_single(
         policy = DefaultPolicy(config)
         generator.reset_output_extractor()
 
-        final_prefix, trace = run_dtv_loop(
+        raw_output, trace = run_dtv_loop(
             generator=generator,
             renderer=renderer,
             oracles=oracles,
@@ -699,15 +684,8 @@ def run_single(
         gen_commit = dtv_metrics["commit_count"]
         gen_trace = dtv_metrics["trace_log"]
 
-        if _dtv_terminated_without_write_region(trace, final_prefix):
-            initial_code = None
-        else:
-            render_result = renderer.try_render(final_prefix)
-            if render_result.status == RenderStatus.OK and render_result.artifact is not None:
-                initial_code = render_result.artifact.code
-            else:
-                initial_code = final_prefix
-        last_raw_output = ""
+        initial_code = _extract_write_region_code(raw_output, markers)
+        last_raw_output = raw_output
 
     eval_result = program_eval_loop(
         initial_code=initial_code,
