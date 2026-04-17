@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Callable, Protocol, cast
 
 from c_rust.feedback import RUST_FEEDBACK_LANG
-from c_rust.oracles import FunctionOracle, RustcOracle
+from c_rust.oracles import RustcOracle
 from c_rust.oracles.program_diff_test_oracle.execution_driver import compile_and_run
 from c_rust.render import CRustRenderer
 from controller.adapters import GeneratorAdapter
@@ -291,6 +291,10 @@ def _format_compile_feedback(compiler_output: str, max_lines: int = 20) -> str:
     if len(lines) > max_lines:
         shown.append(f"... {len(lines) - max_lines} more lines omitted")
     return "\n".join(f"- {line}" for line in shown)
+
+
+def _experiment_oracles() -> list[Oracle]:
+    return [RustcOracle()]
 
 
 def _build_repair_prompt(compiler_output: str, markers: WriteRegionMarkers) -> str:
@@ -624,7 +628,7 @@ def run_single(
     prompt = _build_prompt(c_source, PROMPT_PREFIX, "Rust", markers)
     budget = Budget(gen_tokens_budget=effective_budget)
     renderer_factory = lambda: CRustRenderer(sample=sample)
-    oracle_factory = lambda: cast(list[Oracle], [RustcOracle(), FunctionOracle()])
+    oracle_factory = _experiment_oracles
 
     t0 = time.time()
 
