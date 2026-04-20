@@ -22,6 +22,7 @@
             tree-sitter
             nodejs
             nodePackages.typescript
+            zlib
           ];
           shellHook = ''
           '';

@@ -36,6 +36,7 @@ from c_rust.oracles import RustcOracle
 from c_rust.oracles.program_diff_test_oracle.execution_driver import compile_and_run
 from c_rust.render import CRustRenderer
 from controller.adapters import GeneratorAdapter
+from core.gemma_generator_backend import GemmaGeneratorBackend
 from core.qwen_generator_backend import QwenGeneratorBackend
 from controller.loop import render_write_region_contract, run_dtv_loop
 from controller.policy import DefaultPolicy, DefaultPolicyConfig
@@ -68,11 +69,12 @@ from transformers import PreTrainedTokenizerBase, StoppingCriteriaList
 # -- Constants -----------------------------------------------------------------
 
 MODEL_NAME = "Qwen/Qwen3-4B-Instruct-2507"
+GEMMA_MODEL_NAME = "google/gemma-4-E4B-it"
 OUTPUT_TOKEN_CAP = 6144
 TOKEN_BUDGET = OUTPUT_TOKEN_CAP
 MAX_NEW_LENGTH = 1024
 MAX_STEPS = 2000
-PROMPT_PREFIX = "Translate the following C code into Rust, keep the same function order:"
+PROMPT_PREFIX = "Translate the following C code into Rust:"
 DATASET_DIR = Path(os.environ.get("DTV_DATASET_DIR", "/home/qsdrqs/projects/agent_fuzz/selected_data_output"))
 RESULT_DIR = Path("result")
 OUTPUT_PATH = RESULT_DIR / "ab_experiment_results.json"
@@ -101,6 +103,19 @@ class _StopCriteriaBackend(Protocol):
 
 class _TokenizerBackend(Protocol):
     tokenizer: PreTrainedTokenizerBase
+
+
+def resolve_backend_config(
+    *,
+    backend: str,
+    model_name: str | None,
+) -> tuple[type[QwenGeneratorBackend] | type[GemmaGeneratorBackend], str]:
+    if backend == "gemma":
+        resolved_model_name = model_name or GEMMA_MODEL_NAME
+        return GemmaGeneratorBackend, resolved_model_name
+
+    resolved_model_name = model_name or MODEL_NAME
+    return QwenGeneratorBackend, resolved_model_name
 
 
 # -- Metrics -------------------------------------------------------------------
@@ -349,10 +364,26 @@ def evaluate_final_rust_code(
 
         c_compile, c_results = compile_and_run(c_source, test_cases, "c", c_dir)
         if c_compile.compilation_failed:
+            c_stderr_snippet = (c_compile.stderr or "").strip().splitlines()[:3]
+            print(
+                "  !! eval WARN: C reference compilation failed; "
+                "Rust compile not attempted. Returned compiles=False does NOT mean the Rust code is broken.",
+                flush=True,
+            )
+            for ln in c_stderr_snippet:
+                print(f"     c_stderr: {ln}", flush=True)
             return False, 0, len(test_cases)
 
         rust_compile, rust_results = compile_and_run(rust_code, test_cases, "rust", rust_dir)
         if rust_compile.compilation_failed:
+            rust_stderr_snippet = (rust_compile.stderr or "").strip().splitlines()[:3]
+            print(
+                "  !! eval WARN: Rust compilation failed in evaluate_final_rust_code "
+                "(C reference compiled OK).",
+                flush=True,
+            )
+            for ln in rust_stderr_snippet:
+                print(f"     rust_stderr: {ln}", flush=True)
             return False, 0, len(test_cases)
 
         passed = 0
@@ -818,7 +849,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="A/B experiment: DTV vs naive feedback")
     parser.add_argument("case_ids", nargs="*", default=DEFAULT_CASE_IDS, help="Case IDs to run")
     parser.add_argument("--output", type=Path, default=OUTPUT_PATH, help="Output JSON path")
-    parser.add_argument("--model-name", default=MODEL_NAME, help="HuggingFace model ID")
+    parser.add_argument(
+        "--backend",
+        choices=("qwen", "gemma"),
+        default="qwen",
+        help="Generator backend (default: qwen)",
+    )
+    parser.add_argument(
+        "--model-name",
+        default=None,
+        help="HuggingFace model ID (default: backend-specific default)",
+    )
     parser.add_argument("--token-budget", type=int, default=OUTPUT_TOKEN_CAP, help="Fixed token budget")
     parser.add_argument("--budget-k", type=float, default=None,
                         help="Per-case budget = k * C_source_tokens (overrides --token-budget)")
@@ -830,7 +871,10 @@ def main() -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     pass_output_dir = output_path.parent / f"{output_path.stem}_pass_outputs"
 
-    model_name: str = args.model_name
+    backend_cls, model_name = resolve_backend_config(
+        backend=args.backend,
+        model_name=args.model_name,
+    )
     token_budget: int = args.token_budget
     budget_k: float | None = args.budget_k
     do_sample: bool | None = False if args.greedy else None
@@ -843,13 +887,14 @@ def main() -> None:
             DTVStoppingCriteria(tok, RUST_PROFILE, write_region_parser=write_region_parser)
         ],
         write_region_parser=write_region_parser,
-        backend_cls=QwenGeneratorBackend,
+        backend_cls=backend_cls,
         do_sample=do_sample,
     )
 
     budget_desc = f"BudgetK={budget_k}" if budget_k is not None else f"TokenBudget={token_budget}"
     sampling_desc = "greedy" if args.greedy else "default"
     print(f"Model loaded: {model_name}")
+    print(f"Backend: {args.backend}")
     print(f"Cases: {len(case_ids)}, {budget_desc}, MaxSteps={MAX_STEPS}, Sampling={sampling_desc}")
     print(f"Output: {output_path}")
 

@@ -224,13 +224,15 @@ def render_write_region_contract(
     markers: WriteRegionMarkers,
 ) -> str:
     return f"""When you are ready to write the final {language_name} candidate, emit exactly one write region.
-You may think before {markers.begin_marker}, but inside the write region output raw code only.
+You may think before {markers.begin_marker}, but inside the write region output raw code only without unnecessary comments or explanations
 DO NOT use markdown fences inside the write region.
 
 format:
 {markers.begin_marker}
 // Write your code here.
-{markers.end_marker}"""
+{markers.end_marker}
+
+"""
 
 
 def _policy_feedback_enabled(policy: Policy) -> bool:

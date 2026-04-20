@@ -7,3 +7,14 @@ __pycache__
 dtv.def
 *.sif
 *.tar
+.direnv
+.sisyphus
+result/
+result_delta/
+dataset/
+dataset_js_ts/
+plots_js_ts/
+*_pass_outputs/
+tmp/
+out.log
+*.heapsnapshot
