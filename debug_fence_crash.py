@@ -20,7 +20,7 @@ from typing import Any
 from c_rust.feedback import RUST_FEEDBACK_LANG
 from core.llm_output import AssistantContent, OutputExtractorState
 from core.types import GenerateContext, GenerateMessage, GenerationChannel
-from run_ab_experiment import (
+from run_experiments_c_rust import (
     DATASET_DIR,
     DTV_CONFIG,
     MAX_NEW_LENGTH,

@@ -14,6 +14,8 @@ class DiagnosticSpan:
     col: int = 0
     message: str = ""
     is_primary: bool = False
+    text: str = ""
+    suggested_replacement: str | None = None
 
 
 @dataclass(frozen=True)

@@ -522,6 +522,7 @@ def _handle_generate(
         and active_outputs
         and not (runtime.failed_prefix is not None and runtime.current_region is not None)
         and runtime.last_feedback_mechanism == FeedbackMechanism.A
+        and runtime.last_action != Action.CONTINUE
     ):
         update_last_assistant(
             messages,

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Naive JS->TS translation: generate full output, verify with oracles, retry on failure.
 
-Mirrors the naive baseline from run_ab_experiment.py but for the JS->TS task.
+Mirrors the naive baseline from run_experiments_js_ts.py but for the JS->TS task.
 Generates the complete translation in one shot, runs the same oracles as the
 DTV version (TscOracle, TscProgramOracle, EslintOracle), and retries with a
 repair prompt if any oracle fails.

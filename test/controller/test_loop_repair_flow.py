@@ -1308,6 +1308,174 @@ def test_generate_keeps_feedback_anchor_position_after_feedback_a() -> None:
     assert generate_prompt.find("/* repair feedback:") < generate_prompt.find("use std::io::{self, Write};\n")
 
 
+class _FeedbackAThenContinueGeneratePolicy:
+    def __init__(self) -> None:
+        self.stage = 0
+
+    def next_action(self, ctx) -> ControllerOp:
+        _ = ctx
+        ops = [
+            ControllerOp(Action.GENERATE),
+            ControllerOp(Action.VERIFY, verification_granularity=Granularity.PROGRAM),
+            ControllerOp(Action.ROLLBACK, rollback_scope=Granularity.PROGRAM),
+            ControllerOp(Action.FEEDBACK, feedback_mechanism=FeedbackMechanism.A),
+            ControllerOp(Action.APPLY_PATCH),
+            ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT),
+            ControllerOp(Action.CONTINUE),
+            ControllerOp(Action.GENERATE),
+        ]
+        if self.stage < len(ops):
+            op = ops[self.stage]
+            self.stage += 1
+            return op
+        return ControllerOp(Action.TERMINATE)
+
+    def reset_round_state(self) -> None:
+        pass
+
+    def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
+        if selection_granularity is None:
+            raise ValueError("selection_granularity is required")
+        return select_oracles_by_granularity(
+            artifact,
+            budget,
+            available,
+            selection_granularity=selection_granularity,
+        )
+
+
+def test_continue_after_feedback_a_does_not_reinject_block() -> None:
+    generator = _WriteRegionTrackingGenerator(
+        [
+            "bad stmt\n",
+            "use std::io::{self, Write};\n",
+            "next;\n",
+        ]
+    )
+    renderer = _ToggleRenderer()
+    program_oracle = _ScopeSequencedOracle(
+        name="program_oracle",
+        required_granularity=Granularity.PROGRAM,
+        rollback_scope=Granularity.PROGRAM,
+        verdicts=[Verdict.FAIL],
+        message="program mismatch",
+    )
+    stmt_oracle = _ScopeSequencedOracle(
+        name="stmt_oracle",
+        required_granularity=Granularity.STMT,
+        rollback_scope=Granularity.STMT,
+        verdicts=[Verdict.PASS],
+        message="unused",
+    )
+    budget = Budget(gen_tokens_budget=24)
+    feedback_state = FeedbackState()
+    rollback_manager = RollbackManager()
+    policy = _FeedbackAThenContinueGeneratePolicy()
+
+    run_dtv_loop(
+        generator=generator,
+        renderer=renderer,
+        oracles=[stmt_oracle, program_oracle],
+        budget=budget,
+        feedback_state=feedback_state,
+        rollback_manager=rollback_manager,
+        policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
+        max_steps=16,
+    )
+
+    assert len(generator.seen_assistant_messages) == 3
+    post_continue_prompt = generator.seen_assistant_messages[2]
+    assert "use std::io" in post_continue_prompt
+    assert "/* repair feedback:" not in post_continue_prompt
+
+
+class _FeedbackAThenMultipleContinueGeneratePolicy:
+    def __init__(self, continue_cycles: int = 3) -> None:
+        self.stage = 0
+        ops: list[ControllerOp] = [
+            ControllerOp(Action.GENERATE),
+            ControllerOp(Action.VERIFY, verification_granularity=Granularity.PROGRAM),
+            ControllerOp(Action.ROLLBACK, rollback_scope=Granularity.PROGRAM),
+            ControllerOp(Action.FEEDBACK, feedback_mechanism=FeedbackMechanism.A),
+            ControllerOp(Action.APPLY_PATCH),
+        ]
+        for _ in range(continue_cycles):
+            ops.append(ControllerOp(Action.VERIFY, verification_granularity=Granularity.STMT))
+            ops.append(ControllerOp(Action.CONTINUE))
+            ops.append(ControllerOp(Action.GENERATE))
+        self._ops = ops
+
+    def next_action(self, ctx) -> ControllerOp:
+        _ = ctx
+        if self.stage < len(self._ops):
+            op = self._ops[self.stage]
+            self.stage += 1
+            return op
+        return ControllerOp(Action.TERMINATE)
+
+    def reset_round_state(self) -> None:
+        pass
+
+    def select_oracles(self, artifact, budget, available, *, selection_granularity=None):
+        if selection_granularity is None:
+            raise ValueError("selection_granularity is required")
+        return select_oracles_by_granularity(
+            artifact,
+            budget,
+            available,
+            selection_granularity=selection_granularity,
+        )
+
+
+def test_multiple_continues_after_feedback_a_no_block_reinjection() -> None:
+    generator = _WriteRegionTrackingGenerator(
+        [
+            "bad stmt\n",
+            "use std::io::{self, Write};\n",
+            "a;\n",
+            "b;\n",
+            "c;\n",
+        ]
+    )
+    renderer = _ToggleRenderer()
+    program_oracle = _ScopeSequencedOracle(
+        name="program_oracle",
+        required_granularity=Granularity.PROGRAM,
+        rollback_scope=Granularity.PROGRAM,
+        verdicts=[Verdict.FAIL],
+        message="program mismatch",
+    )
+    stmt_oracle = _ScopeSequencedOracle(
+        name="stmt_oracle",
+        required_granularity=Granularity.STMT,
+        rollback_scope=Granularity.STMT,
+        verdicts=[Verdict.PASS],
+        message="unused",
+    )
+    budget = Budget(gen_tokens_budget=24)
+    feedback_state = FeedbackState()
+    rollback_manager = RollbackManager()
+    policy = _FeedbackAThenMultipleContinueGeneratePolicy(continue_cycles=3)
+
+    run_dtv_loop(
+        generator=generator,
+        renderer=renderer,
+        oracles=[stmt_oracle, program_oracle],
+        budget=budget,
+        feedback_state=feedback_state,
+        rollback_manager=rollback_manager,
+        policy=policy,
+        feedback_lang_config=RUST_FEEDBACK_LANG,
+        max_steps=32,
+    )
+
+    assert len(generator.seen_assistant_messages) == 5
+    post_continue_prompts = generator.seen_assistant_messages[2:5]
+    for prompt in post_continue_prompts:
+        assert "/* repair feedback:" not in prompt
+
+
 def test_generate_skips_inline_feedback_after_feedback_b() -> None:
     generator = _TrackingSequenceGenerator(
         [

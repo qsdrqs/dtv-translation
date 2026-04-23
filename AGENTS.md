@@ -3,7 +3,7 @@
 ## Project: Decoding Time Verification (DTV) for Code Translation
 
 1. no trailing spaces, no lines with only spaces
-2. keep this file up to date (last updated: 2026-04-13)
+2. keep this file up to date (last updated: 2026-04-22)
 3. Except for explicit reasons, do not use non-ASCII characters in the codebase or documentation.
 4. Although redundant comments are generally discouraged, necessary comments should be written at complex logic to explain the logic.
 5. Except for explicit reasons, always add imports at the beginning of the file. For explicit reasons, like slow imports, add a comment explaining why the import is not at the top.
@@ -101,6 +101,10 @@ This repo intentionally uses a flat top-level layout (no `src/`):
 ### Renderer
 - Legal prefix: a prefix is legal only if some completion can make the full program valid. If a construct is closed and non-exhaustive (for example, a closed `match` block without a wildcard arm), that prefix is illegal for the renderer.
 - This legal-prefix rule is a repo-wide invariant, not just a renderer detail. Feedback validation, checkpoint commits, and repair application must preserve the same property.
+- FP/FN priority: the renderer must minimize False Positives first, then False Negatives.
+  - FP = a correct prefix is rejected because scaffold/patch introduces an error the user did not write. Unacceptable: the oracle then blames a bug on the model that is actually our scaffold's fault.
+  - FN = an incorrect prefix is accepted because scaffold/patch masks a real error. Acceptable in moderation: DTV stmt-level generation rechecks the same region on subsequent steps, so a masked error surfaces later.
+  - Concretely, when a patch has two equally local options, prefer the one that is unconditionally compile-safe (for example, downgrading a value-context expression into a statement plus an independent `todo!()` tail) over the one that requires the user's branches to have compatible types.
 
 ### Design Decisions
 - Weakened Program Oracle (project-wide):
@@ -110,20 +114,41 @@ This repo intentionally uses a flat top-level layout (no `src/`):
   need to enforce full correctness - that is already handled post-hoc. The
   in-generation oracle only needs to provide actionable feedback that the model
   can use to improve the code during decoding.
-  - C -> Rust: program diff test oracle runs with relaxed matching; full
-    correctness verified post-hoc.
-  - JS -> TS: two layers of weakening:
-    1. `strict: false` in `tsc_check.js`.
-    2. Type-correctness errors (TS2322/TS2339/TS2345) filtered from diagnostics
-       before verdict (`filter_type_correctness` in `tsc_parser.py`).
-  Full type correctness is evaluated post-hoc (strict=true recheck on pass
-  outputs) rather than enforced during generation.
+  - C -> Rust:
+    - Program diff test oracle runs with relaxed matching; full correctness
+      verified post-hoc.
+    - `rustc` compile oracle filters resolvable E0277 at sub-PROGRAM
+      granularity (`_filter_resolvable_trait_bounds` in `compiler_oracle.py`):
+      E0277 whose fix may land in a later stmt is kept as PASS.
+      Triggers: rustc attached any machine suggestion (e.g.
+      `#[derive(PartialOrd)]` for super-trait, or `&`/`*` for usage-site
+      fixes), or the primary span sits on an `impl X for Y {` header (a later
+      `impl SuperTrait for Y` can satisfy it). Strict post-hoc recheck
+      catches any never-fixed cases. PROGRAM-level compilation does not
+      apply this filter.
+  - JS -> TS layered verification:
+    - `strict: false` in `tsc_check.js` across all verifier paths (inner,
+      outer, final eval).
+    - Inner DTV (STMT-level, `TscOracle` + `EslintOracle` via the oracle
+      interface): additional weakening via `filter_partial_noise` and
+      `filter_type_correctness` (drops TS2322/TS2339/TS2345 from verdict).
+      Provides actionable feedback during decoding.
+    - Outer repair loop and final evaluation bypass the oracle interface:
+      `_compile_ts_code` in `run_experiments_js_ts.py` directly invokes
+      `TscDriver` + `EslintDriver` and treats any `tsc.exit_code != 0` or
+      `eslint.error_count != 0` as failure, mirroring c_rust's
+      `_compile_rust_code`. No type-correctness filter at this layer, so the
+      outer loop is stricter than the inner DTV oracle (matches the c_rust
+      layering where outer rustc has no E0277 filter).
+    - Full type correctness via strict=true post-hoc recheck is NOT
+      implemented. If a paper claim requires it, add a `--strict` flag to
+      `tsc_check.js` and route final eval through a separate strict path.
 - ESLint as supplementary oracle (JS -> TS):
   - `@typescript-eslint/typedef` rule checks for missing type annotations.
   - ESLint hints (e.g. "Add an explicit type annotation") are included in
     feedback diagnostics.
   - Both DTV and naive receive ESLint hints equally (fairness constraint in
-    `run_ab_experiment_js_ts.py`).
+    `run_experiments_js_ts.py`).
 - Context rules for legal prefix (JS -> TS):
   - `try_catch_rule`: adds `catch(e) {}` to uncaught try statements so tsc can
     compile the prefix.
@@ -135,10 +160,12 @@ This repo intentionally uses a flat top-level layout (no `src/`):
 - Smoke demo: `./.venv/bin/python main.py`
 
 ### Experiment Infrastructure
-Top-level scripts for A/B experiments (DTV vs naive under equal token budget):
+Top-level scripts for experiments (naive vs dtv strategies under equal token budget).
+Each runner takes a required `--strategy {naive,dtv}` flag and runs ONE strategy per invocation;
+to produce an A/B pair, invoke twice with different `--output` paths.
 
-- `run_ab_experiment_js_ts.py`: JS->TS A/B runner. Saves pass outputs to `*_pass_outputs/{dtv,naive}/*.ts`.
-- `run_ab_experiment.py`: C->Rust A/B runner.
+- `run_experiments_js_ts.py`: JS->TS runner. Saves pass outputs to `*_pass_outputs/{dtv,naive}/*.ts`.
+- `run_experiments_c_rust.py`: C->Rust runner.
 - `run_single_js_ts_eval.py` / `run_single_js_ts_eval_naive.py`: single-case JS->TS eval (DTV / naive).
 - `select_cases_js_ts.py` / `select_cases.py`: random case selection (LOC filter, seed).
 - `merge_results_js_ts.py` / `merge_results.py`: merge parallel batch JSONs from workers.
@@ -189,7 +216,7 @@ Dataset:
 
 ### Experiments
 - [x] Dataset adapters: CodeNet (C->Rust), TypeWeaver (JS->TS).
-- [x] A/B experiment framework (`run_ab_experiment_js_ts.py`, merge, plot).
+- [x] A/B experiment framework (`run_experiments_js_ts.py`, merge, plot).
 - [ ] Curves: success rate vs verifier cost (generated tokens first), plus ablations.
 - [ ] Add wall-clock cost and caching:
   - [ ] Record oracle runtime in `TraceEvent`.

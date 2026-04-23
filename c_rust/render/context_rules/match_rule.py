@@ -5,8 +5,8 @@ from dataclasses import dataclass
 from c_rust.render.context_rules.base import (
     ContextRule,
     ContextRegistry,
-    ancestor_of_type,
     block_tail_needs_todo,
+    find_value_context,
     PatchPlan,
     Analysis,
 )
@@ -17,29 +17,6 @@ def _is_wildcard_match_pattern(pattern_node, prefix_bytes: bytes) -> bool:
         return False
     pattern_bytes = prefix_bytes[pattern_node.start_byte:pattern_node.end_byte]
     return pattern_bytes.strip() == b"_"
-
-
-def _is_fn_body_tail(match_node, prefix_bytes: bytes) -> bool:
-    """Check if match is the implicit return of a function returning non-()."""
-    fn_node = ancestor_of_type(match_node, ["function_item"])
-    if fn_node is None:
-        return False
-    body = fn_node.child_by_field_name("body")
-    if body is None:
-        return False
-    header_bytes = prefix_bytes[fn_node.start_byte:body.start_byte]
-    if b"->" not in header_bytes:
-        return False
-    tail = body.named_children[-1] if body.named_children else None
-    if tail is None:
-        return False
-    if tail.id == match_node.id:
-        return True
-    if tail.type == "expression_statement":
-        inner = tail.named_children[0] if tail.named_children else None
-        if inner is not None and inner.id == match_node.id:
-            return True
-    return False
 
 @dataclass(frozen=True)
 class MatchContext:
@@ -62,18 +39,7 @@ class MatchContextRule(ContextRule):
 
     def apply_analysis(self, nodes, *, anchor, end_byte: int, prefix_bytes: bytes, registry: ContextRegistry) -> None:
         for node in nodes:
-            in_value_context = ancestor_of_type(
-                node,
-                [
-                    "let_declaration",
-                    "let_statement",
-                    "assignment_expression",
-                    "return_expression",
-                    "argument_list",
-                ],
-            ) is not None
-            if not in_value_context:
-                in_value_context = _is_fn_body_tail(node, prefix_bytes)
+            in_value_context = find_value_context(node, prefix_bytes) is not None
             body = node.child_by_field_name("body")
             block_start = body.start_byte if body is not None else None
             block_end = body.end_byte if body is not None else None

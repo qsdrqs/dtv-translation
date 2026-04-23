@@ -26,7 +26,7 @@ from rollback.manager import RollbackManager
 MODEL_NAME = "Qwen/Qwen3-4B-Instruct-2507"
 TOKEN_BUDGET = 20480
 MAX_NEW_LENGTH = 1024
-PROMPT_PREFIX = "Adding type annotations to the following JavaScript code to convert it to TypeScript. Only add type annotations, do not change the code structure or logic. If you are unsure about the type, use 'any'.\n\n"
+PROMPT_PREFIX = "Add TypeScript type annotations to the following JavaScript code. Explicitly annotate every variable, function parameter, and function return type. Only add type annotations, do not change the code structure or logic. If you are unsure about the type, use 'any'.\n\n"
 
 
 def _load_tests(path: Path) -> list[TestCase]:

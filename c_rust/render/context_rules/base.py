@@ -17,6 +17,279 @@ class TailCompletionKind(str, Enum):
     NEEDS_SEMI_TODO = "needs_semi_todo"
 
 
+class NodeKind(str, Enum):
+    # Ancestor whose presence proves the descendant is in a value context
+    # (let/return/assignment/argument). `find_value_context` stops here.
+    VALUE_CTX_ANCESTOR = "value_ctx_ancestor"
+    # Tail-forwarding wrapper: its value equals the tail value of its inner
+    # block/expression. `find_value_context` verifies tail position and
+    # continues upward through it.
+    TAIL_FORWARDING = "tail_forwarding"
+    # Branching expression (if/match): its value equals the value of the
+    # selected branch. `find_value_context` verifies branch-tail position and
+    # continues upward.
+    BRANCHING = "branching"
+    # Wraps the inner value in a different type (Future<T>/Result<T,E>/...).
+    # For now we stop here without attempting Future/Result awareness.
+    VALUE_WRAPPING = "value_wrapping"
+    # Loop expression with a body block. Yields `()` (for/while) or `!`/
+    # `break X` type (loop). Not a value-context source. Renderer downgrades
+    # as fn tail (block value type rarely matches non-() fn return).
+    LOOPING = "looping"
+    # Control-flow leaf (break/continue). Yields `!`. Not a value-context
+    # source. Cannot appear as direct fn body tail in valid Rust (must be
+    # nested inside a loop).
+    CONTROL_LEAF = "control_leaf"
+    # `expression_statement`: conditional on whether a trailing `;` is present.
+    # `find_value_context` resolves this at runtime.
+    STATEMENT_WRAPPER = "statement_wrapper"
+    # `function_item` / `match_arm`: value context only if the descendant is
+    # at the respective tail position AND the outer context demands a value.
+    # `find_value_context` dispatches on the specific node type.
+    FN_BODY_OR_ARM = "fn_body_or_arm"
+    # Atomic expression nodes - literals, identifiers. Cannot appear as
+    # non-trivial ancestors during context walking.
+    LEAF = "leaf"
+    # Any other value-producing expression whose children sit in a value
+    # context (binary_expression, call_expression, field_expression, ...).
+    # `find_value_context` keeps walking upward through these.
+    VALUE_EXPR = "value_expr"
+
+
+# Single source of truth for how each tree-sitter-rust node type affects
+# value-context analysis. Covers every subtype of the `_expression` supertype
+# plus the non-expression ancestor node types that appear in parent chains
+# during context rule analysis. The meta-test in
+# `test/c_rust/test_node_classification.py` enforces completeness against the
+# grammar and catches stale entries on tree-sitter upgrades.
+NODE_CLASSIFICATION: dict[str, NodeKind] = {
+    # VALUE_CTX_ANCESTOR
+    "let_declaration":          NodeKind.VALUE_CTX_ANCESTOR,
+    "assignment_expression":    NodeKind.VALUE_CTX_ANCESTOR,
+    "compound_assignment_expr": NodeKind.VALUE_CTX_ANCESTOR,
+    "return_expression":        NodeKind.VALUE_CTX_ANCESTOR,
+    "arguments":                NodeKind.VALUE_CTX_ANCESTOR,
+    # TAIL_FORWARDING
+    "block":                    NodeKind.TAIL_FORWARDING,
+    "unsafe_block":             NodeKind.TAIL_FORWARDING,
+    "const_block":              NodeKind.TAIL_FORWARDING,
+    "parenthesized_expression": NodeKind.TAIL_FORWARDING,
+    # BRANCHING
+    "if_expression":            NodeKind.BRANCHING,
+    "match_expression":         NodeKind.BRANCHING,
+    # VALUE_WRAPPING
+    "async_block":              NodeKind.VALUE_WRAPPING,
+    "try_block":                NodeKind.VALUE_WRAPPING,
+    "gen_block":                NodeKind.VALUE_WRAPPING,
+    # LOOPING
+    "for_expression":           NodeKind.LOOPING,
+    "while_expression":         NodeKind.LOOPING,
+    "loop_expression":          NodeKind.LOOPING,
+    # CONTROL_LEAF
+    "break_expression":         NodeKind.CONTROL_LEAF,
+    "continue_expression":      NodeKind.CONTROL_LEAF,
+    # STATEMENT_WRAPPER
+    "expression_statement":     NodeKind.STATEMENT_WRAPPER,
+    # FN_BODY_OR_ARM
+    "function_item":            NodeKind.FN_BODY_OR_ARM,
+    "match_arm":                NodeKind.FN_BODY_OR_ARM,
+    # LEAF
+    "boolean_literal":          NodeKind.LEAF,
+    "char_literal":             NodeKind.LEAF,
+    "float_literal":            NodeKind.LEAF,
+    "integer_literal":          NodeKind.LEAF,
+    "raw_string_literal":       NodeKind.LEAF,
+    "string_literal":           NodeKind.LEAF,
+    "identifier":               NodeKind.LEAF,
+    "scoped_identifier":        NodeKind.LEAF,
+    "self":                     NodeKind.LEAF,
+    "metavariable":             NodeKind.LEAF,
+    "unit_expression":          NodeKind.LEAF,
+    "generic_function":         NodeKind.LEAF,
+    # VALUE_EXPR (everything else: propagate upward by default)
+    "array_expression":         NodeKind.VALUE_EXPR,
+    "await_expression":         NodeKind.VALUE_EXPR,
+    "binary_expression":        NodeKind.VALUE_EXPR,
+    "call_expression":          NodeKind.VALUE_EXPR,
+    "closure_expression":       NodeKind.VALUE_EXPR,
+    "field_expression":         NodeKind.VALUE_EXPR,
+    "index_expression":         NodeKind.VALUE_EXPR,
+    "macro_invocation":         NodeKind.VALUE_EXPR,
+    "range_expression":         NodeKind.VALUE_EXPR,
+    "reference_expression":     NodeKind.VALUE_EXPR,
+    "struct_expression":        NodeKind.VALUE_EXPR,
+    "try_expression":           NodeKind.VALUE_EXPR,
+    "tuple_expression":         NodeKind.VALUE_EXPR,
+    "type_cast_expression":     NodeKind.VALUE_EXPR,
+    "unary_expression":         NodeKind.VALUE_EXPR,
+    "yield_expression":         NodeKind.VALUE_EXPR,
+}
+
+
+class ValueContextReason(str, Enum):
+    LET = "let"
+    ASSIGNMENT = "assignment"
+    RETURN = "return"
+    ARGUMENT = "argument"
+    FN_BODY_TAIL = "fn_body_tail"
+    MATCH_ARM_VALUE = "match_arm_value"
+
+
+@dataclass(frozen=True)
+class ValueContextInfo:
+    reason: ValueContextReason
+
+
+_FN_TAIL_DOWNGRADE_KINDS: frozenset[NodeKind] = frozenset({
+    NodeKind.LOOPING,
+    NodeKind.BRANCHING,
+})
+
+
+_ANCESTOR_TO_REASON: dict[str, ValueContextReason] = {
+    "let_declaration":          ValueContextReason.LET,
+    "assignment_expression":    ValueContextReason.ASSIGNMENT,
+    "compound_assignment_expr": ValueContextReason.ASSIGNMENT,
+    "return_expression":        ValueContextReason.RETURN,
+    "arguments":                ValueContextReason.ARGUMENT,
+}
+
+
+def _ancestor_of_type_single(node, type_name: str):
+    cur = node.parent
+    while cur is not None:
+        if cur.type == type_name:
+            return cur
+        cur = cur.parent
+    return None
+
+
+def _inner_block_of_wrapper(wrapper):
+    if wrapper.type == "block":
+        return wrapper
+    for c in wrapper.children:
+        if c.type == "block":
+            return c
+    return None
+
+
+def _child_is_wrapper_tail(child, wrapper) -> bool:
+    if wrapper.type == "parenthesized_expression":
+        return bool(wrapper.named_children) and wrapper.named_children[0].id == child.id
+    inner = _inner_block_of_wrapper(wrapper)
+    if inner is None:
+        return False
+    if inner.id == child.id:
+        return True
+    return bool(inner.named_children) and inner.named_children[-1].id == child.id
+
+
+def _child_is_if_branch_tail(child, if_node) -> bool:
+    for field in ("consequence", "alternative"):
+        target = if_node.child_by_field_name(field)
+        if target is None:
+            continue
+        if target.id == child.id:
+            return True
+        if target.type == "block":
+            if target.named_children and target.named_children[-1].id == child.id:
+                return True
+        elif target.type == "else_clause":
+            for sub in target.named_children:
+                if sub.id == child.id:
+                    return True
+                if sub.type == "block" and sub.named_children and sub.named_children[-1].id == child.id:
+                    return True
+    return False
+
+
+def _fn_body_tail_info(child, fn_node, prefix_bytes: bytes) -> ValueContextInfo | None:
+    body = fn_node.child_by_field_name("body")
+    if body is None or body.id != child.id:
+        return None
+    header_bytes = prefix_bytes[fn_node.start_byte:body.start_byte]
+    if b"->" not in header_bytes:
+        return None
+    return ValueContextInfo(reason=ValueContextReason.FN_BODY_TAIL)
+
+
+def _match_arm_value_info(child, arm_node, prefix_bytes: bytes) -> ValueContextInfo | None:
+    arm_value = arm_node.child_by_field_name("value")
+    if arm_value is None or arm_value.id != child.id:
+        return None
+    match_node = _ancestor_of_type_single(arm_node, "match_expression")
+    if match_node is None:
+        return None
+    if find_value_context(match_node, prefix_bytes) is None:
+        return None
+    return ValueContextInfo(reason=ValueContextReason.MATCH_ARM_VALUE)
+
+
+def find_value_context(node, prefix_bytes: bytes) -> ValueContextInfo | None:
+    """Walk `node`'s ancestor chain to determine whether it sits in a value context.
+
+    Returns a `ValueContextInfo` with the reason that settled the decision, or
+    `None` when the ancestor chain blocks value-context propagation.
+
+    Dispatch is driven by `NODE_CLASSIFICATION`; see the `NodeKind` docstrings
+    for the role of each category. Unknown node types (not expected after the
+    Layer A meta-test) return `None` defensively.
+    """
+    child = node
+    parent = node.parent
+    while parent is not None:
+        kind = NODE_CLASSIFICATION.get(parent.type)
+
+        if kind == NodeKind.VALUE_CTX_ANCESTOR:
+            reason = _ANCESTOR_TO_REASON.get(parent.type)
+            if reason is None:
+                return None
+            return ValueContextInfo(reason=reason)
+
+        if kind == NodeKind.TAIL_FORWARDING:
+            if not _child_is_wrapper_tail(child, parent):
+                return None
+            child, parent = parent, parent.parent
+            continue
+
+        if kind == NodeKind.BRANCHING:
+            if parent.type == "if_expression":
+                if not _child_is_if_branch_tail(child, parent):
+                    return None
+                child, parent = parent, parent.parent
+                continue
+            return None
+
+        if kind == NodeKind.STATEMENT_WRAPPER:
+            if any(c.type == ";" for c in parent.children):
+                return None
+            child, parent = parent, parent.parent
+            continue
+
+        if kind == NodeKind.FN_BODY_OR_ARM:
+            if parent.type == "function_item":
+                return _fn_body_tail_info(child, parent, prefix_bytes)
+            if parent.type == "match_arm":
+                return _match_arm_value_info(child, parent, prefix_bytes)
+            return None
+
+        if kind == NodeKind.VALUE_EXPR:
+            child, parent = parent, parent.parent
+            continue
+
+        if kind in (
+            NodeKind.LOOPING,
+            NodeKind.CONTROL_LEAF,
+            NodeKind.VALUE_WRAPPING,
+            NodeKind.LEAF,
+        ):
+            return None
+
+        return None
+
+    return None
+
+
 @dataclass(frozen=True)
 class Analysis:
     ok: bool
@@ -249,6 +522,10 @@ def classify_block_tail(block_node, *, end_byte: int | None = None) -> TailCompl
         # when parsing scaffolded code - treat it as a value-producing tail.
         has_semicolon = any(c.type == ";" for c in tail_node.children)
         if not has_semicolon:
+            if NODE_CLASSIFICATION.get(expr.type) == NodeKind.TAIL_FORWARDING:
+                inner = _inner_block_of_wrapper(expr)
+                if inner is not None and inner.id != block_node.id:
+                    return classify_block_tail(inner, end_byte=end_byte)
             missing_else_if = _tail_if_missing_else(expr)
             if missing_else_if is not None:
                 consequence = missing_else_if.child_by_field_name("consequence")
@@ -263,12 +540,19 @@ def classify_block_tail(block_node, *, end_byte: int | None = None) -> TailCompl
                         if_in_consequence=in_consequence,
                     )
                 return TailCompletion(kind=TailCompletionKind.NEEDS_SEMI_TODO)
-            if expr.type in {"while_expression", "for_expression"}:
+            # Loud-fail policy: downgrade block-yielding tails (must_use
+            # warning is visible to oracle, vs silent E0308 from misjudge).
+            # Set membership tracks NodeKind, completeness enforced by
+            # test_fn_tail_downgrade_set_matches_node_classification.
+            # VALUE_WRAPPING (async/try/gen block) intentionally excluded:
+            # nightly-only, absent from CodeNet dataset.
+            expr_kind = NODE_CLASSIFICATION.get(expr.type)
+            if expr_kind in _FN_TAIL_DOWNGRADE_KINDS:
                 return TailCompletion(kind=TailCompletionKind.NEEDS_SEMI_TODO)
             return TailCompletion(kind=TailCompletionKind.COMPLETE)
         return TailCompletion(kind=TailCompletionKind.NEEDS_TODO)
 
-    if tail_node.type in {"let_declaration", "let_statement", "empty_statement"}:
+    if tail_node.type in {"let_declaration", "empty_statement"}:
         return TailCompletion(kind=TailCompletionKind.NEEDS_TODO)
     if tail_node.type.endswith("_item"):
         return TailCompletion(kind=TailCompletionKind.NEEDS_TODO)

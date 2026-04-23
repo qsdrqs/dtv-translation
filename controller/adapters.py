@@ -147,10 +147,14 @@ class GeneratorAdapter(Generator):
             )
             assistant_accum = assistant_accum.with_code(extracted)
             logger.info(
-                "generate_step complete: delta_tokens=%s stop_reason=%s extracted_chars=%s",
+                "generate_step complete: delta_tokens=%s stop_reason=%s extracted_chars=%s "
+                "saw_begin=%s saw_end=%s wr_state=%s",
                 result.delta_tokens,
                 stop_reason.kind,
                 len(extracted),
+                current_shared.saw_begin,
+                current_shared.saw_end,
+                current_shared.state.value,
             )
             return GenerateResult(
                 delta_text=extracted,
@@ -203,10 +207,14 @@ class GeneratorAdapter(Generator):
             assistant_accum = merge_assistant_content(assistant_accum, assistant_delta)
 
         logger.info(
-            "generate_step complete: delta_tokens=%s stop_reason=%s extracted_chars=%s",
+            "generate_step complete: delta_tokens=%s stop_reason=%s extracted_chars=%s "
+            "saw_begin=%s saw_end=%s wr_state=%s",
             total_tokens,
             stop_reason.kind,
             len(extracted),
+            current_extract.saw_begin,
+            current_extract.saw_end,
+            current_extract.state.value,
         )
         return GenerateResult(
             delta_text=extracted,

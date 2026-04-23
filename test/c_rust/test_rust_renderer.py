@@ -632,3 +632,416 @@ fn parse_flag(input: &str) -> bool {
     assert result.artifact is not None
     compile = compile_rust(result.artifact.code)
     assert compile.ok, compile.stderr
+
+
+def test_fn_tail_unsafe_block_if_missing_else_compiles() -> None:
+    # fn body tail is `unsafe { if cond { return x; } }`. The `unsafe` block
+    # forwards the inner block's tail value, so without a patch the function
+    # returns `()` and rustc raises E0317.
+    prefix = """\
+fn foo(a: i32) -> i32 {
+    if a == 0 {
+        return 0;
+    }
+    unsafe {
+        if a > 0 {
+            return a;
+        }
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_fn_tail_naked_block_if_missing_else_compiles() -> None:
+    # Same bug class with a naked `{ ... }` block as fn tail instead of `unsafe { ... }`.
+    prefix = """\
+fn foo(a: i32) -> i32 {
+    {
+        if a > 0 {
+            1
+        }
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_fn_tail_nested_wrappers_if_missing_else_compiles() -> None:
+    # Nested `unsafe { unsafe { if ... } }` as fn tail - recursion must go through
+    # every wrapper layer, not just the outermost one.
+    prefix = """\
+fn foo(a: i32) -> i32 {
+    unsafe {
+        unsafe {
+            if a > 0 {
+                return a;
+            }
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_fn_tail_wrapper_with_trailing_stmt_remains_compilable() -> None:
+    # Sanity: if the wrapper body has a concrete tail expression *after* a
+    # non-tail if, current renderer already handles it - this test guards
+    # against a Phase 4 regression.
+    prefix = """\
+fn foo() -> i32 {
+    unsafe {
+        if true {
+            1;
+        }
+        42
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_match_arm_wrapper_if_missing_else_compiles() -> None:
+    # Match arm value is `unsafe { if cond { ... } }`. FunctionContextRule
+    # cannot cover this - the fn tail is `match`, not a TAIL_FORWARDING
+    # wrapper - so IfContextRule must recognize the arm-inside-wrapper as a
+    # value context and emit the else patch itself.
+    prefix = """\
+fn foo() -> i32 {
+    match 0 {
+        _ => unsafe {
+            if true {
+                1
+            }
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_fn_tail_else_if_chain_open_consequence_compiles() -> None:
+    # Open-consequence counterpart: the sibling branch `{ let a = 1; }` has
+    # type `()` which pollutes the chain type; keeping the chain as a tail
+    # expression makes it incompatible with the non-() fn return.
+    prefix = """\
+fn foo(c: usize) -> Result<(), ()> {
+    if c == 0 { let a = 1; }
+    else if c == 1 { let a = 2;
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    assert "render_patch:fn_tail_if_else" in result.notes
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_fn_tail_complete_if_chain_with_unit_branches_compiles() -> None:
+    # Complete if/elif/else chain (no missing else) as fn body tail. Every arm
+    # is a statement block of type `()`, so the chain type is `()` and would
+    # break compatibility with the non-() fn return. The renderer must
+    # downgrade the chain to a statement with an independent fn tail.
+    prefix = """\
+fn foo(c: usize) -> Result<(), ()> {
+    let mut ret: i32 = 0;
+    if c == 0 {
+        ret = 1;
+    } else if c == 1 {
+        ret = 2;
+    } else {
+        ret = 3;
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_fn_tail_fully_closed_chain_inside_open_fn_body_compiles() -> None:
+    # Counterpart to the previous test: the chain itself is fully closed but
+    # the fn body is still open (user may keep adding statements). Chain type
+    # is still `()` and must be downgraded; relying on "expression closed"
+    # alone would miss this regression.
+    prefix = """\
+fn foo(c: usize) -> Result<(), ()> {
+    let mut ret: i32 = 0;
+    if c == 0 {
+        ret = 1;
+    } else if c == 1 {
+        ret = 2;
+    } else {
+        ret = 3;
+    }
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_fn_tail_loop_with_break_inside_open_if_compiles() -> None:
+    # Cursor lands inside `if` (open consequence). Renderer scaffolds 3 closing
+    # braces -> `loop { ... }` becomes the fn tail expression. `break;` makes
+    # the loop yield `()`, fn returns Result<(), ()> -> mismatch unless the
+    # renderer downgrades the loop to a statement with independent tail.
+    prefix = """\
+fn foo() -> Result<(), ()> {
+    let mut n: i32 = 0;
+    loop {
+        n += 1;
+        if n > 10 {
+            break;
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_closure_in_let_with_return_tail_compiles() -> None:
+    # Closure `|| -> T { ... return X; }` assigned to a let with no trailing `;`.
+    # LetContextRule must recognize closure_expression as a value block needing
+    # `;` after its close; otherwise the scaffold emits `let f = || {...}` with
+    # no semi, and the fn tail patch inserts `todo!()` right after, producing
+    # `let f = ... todo!()` which rustc rejects with `expected ;, found todo`.
+    prefix = """\
+fn foo() -> i32 {
+    let mut idx = 0;
+    let f = || -> i32 {
+        if idx >= 10 {
+            return 0;
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_closure_in_let_mut_matches_s927_pattern_compiles() -> None:
+    # Exact s927 shape: `let mut f = || -> i32 { ... }` (mutable binding plus
+    # closure). `let mut` adds a mutable_specifier child to let_declaration but
+    # the value field still resolves to closure_expression; regression guard
+    # ensuring the new elif branch covers the mut variant too.
+    prefix = """\
+fn foo() -> i32 {
+    let mut idx = 0;
+    let mut f = || -> i32 {
+        if idx >= 10 {
+            return 0;
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_closure_in_let_with_match_tail_compiles() -> None:
+    # Interplay: MatchContextRule operates on a match inside the closure body
+    # (adds `_ => todo!()` wildcard) while LetContextRule closes the outer
+    # `let f = || -> i32 { match ... }` with `;`. Both rules must cooperate for
+    # the scaffold to compile.
+    prefix = """\
+fn foo() -> i32 {
+    let x: i32 = 0;
+    let f = || -> i32 {
+        match x {
+            1 => return 1,
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_closure_body_tail_let_declaration_compiles() -> None:
+    # Closure body tail is a `let` declaration (produces `()`) but the closure
+    # declares `-> i32`. No existing rule patches closure body tails: IfRule/
+    # MatchRule only trigger on if/match tails, FunctionRule only targets
+    # `function_item`. Scaffold closes the closure here with no value tail,
+    # rustc rejects with E0308 (mismatched types, expected i32 found ()).
+    # Second half of s927: after `if { return 0; }` is complete the model
+    # writes a new `let val = ...;` and there is no rule to keep it compiling.
+    prefix = """\
+fn foo() -> i32 {
+    let f = || -> i32 {
+        let val = 42;
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_closure_body_after_if_return_then_let_matches_s927_compiles() -> None:
+    # The exact second-half s927 shape: closure body has a closed
+    # `if { return X; }` early-exit followed by a fresh `let val = ...;`.
+    # Without ClosureContextRule the closure body tail resolves to the
+    # let_declaration and rustc fires `E0308` with the signature hint
+    # "consider returning the local binding `val`".
+    prefix = """\
+fn foo() -> i32 {
+    let mut idx: i32 = 0;
+    let f = || -> i32 {
+        if idx > 0 {
+            return 0;
+        }
+        let val = idx;
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_closure_without_return_type_does_not_get_patched() -> None:
+    # Closure without explicit `-> T` returns the inferred type (unit here).
+    # Body tail = let_declaration = (); no mismatch. ClosureContextRule MUST
+    # skip (returns_value=False path) to avoid over-reaching and inserting a
+    # spurious `todo!()` that changes a compile-clean prefix into something
+    # else. Guards against FP in non-typed-closure patterns the LLM may emit.
+    prefix = """\
+fn foo() {
+    let f = || {
+        let x = 42;
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    assert "render_patch:closure_tail" not in result.notes
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_closure_body_tail_if_missing_else_delegates_to_if_rule() -> None:
+    # Architectural contract: when closure body tail is `if cond { X }` with a
+    # missing `else`, ClosureContextRule MUST skip (IF_MISSING_ELSE) and let
+    # IfContextRule handle the value-context patch via find_value_context
+    # (closure_expression=VALUE_EXPR, so the walk reaches the outer let).
+    # Double-patching would introduce a FP. Renderer may return CONTINUE for
+    # this s927 empirical shape (cursor in open consequence + tail expr) due to
+    # a separate IfRule bug; CONTINUE is abstention (not FP) and acceptable per
+    # FP-first policy. The delegation contract is asserted via note absence
+    # regardless of final render status.
+    prefix = """\
+fn foo() -> i32 {
+    let x: i32 = 0;
+    let f = || -> i32 {
+        if x > 0 {
+            1
+"""
+    result = _render(prefix)
+    assert result.status != RenderStatus.FAIL
+    assert "render_patch:closure_tail" not in result.notes
+    if result.status == RenderStatus.OK:
+        assert result.artifact is not None
+        compile = compile_rust(result.artifact.code)
+        assert compile.ok, compile.stderr
+
+
+def test_nested_fn_outer_returns_value_inner_unit_compiles() -> None:
+    # FunctionRule first-break picks innermost `fn inner` (returns_value=False,
+    # early exit) so outer `fn outer -> i32` body tail stays unpatched. s927
+    # `fn main -> io::Result<()>` + nested `fn genHash` is the real case.
+    prefix = """\
+fn outer() -> i32 {
+    fn inner() {
+        let x = 42;
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_nested_fn_both_return_values_compiles() -> None:
+    # Inner gets `todo!()` patch but outer body tail = inner function_item
+    # (value `()`), outer expected `i32`. Not specific to unit-returning inner.
+    prefix = """\
+fn outer() -> i32 {
+    fn inner() -> u32 {
+        let y = 10;
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_nested_fn_inner_if_missing_else_open_consequence_outer_needs_tail_compiles() -> None:
+    # Inner IF_MISSING_ELSE with `consequence_closed=False` + in_consequence
+    # patch (cursor inside an unclosed consequence with statement only).
+    # Outer fn body tail is the inner fn item (NEEDS_TODO). Cascade fix is
+    # required for outer.
+    prefix = """\
+fn outer() -> i32 {
+    fn inner() -> u32 {
+        if 1 > 0 {
+            let y = 1;
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_nested_fn_inner_if_missing_else_closed_consequence_outer_needs_tail_compiles() -> None:
+    # Inner IF_MISSING_ELSE with `consequence_closed=True` (consequence fully
+    # written and closed before cursor) exercises the head-expr path
+    # (` else { todo!() };` + fn tail todo!()). Outer still has inner fn item
+    # as body tail; cascade fix required.
+    prefix = """\
+fn outer() -> i32 {
+    fn inner() -> u32 {
+        if 1 > 0 {
+            42
+        }
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_nested_closure_outer_returns_value_inner_unit_does_not_produce_fp() -> None:
+    # ClosureRule has a symmetric first-break gap mirroring FunctionRule's.
+    # In practice this shape trips tree-sitter: nested `|| ... || ...`
+    # unclosed collapses the whole source_file into one ERROR node, so
+    # `_cursor_needs_continuation` returns CONTINUE before any rule runs.
+    # The ClosureRule FP is therefore unreachable today, cushioned by
+    # parse fragility rather than a deliberate abstention. This test locks
+    # in the no-FP contract: if tree-sitter recovery ever improves and the
+    # tree becomes clean, CONTINUE drops to OK, the scaffold renders an
+    # unpatched outer closure tail, compile fails, and this test fires.
+    prefix = """\
+fn foo() {
+    let f = || -> i32 {
+        let g = || {
+            let x = 10;
+"""
+    result = _render(prefix)
+    assert result.status != RenderStatus.FAIL
+    if result.status == RenderStatus.OK:
+        assert result.artifact is not None
+        compile = compile_rust(result.artifact.code)
+        assert compile.ok, compile.stderr

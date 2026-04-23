@@ -546,10 +546,11 @@ def _compile_c_binary(
         "-o",
         str(binary_file),
         str(source_file),
-        "-std=c11",
+        "-std=gnu11",
         "-Wall",
         # Export symbols so LD_PRELOAD cdylib can resolve C helpers (e.g. clamp_value).
         "-rdynamic",
+        "-lm",
     ]
     return _run_compile(cmd, workdir, timeout_s)
 
@@ -570,7 +571,7 @@ def _compile_c_object(
         str(source_file),
         "-o",
         str(object_file),
-        "-std=c11",
+        "-std=gnu11",
         "-Wall",
     ]
     return _run_compile(cmd, workdir, timeout_s), object_file

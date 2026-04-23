@@ -15,7 +15,7 @@ import json
 import sys
 from pathlib import Path
 
-from run_ab_experiment import RunResult, print_summary
+from run_experiments_c_rust import RunResult, print_summary
 
 DEFAULT_RESULT_DIR = Path("result")
 DEFAULT_OUTPUT = DEFAULT_RESULT_DIR / "ab_merged_results.json"

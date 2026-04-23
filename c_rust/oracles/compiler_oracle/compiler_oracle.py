@@ -32,6 +32,8 @@ _PARTIAL_COMPILATION_NOISE: frozenset[str] = frozenset({
     "E0433",  # failed to resolve: use of undeclared crate or module
 })
 
+_IMPL_HEADER_PREFIXES: tuple[str, ...] = ("impl ", "impl<")
+
 
 class RustcOracle(Oracle):
     name = "rustc"
@@ -72,6 +74,7 @@ class RustcOracle(Oracle):
 
         if self.required_granularity < Granularity.PROGRAM:
             diagnostics = _filter_partial_noise(diagnostics)
+            diagnostics = _filter_resolvable_trait_bounds(diagnostics)
 
         verdict = _decide_verdict(result.exit_code, diagnostics, result.timed_out)
         first_diag = diagnostics[0].message if diagnostics else ""
@@ -104,6 +107,40 @@ def _filter_partial_noise(
     # when we actually removed noise.  Without this guard, real errors that
     # lack an error_code (e.g. syntax errors) would be dropped.
     if removed_any:
+        has_coded_errors = any(
+            d.error_code is not None and d.severity in ("error", "fatal")
+            for d in filtered
+        )
+        if not has_coded_errors:
+            filtered = tuple(d for d in filtered if d.severity not in ("error", "fatal"))
+    return filtered
+
+
+def _is_impl_header(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped.startswith(_IMPL_HEADER_PREFIXES):
+        return False
+    return " for " in stripped and "{" in stripped
+
+
+def _is_resolvable_trait_bound(d: Diagnostic) -> bool:
+    # Filter E0277 whose fix may land in later stmts: rustc attached any machine
+    # suggestion (derive, borrow, deref - all count as "rustc knows a local
+    # auto-fix"), or the error is at `impl X for Y {` (a later super-trait
+    # impl satisfies it). Strict post-hoc recheck catches any never-fixed cases.
+    if d.error_code != "E0277":
+        return False
+    if any(s.suggested_replacement for s in d.spans):
+        return True
+    primary = next((s for s in d.spans if s.is_primary), None)
+    return primary is not None and _is_impl_header(primary.text)
+
+
+def _filter_resolvable_trait_bounds(
+    diagnostics: tuple[Diagnostic, ...],
+) -> tuple[Diagnostic, ...]:
+    filtered = tuple(d for d in diagnostics if not _is_resolvable_trait_bound(d))
+    if len(filtered) < len(diagnostics):
         has_coded_errors = any(
             d.error_code is not None and d.severity in ("error", "fatal")
             for d in filtered

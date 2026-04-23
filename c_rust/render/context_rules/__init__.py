@@ -15,6 +15,7 @@ from c_rust.render.context_rules.base import (
     classify_block_tail,
     has_else_clause,
 )
+from c_rust.render.context_rules.closure_rule import ClosureContext, ClosureContextRule
 from c_rust.render.context_rules.if_rule import IfContext, IfContextRule
 from c_rust.render.context_rules.let_rule import LetContext, LetContextRule
 from c_rust.render.context_rules.match_rule import MatchContext, MatchContextRule
@@ -30,6 +31,7 @@ CONTEXT_RULES: tuple[ContextRule, ...] = (
     MatchContextRule(),
     MatchArmTypeWitnessRule(),
     LetContextRule(),
+    ClosureContextRule(),
     FunctionContextRule(),
 )
 
@@ -51,6 +53,8 @@ def apply_patch_rules(
 
 __all__ = [
     "Analysis",
+    "ClosureContext",
+    "ClosureContextRule",
     "ContextRule",
     "ContextRegistry",
     "FunctionContext",

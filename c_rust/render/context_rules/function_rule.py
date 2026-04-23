@@ -53,43 +53,55 @@ class FunctionContextRule(ContextRule):
             )
 
     def apply_patch(self, plan: PatchPlan, analysis: Analysis) -> None:
-        target: FunctionContext | None = None
+        # Cascade over every enclosing function_item: scaffold force-closes all
+        # unclosed fn bodies, so each non-unit-returning one needs its own tail
+        # patch. Innermost-only first-break leaves outer fn tails dangling (the
+        # nested fn item yields `()`), producing scaffold-caused E0308 FPs.
+        # No fallback on body_start lookup: mis-routing `todo!()` to an outer
+        # brace in the cascade would create a scaffold bug that rejects legal
+        # prefixes (mirrors closure_rule.py policy).
         for ctx in self.get_contexts(analysis):
-            if isinstance(ctx, FunctionContext) and ctx.in_function:
-                target = ctx
-                break
-        if target is None or not target.returns_value:
-            return
-        completion = target.tail_completion
-        if (
-            completion.kind == TailCompletionKind.IF_MISSING_ELSE
-            and completion.if_consequence_start is not None
-        ):
-            consequence_closed = (
-                completion.if_consequence_end is not None
-                and completion.if_consequence_end <= analysis.end_byte
-            )
-            if consequence_closed:
-                plan.add_head_expr(" else { todo!() };", raw=True)
-                plan.add_head_stmt("todo!()")
-                plan.notes.append("render_patch:fn_tail_if_else_head")
-            else:
+            if not isinstance(ctx, FunctionContext) or not ctx.returns_value:
+                continue
+            completion = ctx.tail_completion
+            if completion.kind == TailCompletionKind.COMPLETE:
+                continue
+            if (
+                completion.kind == TailCompletionKind.IF_MISSING_ELSE
+                and completion.if_consequence_start is not None
+            ):
+                # Both branches downgrade the chain to a statement (`;`) + independent
+                # `todo!()` fn tail. Required for else-if chains where sibling arms we
+                # don't patch may have type `()` and would pollute the chain type.
+                # Tradeoff: downgrading hides type errors in a user-intended tail value
+                # (demotes E0308 to unused-value warning). Acceptable here because the
+                # patch is scaffold padding; the consequence gets rechecked as DTV
+                # generates more statements.
                 if completion.if_in_consequence:
                     plan.insert_before(completion.if_consequence_start, "todo!()")
-                plan.insert_before(completion.if_consequence_start, "} else { todo!()")
-                plan.notes.append("render_patch:fn_tail_if_else")
-            return
-        if completion.kind == TailCompletionKind.COMPLETE:
-            return
-        if completion.kind not in {
-            TailCompletionKind.NEEDS_TODO,
-            TailCompletionKind.NEEDS_SEMI_TODO,
-        }:
-            return
-        text = (
-            "; todo!()"
-            if completion.kind == TailCompletionKind.NEEDS_SEMI_TODO
-            else "todo!()"
-        )
-        plan.insert_before(target.body_start, text, fallback=plan.brace_count - 1)
-        plan.notes.append("render_patch:fn_tail")
+                consequence_closed = (
+                    completion.if_consequence_end is not None
+                    and completion.if_consequence_end <= analysis.end_byte
+                )
+                if consequence_closed:
+                    plan.add_head_expr(" else { todo!() };", raw=True)
+                    plan.add_head_stmt("todo!()")
+                    plan.notes.append("render_patch:fn_tail_if_else_head")
+                else:
+                    plan.insert_before(completion.if_consequence_start, "} else { todo!()")
+                    plan.insert_after(completion.if_consequence_start, ";")
+                    plan.insert_before(ctx.body_start, "todo!()")
+                    plan.notes.append("render_patch:fn_tail_if_else")
+                continue
+            if completion.kind not in {
+                TailCompletionKind.NEEDS_TODO,
+                TailCompletionKind.NEEDS_SEMI_TODO,
+            }:
+                continue
+            text = (
+                "; todo!()"
+                if completion.kind == TailCompletionKind.NEEDS_SEMI_TODO
+                else "todo!()"
+            )
+            plan.insert_before(ctx.body_start, text)
+            plan.notes.append("render_patch:fn_tail")

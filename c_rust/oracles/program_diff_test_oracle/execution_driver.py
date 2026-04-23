@@ -60,9 +60,9 @@ class GccDriver(CompilationDriver):
             self.compiler_path,
             "-o", str(binary_file),
             str(source_file),
-            "-std=c11",
+            "-std=gnu11",
             "-Wall",
-        ] + self.extra_flags
+        ] + self.extra_flags + ["-lm"]
 
         start_time = time.time()
         try:

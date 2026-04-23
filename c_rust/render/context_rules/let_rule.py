@@ -15,7 +15,7 @@ class LetContext:
 
 class LetContextRule(ContextRule):
     key = "let"
-    node_types = ("let_declaration", "let_statement")
+    node_types = ("let_declaration",)
     phase = PatchPhase.SYNTAX
 
     def apply_analysis(self, nodes, *, anchor, end_byte: int, prefix_bytes: bytes, registry: ContextRegistry) -> None:
@@ -53,6 +53,10 @@ class LetContextRule(ContextRule):
                     match_block = value_node.child_by_field_name("body")
                     if match_block is not None and match_block.type == "match_block":
                         value_block_start = match_block.start_byte
+                elif value_node.type == "closure_expression":
+                    body = value_node.child_by_field_name("body")
+                    if body is not None and body.type == "block":
+                        value_block_start = body.start_byte
 
             registry.add(
                 self.key,

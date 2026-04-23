@@ -22,7 +22,7 @@ _SAFE_WITNESS_TYPES: frozenset[str] = frozenset({
 
 
 def _enclosing_typed_let(match_node):
-    let_node = ancestor_of_type(match_node, ["let_declaration", "let_statement"])
+    let_node = ancestor_of_type(match_node, ["let_declaration"])
     if let_node is None:
         return None, None
     value_node = let_node.child_by_field_name("value")
@@ -117,7 +117,6 @@ class MatchArmTypeWitnessRule(ContextRule):
                 if tail is not None and tail.type not in (
                     "expression_statement",
                     "let_declaration",
-                    "let_statement",
                     "empty_statement",
                     "macro_invocation",
                 ):

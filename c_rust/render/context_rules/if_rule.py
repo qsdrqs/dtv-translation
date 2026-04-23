@@ -7,9 +7,8 @@ from c_rust.render.context_rules.base import (
     ContextRegistry,
     ContextRule,
     PatchPlan,
-    TailCompletionKind,
-    ancestor_of_type,
-    classify_block_tail,
+    ValueContextReason,
+    find_value_context,
     has_else_clause,
 )
 
@@ -32,18 +31,13 @@ class IfContextRule(ContextRule):
 
     def apply_analysis(self, nodes, *, anchor, end_byte: int, prefix_bytes: bytes, registry: ContextRegistry) -> None:
         for node in nodes:
-            in_value_context = ancestor_of_type(
-                node,
-                [
-                    "let_declaration",
-                    "let_statement",
-                    "assignment_expression",
-                    "return_expression",
-                    "argument_list",
-                ],
-            ) is not None
-            if not in_value_context:
-                in_value_context = _is_match_arm_value_tail(node, prefix_bytes=prefix_bytes, end_byte=end_byte)
+            vc = find_value_context(node, prefix_bytes)
+            # fn body tail is handled by FunctionContextRule's IF_MISSING_ELSE
+            # branch, which emits the `; todo!()` variant needed when the
+            # consequence is empty or type-incompatible with the return type.
+            in_value_context = (
+                vc is not None and vc.reason != ValueContextReason.FN_BODY_TAIL
+            )
             missing_else = not has_else_clause(node)
             in_consequence = False
             in_alternative = False
@@ -98,51 +92,3 @@ class IfContextRule(ContextRule):
             elif if_ctx.in_alternative:
                 plan.insert_before(if_ctx.alternative_start, "todo!()", fallback=idx)
                 plan.notes.append("render_patch:if_else_tail")
-
-
-def _is_match_arm_value_tail(if_node, *, prefix_bytes: bytes, end_byte: int) -> bool:
-    arm_node = ancestor_of_type(if_node, ["match_arm"])
-    if arm_node is None:
-        return False
-    arm_value = arm_node.child_by_field_name("value")
-    if arm_value is None or arm_value.type != "block":
-        return False
-    if not (arm_value.start_byte <= end_byte < arm_value.end_byte):
-        return False
-    match_node = ancestor_of_type(arm_node, ["match_expression"])
-    if match_node is None or not _match_is_in_value_context(match_node, prefix_bytes):
-        return False
-    completion = classify_block_tail(arm_value, end_byte=end_byte)
-    return completion.kind == TailCompletionKind.IF_MISSING_ELSE
-
-
-def _match_is_in_value_context(match_node, prefix_bytes: bytes) -> bool:
-    if ancestor_of_type(
-        match_node,
-        [
-            "let_declaration",
-            "let_statement",
-            "assignment_expression",
-            "return_expression",
-            "argument_list",
-        ],
-    ) is not None:
-        return True
-    fn_node = ancestor_of_type(match_node, ["function_item"])
-    if fn_node is None:
-        return False
-    body = fn_node.child_by_field_name("body")
-    if body is None:
-        return False
-    header_bytes = prefix_bytes[fn_node.start_byte:body.start_byte]
-    if b"->" not in header_bytes:
-        return False
-    tail = body.named_children[-1] if body.named_children else None
-    if tail is None:
-        return False
-    if tail.id == match_node.id:
-        return True
-    if tail.type != "expression_statement":
-        return False
-    inner = tail.named_children[0] if tail.named_children else None
-    return inner is not None and inner.id == match_node.id

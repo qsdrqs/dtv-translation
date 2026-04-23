@@ -6,10 +6,11 @@ from c_rust.oracles.compiler_oracle.compiler_oracle import (
     RustcProgramOracle,
     _decide_verdict,
     _filter_partial_noise,
+    _filter_resolvable_trait_bounds,
 )
 from c_rust.oracles.compiler_oracle.rustc_driver import RustcResult
 from c_rust.oracles.compiler_oracle.rustc_parser import has_errors, parse_rustc_diagnostics
-from core.types import Diagnostic, Verdict
+from core.types import Diagnostic, DiagnosticSpan, Verdict
 from test.c_rust.utils import compile_rust
 
 
@@ -241,3 +242,228 @@ fn main() {
     output = oracle.run(state, artifact, context)
     assert output.verdict == Verdict.FAIL
     assert any(d.error_code == "E0425" for d in output.diagnostics)
+
+
+# -- _filter_resolvable_trait_bounds tests --
+
+
+def _e0277_diag(
+    *,
+    primary_text: str = "",
+    suggestion: str | None = None,
+) -> Diagnostic:
+    primary = DiagnosticSpan(line=1, col=1, is_primary=True, text=primary_text)
+    spans: tuple[DiagnosticSpan, ...] = (primary,)
+    if suggestion is not None:
+        spans = spans + (DiagnosticSpan(line=2, col=1, suggested_replacement=suggestion),)
+    return Diagnostic(
+        message="can't compare `Foo` with `Foo`",
+        severity="error",
+        error_code="E0277",
+        spans=spans,
+    )
+
+
+def test_filter_resolvable_trait_bounds_removes_e0277_with_suggestion() -> None:
+    diagnostics = (
+        _e0277_diag(primary_text="let v: Vec<Foo> = vec![]; v.sort();", suggestion="#[derive(Ord)]\n"),
+    )
+    assert _filter_resolvable_trait_bounds(diagnostics) == ()
+
+
+def test_filter_resolvable_trait_bounds_removes_e0277_at_impl_header() -> None:
+    diagnostics = (
+        _e0277_diag(primary_text="impl Bar for S {}", suggestion=None),
+    )
+    assert _filter_resolvable_trait_bounds(diagnostics) == ()
+
+
+def test_filter_resolvable_trait_bounds_keeps_e0277_without_signals() -> None:
+    diagnostics = (
+        _e0277_diag(primary_text="fn main() { show(Foo); }", suggestion=None),
+    )
+    assert _filter_resolvable_trait_bounds(diagnostics) == diagnostics
+
+
+def test_filter_resolvable_trait_bounds_removes_e0277_with_non_derive_suggestion() -> None:
+    diagnostics = (
+        _e0277_diag(
+            primary_text="    let v: Vec<Option<Box<Foo>>> = vec![None; 4];",
+            suggestion="&",
+        ),
+    )
+    assert _filter_resolvable_trait_bounds(diagnostics) == ()
+
+
+def test_filter_resolvable_trait_bounds_keeps_non_e0277() -> None:
+    diagnostics = (
+        Diagnostic(
+            message="mismatched types",
+            severity="error",
+            error_code="E0308",
+            spans=(DiagnosticSpan(line=1, col=1, is_primary=True, text="impl X for Y {"),),
+        ),
+    )
+    assert _filter_resolvable_trait_bounds(diagnostics) == diagnostics
+
+
+def test_filter_resolvable_trait_bounds_removes_orphaned_summary() -> None:
+    diagnostics = (
+        _e0277_diag(primary_text="impl Ord for Team {", suggestion="#[derive(PartialOrd)]\n"),
+        Diagnostic(message="aborting due to 1 previous error", error_code=None, severity="error"),
+    )
+    assert _filter_resolvable_trait_bounds(diagnostics) == ()
+
+
+# -- parser captures new fields --
+
+
+def test_rustc_parser_captures_span_text_and_suggested_replacement() -> None:
+    code = """\
+#[derive(PartialEq, Eq)]
+struct Foo { v: i32 }
+
+impl Ord for Foo {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.v.cmp(&other.v)
+    }
+}
+"""
+    compile = compile_rust(code, error_format="json")
+    result = RustcResult(
+        stdout=compile.stdout,
+        stderr=compile.stderr,
+        exit_code=compile.returncode,
+        elapsed_ms=0,
+        command=("rustc",),
+        source_path=Path("lib.rs"),
+        output_path=Path("lib.rlib"),
+        timed_out=False,
+    )
+    diagnostics = parse_rustc_diagnostics(result)
+    e0277 = next((d for d in diagnostics if d.error_code == "E0277"), None)
+    assert e0277 is not None
+    primary = next((s for s in e0277.spans if s.is_primary), None)
+    assert primary is not None
+    assert primary.text.lstrip().startswith("impl Ord for Foo")
+    assert any(
+        s.suggested_replacement and "derive" in s.suggested_replacement
+        for s in e0277.spans
+    )
+
+
+# -- e2e: real rustc output, filter + verdict --
+
+
+def test_e2e_derivable_super_trait_filtered_at_stmt_level() -> None:
+    code = """\
+#[derive(PartialEq, Eq)]
+struct Foo { v: i32 }
+
+impl Ord for Foo {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.v.cmp(&other.v)
+    }
+}
+"""
+    compile = compile_rust(code, error_format="json")
+    result = RustcResult(
+        stdout=compile.stdout,
+        stderr=compile.stderr,
+        exit_code=compile.returncode,
+        elapsed_ms=0,
+        command=("rustc",),
+        source_path=Path("lib.rs"),
+        output_path=Path("lib.rlib"),
+        timed_out=False,
+    )
+    diagnostics = parse_rustc_diagnostics(result)
+    assert any(d.error_code == "E0277" for d in diagnostics)
+    filtered = _filter_partial_noise(diagnostics)
+    filtered = _filter_resolvable_trait_bounds(filtered)
+    verdict = _decide_verdict(compile.returncode, filtered, timed_out=False)
+    assert verdict == Verdict.PASS
+
+
+def test_e2e_non_derivable_super_trait_filtered_at_stmt_level() -> None:
+    code = """\
+trait Foo { fn foo(&self); }
+trait Bar: Foo {}
+
+struct S;
+
+impl Bar for S {}
+"""
+    compile = compile_rust(code, error_format="json")
+    result = RustcResult(
+        stdout=compile.stdout,
+        stderr=compile.stderr,
+        exit_code=compile.returncode,
+        elapsed_ms=0,
+        command=("rustc",),
+        source_path=Path("lib.rs"),
+        output_path=Path("lib.rlib"),
+        timed_out=False,
+    )
+    diagnostics = parse_rustc_diagnostics(result)
+    assert any(d.error_code == "E0277" for d in diagnostics)
+    filtered = _filter_partial_noise(diagnostics)
+    filtered = _filter_resolvable_trait_bounds(filtered)
+    verdict = _decide_verdict(compile.returncode, filtered, timed_out=False)
+    assert verdict == Verdict.PASS
+
+
+def test_e2e_non_derive_suggestion_filtered_at_stmt_level() -> None:
+    code = """\
+struct Foo;
+
+fn main() {
+    let v: Vec<Option<Box<Foo>>> = vec![None; 4];
+}
+"""
+    compile = compile_rust(code, crate_type="bin", error_format="json")
+    result = RustcResult(
+        stdout=compile.stdout,
+        stderr=compile.stderr,
+        exit_code=compile.returncode,
+        elapsed_ms=0,
+        command=("rustc",),
+        source_path=Path("lib.rs"),
+        output_path=Path("lib.rlib"),
+        timed_out=False,
+    )
+    diagnostics = parse_rustc_diagnostics(result)
+    assert any(d.error_code == "E0277" for d in diagnostics)
+    filtered = _filter_partial_noise(diagnostics)
+    filtered = _filter_resolvable_trait_bounds(filtered)
+    verdict = _decide_verdict(compile.returncode, filtered, timed_out=False)
+    assert verdict == Verdict.PASS
+
+
+def test_e2e_display_missing_not_filtered_at_stmt_level() -> None:
+    code = """\
+use std::fmt::Display;
+
+struct Foo;
+
+fn show<T: Display>(x: T) { println!("{}", x); }
+
+fn main() { show(Foo); }
+"""
+    compile = compile_rust(code, error_format="json")
+    result = RustcResult(
+        stdout=compile.stdout,
+        stderr=compile.stderr,
+        exit_code=compile.returncode,
+        elapsed_ms=0,
+        command=("rustc",),
+        source_path=Path("lib.rs"),
+        output_path=Path("lib.rlib"),
+        timed_out=False,
+    )
+    diagnostics = parse_rustc_diagnostics(result)
+    assert any(d.error_code == "E0277" for d in diagnostics)
+    filtered = _filter_partial_noise(diagnostics)
+    filtered = _filter_resolvable_trait_bounds(filtered)
+    verdict = _decide_verdict(compile.returncode, filtered, timed_out=False)
+    assert verdict == Verdict.FAIL

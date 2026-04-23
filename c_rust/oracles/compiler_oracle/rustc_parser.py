@@ -103,8 +103,21 @@ def _extract_primary_span(payload: dict[str, Any]) -> DiagnosticSpan | None:
             line=line_start,
             col=column_start if isinstance(column_start, int) else 0,
             is_primary=True,
+            text=_extract_span_text(primary),
         )
     return None
+
+
+def _extract_span_text(span: dict[str, Any]) -> str:
+    text_field = span.get("text")
+    if not isinstance(text_field, list) or not text_field:
+        return ""
+    first = text_field[0]
+    if isinstance(first, dict):
+        t = first.get("text")
+        if isinstance(t, str):
+            return t
+    return ""
 
 
 def _extract_children_info(
@@ -140,10 +153,13 @@ def _collect_children(
                 line_start = cs.get("line_start")
                 column_start = cs.get("column_start")
                 if isinstance(line_start, int):
+                    sr = cs.get("suggested_replacement")
                     related.append(DiagnosticSpan(
                         line=line_start,
                         col=column_start if isinstance(column_start, int) else 0,
                         message=msg_text,
+                        text=_extract_span_text(cs),
+                        suggested_replacement=sr if isinstance(sr, str) and sr else None,
                     ))
         nested_children = child.get("children")
         _collect_children(nested_children, hints, related)
