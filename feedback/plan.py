@@ -35,7 +35,7 @@ def build_feedback_plan(
     write_region_markers: WriteRegionMarkers = DEFAULT_WRITE_REGION_MARKERS,
 ) -> FeedbackPlan:
     if mechanism == FeedbackMechanism.B:
-        diff_injection = _render_minus_prefill(repair_context.failed_snippet) + "+ "
+        diff_injection = _render_minus_prefill(repair_context.failed_snippet) + "+"
         return FeedbackPlan(
             mechanism=mechanism,
             channel=GenerationChannel.PATCH,
@@ -69,7 +69,9 @@ def render_feedback_prompt(
     if use_stmt_diff:
         constraints.extend([
             "Return a unified diff patch for the failed snippet.",
-            'Use "-" lines for the current failing snippet and "+" lines for the replacement snippet.',
+            'Every line MUST start with "-" (original) or "+" (replacement). '
+            "No blank lines, prose, or other content anywhere in the patch, "
+            "including at the end of your patch.",
         ])
     constraints_block = "\n".join(f"- {line}" for line in constraints)
     parser_error_section = ""
@@ -111,24 +113,6 @@ output contract:
 {write_region_markers.end_marker}
 """
 
-
-def _build_response_prefix(
-    repair_context: RepairContext,
-    lang_config: FeedbackLanguageConfig,
-    use_stmt_diff: bool,
-    write_region_markers: WriteRegionMarkers = DEFAULT_WRITE_REGION_MARKERS,
-) -> AssistantContent:
-    if not use_stmt_diff:
-        return AssistantContent.empty()
-    diff_lines = _render_minus_prefill(repair_context.failed_snippet)
-
-    diff_lines += "+ "
-    return AssistantContent(
-        code=diff_lines,
-        has_begin_marker=True,
-        region_state=WriteRegionState.INSIDE,
-        markers=write_region_markers,
-    )
 
 
 def _render_minus_prefill(snippet: str) -> str:
