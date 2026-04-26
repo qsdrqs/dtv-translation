@@ -141,8 +141,7 @@ class QwenGeneratorBackend(GeneratorBackend):
             attention_mask=inputs.attention_mask,
             max_new_tokens=context.max_new_length,
             stopping_criteria=self.stop_criteria,
-            do_sample=self.do_sample,
-            temperature=self.temperature,
+            **self._sampling_kwargs(),
         )
 
         output_ids = outputs[0]

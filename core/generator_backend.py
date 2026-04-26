@@ -46,6 +46,18 @@ class GeneratorBackend(ABC):
             return content.render()
         return content
 
+    def _sampling_kwargs(self) -> dict[str, Any]:
+        # Omit None-valued keys so the model's loaded generation_config takes
+        # effect. In transformers 5.5.x, passing do_sample=None as a kwarg
+        # unconditionally overwrites the model's do_sample=True, and the
+        # `None is not True` check then silently routes to greedy decoding.
+        kwargs: dict[str, Any] = {}
+        if self.do_sample is not None:
+            kwargs["do_sample"] = self.do_sample
+        if self.temperature is not None:
+            kwargs["temperature"] = self.temperature
+        return kwargs
+
     def set_generation_channel(self, channel: GenerationChannel) -> None:
         _ = channel
 

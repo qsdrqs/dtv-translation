@@ -1,13 +1,33 @@
 from __future__ import annotations
 
 from core.generator_backend import infer_stop_reason
+from core.gemma_generator_backend import GemmaGeneratorBackend
 from core.qwen_generator_backend import QwenGeneratorBackend
 from core.types import GenerateContext, GenerateMessage
 
 
-def _make_backend(*, enable_thinking: bool | None = None) -> QwenGeneratorBackend:
+def _make_backend(
+    *,
+    enable_thinking: bool | None = None,
+    do_sample: bool | None = None,
+    temperature: float | None = None,
+) -> QwenGeneratorBackend:
     backend = QwenGeneratorBackend.__new__(QwenGeneratorBackend)
     backend.enable_thinking = enable_thinking
+    backend.do_sample = do_sample
+    backend.temperature = temperature
+    return backend
+
+
+def _make_gemma_backend(
+    *,
+    do_sample: bool | None = None,
+    temperature: float | None = None,
+) -> GemmaGeneratorBackend:
+    backend = GemmaGeneratorBackend.__new__(GemmaGeneratorBackend)
+    backend.enable_thinking = None
+    backend.do_sample = do_sample
+    backend.temperature = temperature
     return backend
 
 
@@ -141,3 +161,39 @@ def test_build_prompt_thinking_none_no_prefix() -> None:
     prompt = backend._build_prompt(context)
 
     assert prompt == "<|im_start|>user\nhello\n<|im_end|>\n<|im_start|>assistant\n"
+
+
+def test_sampling_kwargs_omits_none_do_sample_and_temperature() -> None:
+    backend = _make_backend(do_sample=None, temperature=None)
+
+    assert backend._sampling_kwargs() == {}
+
+
+def test_sampling_kwargs_includes_explicit_false_do_sample() -> None:
+    backend = _make_backend(do_sample=False, temperature=None)
+
+    assert backend._sampling_kwargs() == {"do_sample": False}
+
+
+def test_sampling_kwargs_includes_explicit_true_do_sample_with_temperature() -> None:
+    backend = _make_backend(do_sample=True, temperature=0.7)
+
+    assert backend._sampling_kwargs() == {"do_sample": True, "temperature": 0.7}
+
+
+def test_sampling_kwargs_includes_temperature_without_do_sample() -> None:
+    backend = _make_backend(do_sample=None, temperature=0.9)
+
+    assert backend._sampling_kwargs() == {"temperature": 0.9}
+
+
+def test_gemma_sampling_kwargs_omits_none_values() -> None:
+    backend = _make_gemma_backend(do_sample=None, temperature=None)
+
+    assert backend._sampling_kwargs() == {}
+
+
+def test_gemma_sampling_kwargs_preserves_explicit_values() -> None:
+    backend = _make_gemma_backend(do_sample=True, temperature=1.0)
+
+    assert backend._sampling_kwargs() == {"do_sample": True, "temperature": 1.0}
