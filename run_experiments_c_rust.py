@@ -23,10 +23,14 @@ If no case IDs given, uses the default 10-case smoke set.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import tempfile
 import time
+
+import torch
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -39,7 +43,11 @@ from c_rust.render import CRustRenderer
 from controller.adapters import GeneratorAdapter
 from core.gemma_generator_backend import GemmaGeneratorBackend
 from core.qwen_generator_backend import QwenGeneratorBackend
-from controller.loop import render_write_region_contract, run_dtv_loop
+from controller.loop import (
+    BAILOUT_DIAGNOSTICS_HEADER,
+    render_write_region_contract,
+    run_dtv_loop,
+)
 from controller.policy import DefaultPolicy, DefaultPolicyConfig
 from controller.stop_criteria import DTVStoppingCriteria, RUST_PROFILE
 from core.budget import Budget
@@ -74,6 +82,7 @@ GEMMA_MODEL_NAME = "google/gemma-4-E4B-it"
 OUTPUT_TOKEN_CAP = 6144
 TOKEN_BUDGET = OUTPUT_TOKEN_CAP
 MAX_NEW_LENGTH = 1024
+MAX_NEW_LENGTH_BON = 8192
 MAX_STEPS = 2000
 PROMPT_PREFIX = "Translate the following C code into Rust:"
 DATASET_DIR = Path(os.environ.get("DTV_DATASET_DIR", "/home/qsdrqs/projects/agent_fuzz/selected_data_output"))
@@ -290,13 +299,79 @@ def _generate_full_round(
     return result.delta_text, result.delta_tokens
 
 
-def _compile_rust_code(rust_code: str) -> tuple[bool, str]:
+def _generate_bon_round(
+    generator: GeneratorAdapter,
+    messages: list[GenerateMessage],
+) -> tuple[str, int]:
+    context = GenerateContext(
+        messages=list(messages),
+        steps=0,
+        max_new_length=MAX_NEW_LENGTH_BON,
+        extract_write_region=False,
+        channel=GenerationChannel.CONTINUATION,
+    )
+    result = generator.backend.generate_step(context)
+    return result.delta_text, result.delta_tokens
+
+
+# Sentinel error count for BoN-nsr ranking when the sample produced no usable
+# code (empty write-region or missing markers). Large enough to always lose
+# to any real-error-count sample, small enough to avoid JSON overflow.
+_EMPTY_CODE_ERROR_SENTINEL = 10**9
+
+# rustc summary: "error: aborting due to N previous errors" (plural) or
+# "error: aborting due to previous error" (singular, N=1).
+_RUSTC_ABORT_SUMMARY_RE = re.compile(
+    r"error: aborting due to (?:(\d+) previous errors?|previous error)"
+)
+
+
+def _count_rustc_errors(stderr: str) -> int:
+    """Count rustc error-level diagnostics, filtering warnings.
+
+    Prefers rustc's own "aborting due to N previous errors" summary when
+    present. Falls back to counting `error[...]:` and top-level `error:`
+    lines (excluding the aborting summary itself).
+    """
+    m = _RUSTC_ABORT_SUMMARY_RE.search(stderr)
+    if m is not None:
+        return int(m.group(1)) if m.group(1) else 1
+    count = 0
+    for line in stderr.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("error[") and "]:" in stripped:
+            count += 1
+        elif stripped.startswith("error:") and "aborting due to" not in stripped:
+            count += 1
+    return count
+
+
+def _compile_rust_code(rust_code: str) -> tuple[bool, str, int]:
+    """Compile rust code with rustc only (no diff tests).
+
+    Returns:
+        (compiles, compiler_output, error_count)
+        error_count is 0 iff `compiles is True`; otherwise at least 1.
+    """
+    if not rust_code.strip():
+        return (
+            False,
+            "- rustc received empty Rust code (no code extracted from model output)",
+            _EMPTY_CODE_ERROR_SENTINEL,
+        )
     with tempfile.TemporaryDirectory(prefix="eval-rustc-") as tmpdir:
         compile_result, _ = compile_and_run(rust_code, [], "rust", Path(tmpdir))
     outputs = [part for part in (compile_result.stderr, compile_result.stdout) if part]
     compiler_output = "\n".join(outputs).strip()
     compiles = not compile_result.compilation_failed and not compile_result.timed_out
-    return compiles, compiler_output
+    if compiles:
+        error_count = 0
+    else:
+        error_count = _count_rustc_errors(compile_result.stderr or "")
+        # Timeout / non-zero exit with unparseable stderr still means failure.
+        if error_count == 0:
+            error_count = 1
+    return compiles, compiler_output, error_count
 
 
 def _format_compile_feedback(compiler_output: str, max_lines: int = 20) -> str:
@@ -501,6 +576,21 @@ def _make_dtv_regenerator(
     return regenerate_round
 
 
+def _extract_bailout_postlude(raw_text: str, markers: WriteRegionMarkers) -> str | None:
+    """Return in-loop bailout diagnostics that DTV appended after END marker.
+
+    Mirrors the JS->TS runner; see `_handle_bailout_terminate` in
+    controller/loop.py for the producer side.
+    """
+    end_idx = raw_text.find(markers.end_marker)
+    if end_idx < 0:
+        return None
+    after_end = raw_text[end_idx + len(markers.end_marker):].strip()
+    if not after_end.startswith(BAILOUT_DIAGNOSTICS_HEADER):
+        return None
+    return after_end
+
+
 def program_eval_loop(
     initial_code: str | None,
     prompt: str,
@@ -565,13 +655,15 @@ def program_eval_loop(
             code = _extract_write_region_code(round_result.raw_output, markers)
             continue
 
-        compiles, compiler_output = _compile_rust_code(code)
+        compiles, compiler_output, _ = _compile_rust_code(code)
+        bailout_postlude = _extract_bailout_postlude(last_raw, markers)
         trace.append({
             "phase": "outer",
             "round": rounds,
             "action": "VERIFY_PROGRAM",
             "tokens_used": budget.gen_tokens_used,
             "compiles": compiles,
+            "used_bailout_feedback": bailout_postlude is not None and not compiles,
         })
         total_steps += 1
         verify_count += 1
@@ -594,7 +686,8 @@ def program_eval_loop(
 
         feedback_count += 1
         rollback_count += 1
-        repair_prompt = _build_repair_prompt(compiler_output, markers)
+        repair_feedback_text = bailout_postlude if bailout_postlude else compiler_output
+        repair_prompt = _build_repair_prompt(repair_feedback_text, markers)
         messages = [
             GenerateMessage(role="user", content=prompt, stop=True),
             GenerateMessage(role="assistant", content=last_raw, stop=True),
@@ -633,6 +726,119 @@ def program_eval_loop(
     )
 
 
+# -- BoN-nsr (Best-of-N, no self-repair) --------------------------------------
+
+@dataclass
+class BoNSampleRecord:
+    sample_idx: int
+    code: str
+    compiles: bool
+    error_count: int
+    tokens_used: int
+    selected: bool = False
+
+
+def _run_bon_nsr(
+    generator: GeneratorAdapter,
+    prompt: str,
+    budget: Budget,
+    markers: WriteRegionMarkers,
+    n: int,
+) -> tuple[str, str, list[BoNSampleRecord], list[dict]]:
+    """Run Best-of-N with no per-sample self-repair.
+
+    Generates up to N independent one-shot samples. Token budget is used
+    only as posthoc cost accounting for BoN, not as a generation-time
+    sampling limit. Samples are ranked by rustc error count (warnings
+    excluded). The first sample with `error_count == 0` triggers early-stop
+    of the sampling loop.
+
+    Returns:
+        (selected_code, selected_raw_output, records, trace_log)
+        - selected_code: the write-region code of the chosen sample (may be "")
+        - selected_raw_output: raw model output of the chosen sample
+        - records: one BoNSampleRecord per actually-generated sample
+        - trace_log: one dict per sample (phase="bon") for RunResult.trace_log
+    """
+    records: list[BoNSampleRecord] = []
+    trace_log: list[dict] = []
+    raw_outputs: list[str] = []
+
+    # Derive a deterministic seed base from the prompt so BoN samples for the
+    # same case are reproducible across runs. Python's hash() is seeded per
+    # process (PYTHONHASHSEED), so use hashlib for stability. Per-sample seed
+    # is seed_base + idx; without this, HF's internal RNG advancement between
+    # consecutive generate() calls yields limited variance (adjacent samples
+    # often collapse to identical outputs under narrow temp/top_p).
+    seed_base = int.from_bytes(
+        hashlib.sha256(prompt.encode("utf-8")).digest()[:4],
+        "big",
+    ) & 0x7FFFFFFF
+
+    for idx in range(n):
+        sample_seed = (seed_base + idx) & 0x7FFFFFFF
+        torch.manual_seed(sample_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(sample_seed)
+
+        messages = [
+            GenerateMessage(role="user", content=prompt, stop=True),
+            GenerateMessage(role="assistant", content="", stop=False),
+        ]
+        with _temporary_no_stopping_criteria(generator):
+            raw_output, delta_tokens = _generate_bon_round(generator, messages)
+
+        # BoN treats token budget as posthoc cost accounting. Do not use the
+        # budget to limit sampling; record the actual draw after generation.
+        budget.add_tokens(delta_tokens)
+
+        extracted = _extract_write_region_code(raw_output, markers)
+        if extracted is None or not extracted.strip():
+            compiles = False
+            error_count = _EMPTY_CODE_ERROR_SENTINEL
+            code_text = extracted or ""
+            verifier_output = "- rustc received empty Rust code (no code extracted from model output)"
+        else:
+            code_text = extracted
+            compiles, verifier_output, error_count = _compile_rust_code(code_text)
+        verifier_verdict = "pass" if compiles else "fail"
+
+        records.append(BoNSampleRecord(
+            sample_idx=idx,
+            code=code_text,
+            compiles=compiles,
+            error_count=error_count,
+            tokens_used=delta_tokens,
+        ))
+        raw_outputs.append(raw_output)
+        trace_log.append({
+            "phase": "bon",
+            "sample_idx": idx,
+            "tokens": delta_tokens,
+            "verifier": "rustc",
+            "verdict": verifier_verdict,
+            "compiles": compiles,
+            "errors": error_count,
+            "verifier_output": verifier_output,
+            "code_hash": hash(code_text) & 0xFFFFFFFF,
+            "selected": False,
+        })
+
+        if error_count == 0:
+            break
+
+    if not records:
+        return "", "", [], trace_log
+
+    # Selection: minimum error_count; ties broken by first-appearing (min()
+    # returns the first index with the minimum value).
+    best_idx = min(range(len(records)), key=lambda i: records[i].error_count)
+    records[best_idx].selected = True
+    trace_log[best_idx]["selected"] = True
+
+    return records[best_idx].code, raw_outputs[best_idx], records, trace_log
+
+
 # -- Runner --------------------------------------------------------------------
 
 def run_single(
@@ -644,6 +850,7 @@ def run_single(
     pass_output_dir: Path,
     markers: WriteRegionMarkers = DEFAULT_WRITE_REGION_MARKERS,
     budget_k: float | None = None,
+    bon_n: int | None = None,
 ) -> RunResult:
     case_dir = DATASET_DIR / case_id
     c_source = (case_dir / "source.c").read_text(encoding="utf-8").strip()
@@ -663,6 +870,49 @@ def run_single(
     oracle_factory = _experiment_oracles
 
     t0 = time.time()
+
+    if config_name == "bon-nsr":
+        if bon_n is None or bon_n <= 0:
+            raise ValueError(f"bon_n must be a positive integer for strategy 'bon-nsr', got {bon_n!r}")
+        selected_code, _selected_raw, bon_records, bon_trace = _run_bon_nsr(
+            generator=generator,
+            prompt=prompt,
+            budget=budget,
+            markers=markers,
+            n=bon_n,
+        )
+        elapsed = time.time() - t0
+        compiles, test_passed, test_total = evaluate_final_rust_code(
+            rust_code=selected_code,
+            c_source=c_source,
+            test_cases=test_cases,
+        )
+        final_verdict = "pass" if compiles else "fail"
+        saved_output_path = None
+        if final_verdict == "pass":
+            saved_output_path = _save_pass_output(
+                pass_output_dir=pass_output_dir,
+                case_id=case_id,
+                config_name=config_name,
+                final_code=selected_code,
+            )
+        return RunResult(
+            case_id=case_id,
+            config=config_name,
+            final_verdict=final_verdict,
+            total_tokens=budget.gen_tokens_used,
+            total_steps=len(bon_records),
+            elapsed_s=round(elapsed, 1),
+            verify_count=len(bon_records),
+            feedback_count=0,
+            rollback_count=0,
+            commit_count=0,
+            compiles=compiles,
+            test_passed=test_passed,
+            test_total=test_total,
+            saved_output_path=saved_output_path,
+            trace_log=bon_trace,
+        )
 
     if config_name == "naive":
         regenerate_round = _make_naive_regenerator(generator)
@@ -783,8 +1033,37 @@ def print_summary(
     token_budget: int,
     budget_k: float | None,
 ) -> None:
+    budget_desc = f"BudgetK={budget_k}" if budget_k is not None else f"TokenBudget={token_budget}"
+
+    # Per-strategy generic summary: always prints, handles any strategy
+    # (naive, dtv, bon-nsr, ...). Useful when a run contains only one
+    # strategy (e.g., --strategy bon-nsr) and the A/B table below would
+    # otherwise print empty rows.
+    by_config: dict[str, list[RunResult]] = {}
+    for r in results:
+        by_config.setdefault(r.config, []).append(r)
+
+    print(f"\n{'=' * 95}")
+    print(f"PER-STRATEGY SUMMARY  Model={model_name}  {budget_desc}")
+    print(f"{'=' * 95}")
+    for config_name in sorted(by_config.keys()):
+        subset = by_config[config_name]
+        passes = sum(1 for r in subset if r.final_verdict == "pass")
+        crashes = sum(1 for r in subset if r.final_verdict == "crash")
+        tests_pass = sum(r.test_passed for r in subset)
+        tests_total = sum(r.test_total for r in subset)
+        avg_tok = sum(r.total_tokens for r in subset) / max(len(subset), 1)
+        avg_time = sum(r.elapsed_s for r in subset) / max(len(subset), 1)
+        print(
+            f"  [{config_name:<10}] Cases: {len(subset):>4}  Pass: {passes:>4}/{len(subset):<4}  "
+            f"Tests: {tests_pass:>4}/{tests_total:<4}  Crash: {crashes:>3}  "
+            f"AvgTok: {avg_tok:>6.0f}  AvgTime: {avg_time:>5.1f}s"
+        )
+
     dtv = {r.case_id: r for r in results if r.config == "dtv"}
     naive = {r.case_id: r for r in results if r.config == "naive"}
+    if not (dtv and naive):
+        return
     case_ids = list(dict.fromkeys(r.case_id for r in results))
 
     col = (
@@ -847,14 +1126,20 @@ def print_summary(
 # -- Main ----------------------------------------------------------------------
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="C->Rust translation experiment (naive or dtv)")
+    parser = argparse.ArgumentParser(description="C->Rust translation experiment (naive, dtv, or bon-nsr)")
     parser.add_argument("case_ids", nargs="*", default=DEFAULT_CASE_IDS, help="Case IDs to run")
     parser.add_argument("--output", type=Path, default=OUTPUT_PATH, help="Output JSON path")
     parser.add_argument(
         "--strategy",
-        choices=("naive", "dtv"),
+        choices=("naive", "dtv", "bon-nsr"),
         required=True,
-        help="Generation strategy: naive (one-shot) or dtv (verified)",
+        help="Generation strategy: naive (one-shot), dtv (verified), or bon-nsr (Best-of-N, no per-sample self-repair)",
+    )
+    parser.add_argument(
+        "--bon-n",
+        type=int,
+        default=None,
+        help="Number of samples for --strategy bon-nsr (required when strategy=bon-nsr; no default)",
     )
     parser.add_argument(
         "--backend",
@@ -872,6 +1157,14 @@ def main() -> None:
                         help="Per-case budget = k * C_source_tokens (overrides --token-budget)")
     parser.add_argument("--greedy", action="store_true", help="Greedy decoding (do_sample=False)")
     args = parser.parse_args()
+
+    if args.strategy == "bon-nsr":
+        if args.bon_n is None:
+            parser.error("--bon-n is required when --strategy=bon-nsr")
+        if args.bon_n <= 0:
+            parser.error(f"--bon-n must be a positive integer, got {args.bon_n}")
+    elif args.bon_n is not None:
+        parser.error(f"--bon-n is only valid with --strategy=bon-nsr (got --strategy={args.strategy})")
 
     case_ids: list[str] = args.case_ids
     output_path: Path = args.output
@@ -900,9 +1193,12 @@ def main() -> None:
 
     budget_desc = f"BudgetK={budget_k}" if budget_k is not None else f"TokenBudget={token_budget}"
     sampling_desc = "greedy" if args.greedy else "default"
+    strategy_desc = args.strategy
+    if args.strategy == "bon-nsr":
+        strategy_desc = f"bon-nsr (N={args.bon_n})"
     print(f"Model loaded: {model_name}")
     print(f"Backend: {args.backend}")
-    print(f"Strategy: {args.strategy}")
+    print(f"Strategy: {strategy_desc}")
     print(f"Cases: {len(case_ids)}, {budget_desc}, MaxSteps={MAX_STEPS}, Sampling={sampling_desc}")
     print(f"Output: {output_path}")
 
@@ -919,6 +1215,7 @@ def main() -> None:
                     pass_output_dir=pass_output_dir,
                     markers=markers,
                     budget_k=budget_k,
+                    bon_n=args.bon_n,
                 )
             except Exception as exc:
                 import traceback
