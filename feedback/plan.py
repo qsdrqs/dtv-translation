@@ -127,18 +127,21 @@ def _render_diagnostics(repair_context: RepairContext) -> str:
         return "- (no diagnostics)"
     lines: list[str] = []
     for output in repair_context.outputs:
-        for diag in output.diagnostics:
-            message = diag.message.strip() or "(empty diagnostic)"
-            hints = tuple(hint.strip() for hint in diag.hints if hint.strip())
-            if diag.error_code:
-                line = f"- [{output.oracle_name}] {diag.error_code}: {message}"
-            else:
-                line = f"- [{output.oracle_name}] {message}"
-            if hints:
-                hint_lines = "\n".join(f"  hint: {hint}" for hint in hints)
-                line = f"{line}\n{hint_lines}"
-            lines.append(line)
-    return "\n".join(lines)
+        # Feedback A/B is only invoked on error verdicts, so every reachable
+        # OracleOutput here MUST carry rendered text parallel to diagnostics.
+        # Missing alignment indicates an oracle bug (failed to populate
+        # rendered_diagnostics) and we want to fail loudly, not silently
+        # downgrade to a stale compact format.
+        assert len(output.rendered_diagnostics) == len(output.diagnostics), (
+            f"oracle '{output.oracle_name}' returned {len(output.diagnostics)} "
+            f"diagnostics but {len(output.rendered_diagnostics)} rendered entries"
+        )
+        for diag, rendered in zip(output.diagnostics, output.rendered_diagnostics):
+            if diag.severity != "error":
+                continue
+            if rendered:
+                lines.append(rendered)
+    return "\n".join(lines) if lines else "- (no diagnostics)"
 
 
 def _scope_rules(

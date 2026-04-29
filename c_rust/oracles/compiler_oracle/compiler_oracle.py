@@ -62,19 +62,23 @@ class RustcOracle(Oracle):
                 timeout_s=self.timeout_s,
             )
             result = self.driver.compile(ctx)
-            diagnostics = parse_rustc_diagnostics(result)
+            pairs = parse_rustc_diagnostics(result)
             logger.info(
                 "rustc compile result: exit_code=%s timed_out=%s diagnostics=%s",
                 result.exit_code,
                 result.timed_out,
-                len(diagnostics),
+                len(pairs),
             )
             if result.timed_out:
-                diagnostics = (Diagnostic(message="rustc_timeout", error_code="TIMEOUT"),) + diagnostics
+                timeout_pair = (Diagnostic(message="rustc_timeout", error_code="TIMEOUT"), "rustc_timeout")
+                pairs = (timeout_pair,) + pairs
 
         if self.required_granularity < Granularity.PROGRAM:
-            diagnostics = _filter_partial_noise(diagnostics)
-            diagnostics = _filter_resolvable_trait_bounds(diagnostics)
+            pairs = _filter_pairs(pairs, _is_partial_noise)
+            pairs = _filter_pairs(pairs, _is_resolvable_trait_bound)
+
+        diagnostics = tuple(d for d, _ in pairs)
+        rendered_diagnostics = tuple(r for _, r in pairs)
 
         verdict = _decide_verdict(result.exit_code, diagnostics, result.timed_out)
         first_diag = diagnostics[0].message if diagnostics else ""
@@ -87,6 +91,7 @@ class RustcOracle(Oracle):
             oracle_name=self.name,
             verdict=verdict,
             diagnostics=diagnostics,
+            rendered_diagnostics=rendered_diagnostics,
             realized_cost=1,
         )
 
@@ -95,25 +100,43 @@ def _is_partial_noise(d: Diagnostic) -> bool:
     return d.error_code in _PARTIAL_COMPILATION_NOISE
 
 
+def _filter_pairs(
+    pairs: tuple[tuple[Diagnostic, str], ...],
+    drop_predicate,
+) -> tuple[tuple[Diagnostic, str], ...]:
+    """Filter (diag, rendered) pairs by a Diagnostic-only predicate.
+
+    Drops pairs where `drop_predicate(diag)` is true, then strips orphaned
+    error-summary diagnostics (those that lack error_code) when the resulting
+    set has no coded errors left. Mirrors the previous Diagnostic-only
+    filters' guard against dropping real syntax errors that have no code.
+    """
+    kept = tuple(p for p in pairs if not drop_predicate(p[0]))
+    if len(kept) == len(pairs):
+        return kept
+    has_coded_errors = any(
+        d.error_code is not None and d.severity in ("error", "fatal")
+        for d, _ in kept
+    )
+    if has_coded_errors:
+        return kept
+    return tuple(p for p in kept if p[0].severity not in ("error", "fatal"))
+
+
 def _filter_partial_noise(
     diagnostics: tuple[Diagnostic, ...],
 ) -> tuple[Diagnostic, ...]:
-    filtered = tuple(
-        d for d in diagnostics
-        if not _is_partial_noise(d)
-    )
-    removed_any = len(filtered) < len(diagnostics)
-    # Only clean up orphaned summaries ("aborting due to N previous errors")
-    # when we actually removed noise.  Without this guard, real errors that
-    # lack an error_code (e.g. syntax errors) would be dropped.
-    if removed_any:
-        has_coded_errors = any(
-            d.error_code is not None and d.severity in ("error", "fatal")
-            for d in filtered
-        )
-        if not has_coded_errors:
-            filtered = tuple(d for d in filtered if d.severity not in ("error", "fatal"))
-    return filtered
+    """Diagnostic-only adapter over `_filter_pairs` for tests + external callers."""
+    pairs = tuple((d, "") for d in diagnostics)
+    return tuple(d for d, _ in _filter_pairs(pairs, _is_partial_noise))
+
+
+def _filter_resolvable_trait_bounds(
+    diagnostics: tuple[Diagnostic, ...],
+) -> tuple[Diagnostic, ...]:
+    """Diagnostic-only adapter over `_filter_pairs` for tests + external callers."""
+    pairs = tuple((d, "") for d in diagnostics)
+    return tuple(d for d, _ in _filter_pairs(pairs, _is_resolvable_trait_bound))
 
 
 def _is_impl_header(text: str) -> bool:
@@ -134,20 +157,6 @@ def _is_resolvable_trait_bound(d: Diagnostic) -> bool:
         return True
     primary = next((s for s in d.spans if s.is_primary), None)
     return primary is not None and _is_impl_header(primary.text)
-
-
-def _filter_resolvable_trait_bounds(
-    diagnostics: tuple[Diagnostic, ...],
-) -> tuple[Diagnostic, ...]:
-    filtered = tuple(d for d in diagnostics if not _is_resolvable_trait_bound(d))
-    if len(filtered) < len(diagnostics):
-        has_coded_errors = any(
-            d.error_code is not None and d.severity in ("error", "fatal")
-            for d in filtered
-        )
-        if not has_coded_errors:
-            filtered = tuple(d for d in filtered if d.severity not in ("error", "fatal"))
-    return filtered
 
 
 def _decide_verdict(exit_code: int, diagnostics: tuple, timed_out: bool) -> Verdict:

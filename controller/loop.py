@@ -1107,20 +1107,28 @@ def _handle_continue(
     )
 
 
+# Header line emitted by `_format_bailout_diagnostics` and stripped/matched by
+# the experiment runners' outer repair loop. Kept as a module-level constant so
+# producer (this module) and consumers (runners) cannot drift.
+BAILOUT_DIAGNOSTICS_HEADER = "BAILOUT! Oracle diagnostics:"
+
+
 def _format_bailout_diagnostics(outputs: tuple[OracleOutput, ...]) -> str:
-    """Format error-level diagnostics from oracle outputs as compact text."""
-    lines: list[str] = []
+    """Concatenate per-oracle pre-rendered error blocks into a bailout postlude.
+
+    Reads `OracleOutput.rendered_diagnostics` (parallel to `diagnostics`) so
+    each oracle's own format is preserved (rustc's pretty arrows; tsc/eslint's
+    line-anchored rich block with hints). Filters to error-level diagnostics.
+    """
+    blocks: list[str] = []
     for output in outputs:
-        for diag in output.diagnostics:
-            if diag.severity != "error":
+        for diag, rendered in zip(output.diagnostics, output.rendered_diagnostics):
+            if diag.severity != "error" or not rendered:
                 continue
-            code_part = f" code={diag.error_code}" if diag.error_code else ""
-            lines.append(
-                f"- [{output.oracle_name}] severity={diag.severity}{code_part}: {diag.message}"
-            )
-    if not lines:
+            blocks.append(rendered)
+    if not blocks:
         return ""
-    return "BAILOUT! Oracle diagnostics:\n" + "\n".join(lines)
+    return BAILOUT_DIAGNOSTICS_HEADER + "\n" + "\n".join(blocks)
 
 
 def _handle_bailout_terminate(

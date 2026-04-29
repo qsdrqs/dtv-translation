@@ -10,8 +10,15 @@ from c_rust.oracles.compiler_oracle.rustc_driver import RustcResult
 _ERROR_LEVELS = {"error", "fatal"}
 
 
-def parse_rustc_diagnostics(result: RustcResult) -> tuple[Diagnostic, ...]:
-    diagnostics: list[Diagnostic] = []
+def parse_rustc_diagnostics(result: RustcResult) -> tuple[tuple[Diagnostic, str], ...]:
+    """Return (Diagnostic, rendered_text) pairs from rustc's JSON output.
+
+    The rendered text is rustc's own multi-line pretty-printed block (with
+    arrows + source highlighting) extracted from `payload["rendered"]`, which
+    rustc emits by default under --error-format=json. Empty string when
+    rendered is missing (fallback path / non-diagnostic JSON entries).
+    """
+    pairs: list[tuple[Diagnostic, str]] = []
     fallback_lines: list[str] = []
 
     for stream in (result.stderr, result.stdout):
@@ -19,25 +26,26 @@ def parse_rustc_diagnostics(result: RustcResult) -> tuple[Diagnostic, ...]:
             stripped = line.strip()
             if not stripped:
                 continue
-            diagnostic, consumed = _parse_json_line(stripped)
+            pair, consumed = _parse_json_line(stripped)
             if consumed:
-                if diagnostic is not None:
-                    diagnostics.append(diagnostic)
+                if pair is not None:
+                    pairs.append(pair)
                 continue
             fallback_lines.append(stripped)
 
-    if not diagnostics and fallback_lines:
+    if not pairs and fallback_lines:
         severity = "error" if result.exit_code != 0 else "warning"
-        diagnostics.append(Diagnostic(message=fallback_lines[0], severity=severity))
+        fallback_diag = Diagnostic(message=fallback_lines[0], severity=severity)
+        pairs.append((fallback_diag, fallback_lines[0]))
 
-    return tuple(diagnostics)
+    return tuple(pairs)
 
 
 def has_errors(diagnostics: tuple[Diagnostic, ...]) -> bool:
     return any(diag.severity in _ERROR_LEVELS for diag in diagnostics)
 
 
-def _parse_json_line(line: str) -> tuple[Diagnostic | None, bool]:
+def _parse_json_line(line: str) -> tuple[tuple[Diagnostic, str] | None, bool]:
     try:
         payload = json.loads(line)
     except json.JSONDecodeError:
@@ -62,16 +70,18 @@ def _parse_json_line(line: str) -> tuple[Diagnostic | None, bool]:
     elif related_spans:
         spans = related_spans
 
-    return (
-        Diagnostic(
-            message=message,
-            severity=severity,
-            spans=spans,
-            error_code=error_code,
-            hints=hints,
-        ),
-        True,
+    rendered = payload.get("rendered", "")
+    if not isinstance(rendered, str):
+        rendered = ""
+
+    diag = Diagnostic(
+        message=message,
+        severity=severity,
+        spans=spans,
+        error_code=error_code,
+        hints=hints,
     )
+    return (diag, rendered), True
 
 
 def _extract_error_code(payload: dict[str, Any]) -> str | None:

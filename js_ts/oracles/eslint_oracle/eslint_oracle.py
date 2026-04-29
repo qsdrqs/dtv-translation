@@ -9,6 +9,7 @@ from core.types import (
     OracleOutput,
     Verdict,
 )
+from js_ts.oracles.diagnostic_render import render_diagnostic
 from js_ts.oracles.eslint_oracle.eslint_driver import EslintDriver
 from js_ts.oracles.eslint_oracle.eslint_parser import (
     filter_post_prefix_diagnostics,
@@ -35,10 +36,14 @@ class EslintOracle(Oracle):
             ast_tree=artifact.ast_tree,
         )
         diagnostics = filter_post_prefix_diagnostics(diagnostics, state.prefix)
+        rendered_diagnostics = tuple(
+            render_diagnostic(d) for d in diagnostics
+        )
         verdict = Verdict.FAIL if has_errors(diagnostics) else Verdict.PASS
         return OracleOutput(
             oracle_name=self.name,
             verdict=verdict,
             diagnostics=diagnostics,
+            rendered_diagnostics=rendered_diagnostics,
             realized_cost=1,
         )

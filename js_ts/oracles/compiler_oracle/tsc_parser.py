@@ -19,6 +19,7 @@ _PARTIAL_COMPILATION_NOISE: frozenset[str] = frozenset({
 _TYPE_CORRECTNESS_BLOCKLIST: frozenset[str] = frozenset({
     "TS2322",
     "TS2339",
+    "TS2551",
     "TS2345",
 })
 

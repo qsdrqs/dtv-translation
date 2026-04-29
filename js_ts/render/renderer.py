@@ -57,6 +57,16 @@ class JSToTSRenderer:
             code = patched
             tree = _parse_ts(code)
 
+        if not _has_module_semantics(tree):
+            code = code + "\nexport {};"
+            tree = _parse_ts(code)
+
+        if _cursor_needs_continuation(tree, prefix_end_byte=prefix_byte_len):
+            return RenderResult(
+                status=RenderStatus.CONTINUE,
+                notes="render_continue:cursor_incomplete",
+            )
+
         source_bytes = code.encode("utf-8")
         group_stack = ts_group_stack(
             tree,
@@ -72,3 +82,29 @@ class JSToTSRenderer:
             group_stack=group_stack,
         )
         return RenderResult(status=RenderStatus.OK, artifact=artifact)
+
+
+def _has_module_semantics(tree) -> bool:
+    for child in tree.root_node.children:
+        if child.type in {"import_statement", "export_statement"}:
+            return True
+    return False
+
+
+def _cursor_needs_continuation(tree, *, prefix_end_byte: int) -> bool:
+    for node in _walk_nodes(tree.root_node):
+        if node.is_missing and node.start_byte == prefix_end_byte:
+            return True
+        if node.type == "ERROR" and node.start_byte <= prefix_end_byte <= node.end_byte:
+            return True
+    return False
+
+
+def _walk_nodes(root):
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        yield node
+        children = node.children
+        if children:
+            stack.extend(reversed(children))

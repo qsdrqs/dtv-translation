@@ -38,7 +38,8 @@ class _OracleFail:
         return OracleOutput(
             oracle_name=self.name,
             verdict=Verdict.FAIL,
-            diagnostics=(Diagnostic(message="test failure"),),
+            diagnostics=(Diagnostic(message="test failure", severity="error"),),
+            rendered_diagnostics=("- rendered: test failure",),
             realized_cost=1,
         )
 
@@ -60,12 +61,15 @@ class _OracleFailThenPass:
         self.calls += 1
         verdict = Verdict.FAIL if self.calls == 1 else Verdict.PASS
         diagnostics = ()
+        rendered: tuple[str, ...] = ()
         if verdict == Verdict.FAIL:
-            diagnostics = (Diagnostic(message="test failure"),)
+            diagnostics = (Diagnostic(message="test failure", severity="error"),)
+            rendered = ("- rendered: test failure",)
         return OracleOutput(
             oracle_name=self.name,
             verdict=verdict,
             diagnostics=diagnostics,
+            rendered_diagnostics=rendered,
             realized_cost=1,
         )
 

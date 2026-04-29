@@ -33,6 +33,7 @@ class OracleOutput:
     oracle_name: str
     verdict: Verdict
     diagnostics: tuple[Diagnostic, ...] = ()
+    rendered_diagnostics: tuple[str, ...] = ()
     realized_cost: int = 0
     rollback_scope: Granularity | None = None
 

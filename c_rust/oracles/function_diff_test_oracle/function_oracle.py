@@ -53,6 +53,42 @@ from c_rust.oracles.program_diff_test_oracle.execution_driver import run_binary
 logger = get_logger(__name__)
 
 
+def _render_function_diff_diagnostic(diag: Diagnostic) -> str:
+    """Render a function-diff Diagnostic as a self-describing block.
+
+    function_diff messages already encode test ids, exit codes, trace
+    mismatch details, and FFI failure reasons. Mirrors program_oracle's
+    rendering: just attach error_code prefix when present.
+    """
+    if diag.error_code:
+        return f"- [{diag.error_code}] {diag.message}"
+    return f"- {diag.message}"
+
+
+def _make_output(
+    *,
+    oracle_name: str,
+    verdict: Verdict,
+    diagnostics: tuple[Diagnostic, ...] = (),
+    realized_cost: int = 0,
+    rollback_scope: Granularity | None = None,
+) -> OracleOutput:
+    """Construct OracleOutput with rendered_diagnostics auto-populated.
+
+    Centralizes rendered_diagnostics population so every function_diff exit
+    point preserves the parallel-array invariant required by feedback B.
+    """
+    rendered = tuple(_render_function_diff_diagnostic(d) for d in diagnostics)
+    return OracleOutput(
+        oracle_name=oracle_name,
+        verdict=verdict,
+        diagnostics=diagnostics,
+        rendered_diagnostics=rendered,
+        realized_cost=realized_cost,
+        rollback_scope=rollback_scope,
+    )
+
+
 class FunctionOracle(Oracle):
     """
     Function-level differential oracle with trace-based comparison.
@@ -105,7 +141,7 @@ class FunctionOracle(Oracle):
                 len(c_candidates),
                 c_reason,
             )
-            return OracleOutput(
+            return _make_output(
                 oracle_name=self.name,
                 verdict=Verdict.NOT_APPLICABLE,
                 diagnostics=(Diagnostic(message=c_reason or "C function not found"),),
@@ -121,7 +157,7 @@ class FunctionOracle(Oracle):
                 len(rust_candidates),
                 rust_reason,
             )
-            return OracleOutput(
+            return _make_output(
                 oracle_name=self.name,
                 verdict=Verdict.NOT_APPLICABLE,
                 diagnostics=(Diagnostic(message=rust_reason or "Rust function not found"),),
@@ -134,7 +170,7 @@ class FunctionOracle(Oracle):
                 "function_diff not applicable: C signature missing for function=%s",
                 c_function_name,
             )
-            return OracleOutput(
+            return _make_output(
                 oracle_name=self.name,
                 verdict=Verdict.NOT_APPLICABLE,
                 diagnostics=(Diagnostic(message="C signature not found"),),
@@ -145,7 +181,7 @@ class FunctionOracle(Oracle):
                 "function_diff not applicable: C function is static (%s)",
                 c_function_name,
             )
-            return OracleOutput(
+            return _make_output(
                 oracle_name=self.name,
                 verdict=Verdict.NOT_APPLICABLE,
                 diagnostics=(Diagnostic(message="C function is static"),),
@@ -158,7 +194,7 @@ class FunctionOracle(Oracle):
                 "function_diff not applicable: Rust signature missing for function=%s",
                 rust_function_name,
             )
-            return OracleOutput(
+            return _make_output(
                 oracle_name=self.name,
                 verdict=Verdict.NOT_APPLICABLE,
                 diagnostics=(Diagnostic(message="Rust signature not found"),),
@@ -257,7 +293,7 @@ def _validate_sample(
     oracle_name: str,
 ) -> OracleOutput | None:
     if sample is None:
-        return OracleOutput(
+        return _make_output(
             oracle_name=oracle_name,
             verdict=Verdict.NOT_APPLICABLE,
             diagnostics=(Diagnostic(message="No sample data in artifact"),),
@@ -265,7 +301,7 @@ def _validate_sample(
         )
 
     if not sample.test_cases:
-        return OracleOutput(
+        return _make_output(
             oracle_name=oracle_name,
             verdict=Verdict.NOT_APPLICABLE,
             diagnostics=(Diagnostic(message="No test cases in sample"),),
@@ -273,7 +309,7 @@ def _validate_sample(
         )
 
     if not function_name:
-        return OracleOutput(
+        return _make_output(
             oracle_name=oracle_name,
             verdict=Verdict.NOT_APPLICABLE,
             diagnostics=(Diagnostic(message="No closed function in context"),),
@@ -321,7 +357,7 @@ def _prepare_sources(
         rust_signature,
     )
     if wrapper_result.code is None:
-        return None, OracleOutput(
+        return None, _make_output(
             oracle_name=oracle_name,
             verdict=Verdict.NOT_APPLICABLE,
             diagnostics=(Diagnostic(message=wrapper_result.reason or "extern wrapper not applicable"),),
@@ -331,7 +367,7 @@ def _prepare_sources(
     # FFI discovery uses the original sources to avoid trace wrappers skewing call/def detection.
     missing = find_missing_functions(artifact.code, sample.source_code)
     if missing.missing is None:
-        return None, OracleOutput(
+        return None, _make_output(
             oracle_name=oracle_name,
             verdict=Verdict.NOT_APPLICABLE,
             diagnostics=(Diagnostic(message=missing.reason or "FFI not applicable"),),
@@ -342,7 +378,7 @@ def _prepare_sources(
     if missing.missing:
         bridge = generate_ffi_bridge(artifact.code, sample.source_code)
         if bridge.code is None:
-            return None, OracleOutput(
+            return None, _make_output(
                 oracle_name=oracle_name,
                 verdict=Verdict.NOT_APPLICABLE,
                 diagnostics=(Diagnostic(message=bridge.reason or "FFI not applicable"),),
@@ -382,14 +418,14 @@ def _compile_binaries(
         timeout_s=timeout_s,
     )
     if c_compile_result.timed_out:
-        return None, OracleOutput(
+        return None, _make_output(
             oracle_name=oracle_name,
             verdict=Verdict.FAIL,
             diagnostics=(Diagnostic(message="C compilation timeout", error_code="C_COMPILE_TIMEOUT"),),
             realized_cost=1,
         )
     if c_compile_result.compilation_failed:
-        return None, OracleOutput(
+        return None, _make_output(
             oracle_name=oracle_name,
             verdict=Verdict.FAIL,
             diagnostics=(
@@ -407,14 +443,14 @@ def _compile_binaries(
         function_name=function_name,
     )
     if cdylib_compile_result.timed_out:
-        return None, OracleOutput(
+        return None, _make_output(
             oracle_name=oracle_name,
             verdict=Verdict.FAIL,
             diagnostics=(Diagnostic(message="Rust cdylib compilation timeout", error_code="RUST_CDYLIB_TIMEOUT"),),
             realized_cost=1,
         )
     if cdylib_compile_result.compilation_failed:
-        return None, OracleOutput(
+        return None, _make_output(
             oracle_name=oracle_name,
             verdict=Verdict.FAIL,
             diagnostics=(
@@ -447,21 +483,21 @@ def _run_tests_and_compare(
         cost += 2
 
         if c_exec.timed_out:
-            return OracleOutput(
+            return _make_output(
                 oracle_name=oracle_name,
                 verdict=Verdict.FAIL,
                 diagnostics=(Diagnostic(message=f"{test_id}: C execution timed out", error_code="C_RUN_TIMEOUT"),),
                 realized_cost=cost,
             )
         if rust_exec.timed_out:
-            return OracleOutput(
+            return _make_output(
                 oracle_name=oracle_name,
                 verdict=Verdict.FAIL,
                 diagnostics=(Diagnostic(message=f"{test_id}: Rust execution timed out", error_code="RUST_RUN_TIMEOUT"),),
                 realized_cost=cost,
             )
         if c_exec.exit_code != rust_exec.exit_code:
-            return OracleOutput(
+            return _make_output(
                 oracle_name=oracle_name,
                 verdict=Verdict.FAIL,
                 diagnostics=(Diagnostic(
@@ -499,7 +535,7 @@ def _run_tests_and_compare(
         )
         coverage.add(stats)
         if mismatch:
-            return OracleOutput(
+            return _make_output(
                 oracle_name=oracle_name,
                 verdict=Verdict.FAIL,
                 diagnostics=(
@@ -513,7 +549,7 @@ def _run_tests_and_compare(
                 realized_cost=cost,
             )
 
-    return OracleOutput(
+    return _make_output(
         oracle_name=oracle_name,
         verdict=Verdict.PASS,
         diagnostics=(_coverage_diagnostic(coverage),),

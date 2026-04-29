@@ -14,6 +14,12 @@ from core.types import Diagnostic, DiagnosticSpan, Verdict
 from test.c_rust.utils import compile_rust
 
 
+def _diagnostics_only(result: RustcResult) -> tuple[Diagnostic, ...]:
+    """Drop the rendered text from `parse_rustc_diagnostics` for tests that
+    only assert on Diagnostic structure."""
+    return tuple(d for d, _ in parse_rustc_diagnostics(result))
+
+
 def test_rustc_parser_extracts_code_span() -> None:
     code = """\
 fn foo() -> i32 {
@@ -32,7 +38,7 @@ fn foo() -> i32 {
         timed_out=False,
     )
 
-    diagnostics = parse_rustc_diagnostics(result)
+    diagnostics = _diagnostics_only(result)
     assert has_errors(diagnostics)
     assert tuple(diag.message for diag in diagnostics) == (
         "mismatched types",
@@ -66,7 +72,7 @@ fn foo() -> i32 {
         timed_out=False,
     )
 
-    diagnostics = parse_rustc_diagnostics(result)
+    diagnostics = _diagnostics_only(result)
     assert tuple(diag.message for diag in diagnostics) == (
         "`if` may be missing an `else` clause",
         "aborting due to 1 previous error",
@@ -159,7 +165,7 @@ fn main() {
         output_path=Path("lib.rlib"),
         timed_out=False,
     )
-    diagnostics = parse_rustc_diagnostics(result)
+    diagnostics = _diagnostics_only(result)
     assert has_errors(diagnostics)
     assert any(d.error_code == "E0425" for d in diagnostics)
 
@@ -186,7 +192,7 @@ fn main() {
         output_path=Path("lib.rlib"),
         timed_out=False,
     )
-    diagnostics = parse_rustc_diagnostics(result)
+    diagnostics = _diagnostics_only(result)
     assert any(d.error_code == "E0425" for d in diagnostics)
     assert any(d.error_code == "E0308" for d in diagnostics)
 
@@ -340,7 +346,7 @@ impl Ord for Foo {
         output_path=Path("lib.rlib"),
         timed_out=False,
     )
-    diagnostics = parse_rustc_diagnostics(result)
+    diagnostics = _diagnostics_only(result)
     e0277 = next((d for d in diagnostics if d.error_code == "E0277"), None)
     assert e0277 is not None
     primary = next((s for s in e0277.spans if s.is_primary), None)
@@ -377,7 +383,7 @@ impl Ord for Foo {
         output_path=Path("lib.rlib"),
         timed_out=False,
     )
-    diagnostics = parse_rustc_diagnostics(result)
+    diagnostics = _diagnostics_only(result)
     assert any(d.error_code == "E0277" for d in diagnostics)
     filtered = _filter_partial_noise(diagnostics)
     filtered = _filter_resolvable_trait_bounds(filtered)
@@ -405,7 +411,7 @@ impl Bar for S {}
         output_path=Path("lib.rlib"),
         timed_out=False,
     )
-    diagnostics = parse_rustc_diagnostics(result)
+    diagnostics = _diagnostics_only(result)
     assert any(d.error_code == "E0277" for d in diagnostics)
     filtered = _filter_partial_noise(diagnostics)
     filtered = _filter_resolvable_trait_bounds(filtered)
@@ -432,7 +438,7 @@ fn main() {
         output_path=Path("lib.rlib"),
         timed_out=False,
     )
-    diagnostics = parse_rustc_diagnostics(result)
+    diagnostics = _diagnostics_only(result)
     assert any(d.error_code == "E0277" for d in diagnostics)
     filtered = _filter_partial_noise(diagnostics)
     filtered = _filter_resolvable_trait_bounds(filtered)
@@ -461,7 +467,7 @@ fn main() { show(Foo); }
         output_path=Path("lib.rlib"),
         timed_out=False,
     )
-    diagnostics = parse_rustc_diagnostics(result)
+    diagnostics = _diagnostics_only(result)
     assert any(d.error_code == "E0277" for d in diagnostics)
     filtered = _filter_partial_noise(diagnostics)
     filtered = _filter_resolvable_trait_bounds(filtered)

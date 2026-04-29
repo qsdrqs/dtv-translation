@@ -270,6 +270,41 @@ function foo() {
     assert kinds == (Granularity.FUNC, Granularity.BLOCK)
 
 
+def test_prefix_without_exports_compiles_no_global_conflicts() -> None:
+    prefix = """\
+var toString = Object.prototype.toString;
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = check_typescript(result.artifact.code)
+    assert compile.ok, compile.stdout
+
+
+def test_prefix_with_exports_unchanged() -> None:
+    prefix = """\
+var toString = Object.prototype.toString;
+export {};
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = check_typescript(result.artifact.code)
+    assert compile.ok, compile.stdout
+
+
+def test_function_expression_missing_return_compiles() -> None:
+    prefix = """\
+const fn = function (): number {
+    const x: number = 1;
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = check_typescript(result.artifact.code)
+    assert compile.ok, compile.stdout
+
+
 def test_group_stack_function_name() -> None:
     prefix = """\
 function bar() {
@@ -280,3 +315,22 @@ function bar() {
     assert result.artifact is not None
     assert result.artifact.group_stack is not None
     assert any(f.name_id == "bar" for f in result.artifact.group_stack)
+
+
+def test_continue_on_syntax_incomplete() -> None:
+    """Render should return CONTINUE when the prefix is syntactically
+    incomplete at the cursor (e.g. import without source clause)."""
+    result = _render("import { x }\n")
+    assert result.status == RenderStatus.CONTINUE
+
+
+def test_ok_on_complete_import() -> None:
+    """Render should return OK when a complete import statement is present."""
+    prefix = """\
+import { readFileSync } from "fs";
+"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    compile = check_typescript(result.artifact.code)
+    assert compile.ok, compile.stdout

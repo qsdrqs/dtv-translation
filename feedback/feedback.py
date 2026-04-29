@@ -26,6 +26,31 @@ def _copy_with_filtered_diagnostics(
     output: OracleOutput,
     scope: Granularity,
 ) -> OracleOutput | None:
+    # Filter both arms in lockstep so the parallel-array invariant
+    # `len(rendered_diagnostics) == len(diagnostics)` survives the rebuild.
+    # Empty rendered_diagnostics tuple is propagated as-is (oracle did not
+    # render); downstream `_render_diagnostics` asserts will surface the gap.
+    has_rendered = bool(output.rendered_diagnostics)
+    if has_rendered:
+        assert len(output.rendered_diagnostics) == len(output.diagnostics), (
+            f"oracle '{output.oracle_name}' rendered_diagnostics length "
+            f"{len(output.rendered_diagnostics)} != diagnostics length "
+            f"{len(output.diagnostics)}"
+        )
+        pairs = [
+            (d, r) for d, r in zip(output.diagnostics, output.rendered_diagnostics)
+            if _is_error_level(d.severity)
+        ]
+        if not pairs:
+            return None
+        return OracleOutput(
+            oracle_name=output.oracle_name,
+            verdict=output.verdict,
+            diagnostics=tuple(d for d, _ in pairs),
+            rendered_diagnostics=tuple(r for _, r in pairs),
+            realized_cost=output.realized_cost,
+            rollback_scope=scope,
+        )
     filtered = tuple(diag for diag in output.diagnostics if _is_error_level(diag.severity))
     if not filtered:
         return None

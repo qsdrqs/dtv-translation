@@ -15,7 +15,7 @@ from test.c_rust.utils import compile_rust
 _ERROR_LEVELS = {"error", "fatal"}
 
 
-def _compile_diagnostics(code: str):
+def _compile_pairs(code: str):
     compile = compile_rust(code, error_format="json")
     result = RustcResult(
         stdout=compile.stdout,
@@ -30,13 +30,20 @@ def _compile_diagnostics(code: str):
     return parse_rustc_diagnostics(result)
 
 
+def _compile_diagnostics(code: str):
+    return tuple(d for d, _ in _compile_pairs(code))
+
+
 def _compile_oracle_output(code: str) -> OracleOutput:
-    diagnostics = _compile_diagnostics(code)
+    pairs = _compile_pairs(code)
+    diagnostics = tuple(d for d, _ in pairs)
+    rendered = tuple(r for _, r in pairs)
     verdict = Verdict.FAIL if has_errors(diagnostics) else Verdict.PASS
     return OracleOutput(
         oracle_name="rustc",
         verdict=verdict,
         diagnostics=diagnostics,
+        rendered_diagnostics=rendered,
         rollback_scope=Granularity.STMT,
     )
 

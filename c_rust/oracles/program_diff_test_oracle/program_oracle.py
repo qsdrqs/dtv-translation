@@ -23,6 +23,42 @@ from c_rust.oracles.program_diff_test_oracle.execution_driver import compile_and
 logger = get_logger(__name__)
 
 
+def _render_program_diff_diagnostic(diag: Diagnostic) -> str:
+    """Render a single program-diff Diagnostic as a self-describing block.
+
+    program_diff diagnostics already pack the rich content into `message`
+    (e.g. test ids, lengths, first-diff offsets, stdout previews). We only
+    add an error_code prefix for at-a-glance categorization.
+    """
+    if diag.error_code:
+        return f"- [{diag.error_code}] {diag.message}"
+    return f"- {diag.message}"
+
+
+def _make_output(
+    *,
+    oracle_name: str,
+    verdict: Verdict,
+    diagnostics: tuple[Diagnostic, ...] = (),
+    realized_cost: int = 0,
+    rollback_scope: Granularity | None = None,
+) -> OracleOutput:
+    """Construct OracleOutput with rendered_diagnostics auto-populated.
+
+    Centralizes rendered_diagnostics population so every program_diff exit
+    point preserves the parallel-array invariant required by feedback B.
+    """
+    rendered = tuple(_render_program_diff_diagnostic(d) for d in diagnostics)
+    return OracleOutput(
+        oracle_name=oracle_name,
+        verdict=verdict,
+        diagnostics=diagnostics,
+        rendered_diagnostics=rendered,
+        realized_cost=realized_cost,
+        rollback_scope=rollback_scope,
+    )
+
+
 class ProgramOracle(Oracle):
     """
     Program-level differential oracle.
@@ -56,7 +92,7 @@ class ProgramOracle(Oracle):
         )
         if sample is None:
             logger.info("program_diff not applicable: no sample data")
-            return OracleOutput(
+            return _make_output(
                 oracle_name=self.name,
                 verdict=Verdict.NOT_APPLICABLE,
                 diagnostics=(Diagnostic(message="No sample data in artifact"),),
@@ -65,7 +101,7 @@ class ProgramOracle(Oracle):
 
         if not sample.test_cases:
             logger.info("program_diff not applicable: no test cases")
-            return OracleOutput(
+            return _make_output(
                 oracle_name=self.name,
                 verdict=Verdict.NOT_APPLICABLE,
                 diagnostics=(Diagnostic(message="No test cases in sample"),),
@@ -90,7 +126,7 @@ class ProgramOracle(Oracle):
 
             if c_compile_result.timed_out:
                 logger.info("program_diff fail: C compile timeout")
-                return OracleOutput(
+                return _make_output(
                     oracle_name=self.name,
                     verdict=Verdict.FAIL,
                     diagnostics=(
@@ -104,7 +140,7 @@ class ProgramOracle(Oracle):
 
             if c_compile_result.compilation_failed:
                 logger.info("program_diff fail: C compile failed")
-                return OracleOutput(
+                return _make_output(
                     oracle_name=self.name,
                     verdict=Verdict.FAIL,
                     diagnostics=(
@@ -129,7 +165,7 @@ class ProgramOracle(Oracle):
 
             if rust_compile_result.timed_out:
                 logger.info("program_diff fail: Rust compile timeout")
-                return OracleOutput(
+                return _make_output(
                     oracle_name=self.name,
                     verdict=Verdict.FAIL,
                     diagnostics=(
@@ -143,7 +179,7 @@ class ProgramOracle(Oracle):
 
             if rust_compile_result.compilation_failed:
                 logger.info("program_diff fail: Rust compile failed")
-                return OracleOutput(
+                return _make_output(
                     oracle_name=self.name,
                     verdict=Verdict.FAIL,
                     diagnostics=(
@@ -171,7 +207,7 @@ class ProgramOracle(Oracle):
                     mismatches[0].message,
                 )
                 diagnostics = _mismatches_to_diagnostics(mismatches)
-                return OracleOutput(
+                return _make_output(
                     oracle_name=self.name,
                     verdict=Verdict.FAIL,
                     diagnostics=diagnostics,
@@ -183,7 +219,7 @@ class ProgramOracle(Oracle):
                 len(sample.test_cases),
                 cost,
             )
-            return OracleOutput(
+            return _make_output(
                 oracle_name=self.name,
                 verdict=Verdict.PASS,
                 diagnostics=(),

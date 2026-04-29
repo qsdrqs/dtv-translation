@@ -161,6 +161,7 @@ class _FailingStmtOracle:
                     error_code="E0308",
                 ),
             ),
+            rendered_diagnostics=("- rendered: expected `i32`, found `&str` (E0308)",),
             rollback_scope=Granularity.STMT,
         )
 

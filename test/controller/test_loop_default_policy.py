@@ -318,12 +318,15 @@ class _SequenceOracle:
             verdict = self.verdicts[min(self.idx, len(self.verdicts) - 1)]
         self.idx += 1
         diagnostics = ()
+        rendered: tuple[str, ...] = ()
         if verdict == Verdict.FAIL:
-            diagnostics = (Diagnostic(message="Test failed"),)
+            diagnostics = (Diagnostic(message="Test failed", severity="error"),)
+            rendered = ("- rendered: Test failed",)
         return OracleOutput(
             oracle_name=self.name,
             verdict=verdict,
             diagnostics=diagnostics,
+            rendered_diagnostics=rendered,
             realized_cost=1,
         )
 
@@ -678,6 +681,10 @@ def test_format_bailout_diagnostics_error_only() -> None:
                 Diagnostic(message="mismatched types", severity="error", error_code="E0308"),
                 Diagnostic(message="consider adding a type", severity="warning"),
             ),
+            rendered_diagnostics=(
+                "- L1:1 | let x: i32 = \"hi\";\n    error: mismatched types (E0308)",
+                "    warning: consider adding a type",
+            ),
         ),
         OracleOutput(
             oracle_name="eslint",
@@ -685,13 +692,16 @@ def test_format_bailout_diagnostics_error_only() -> None:
             diagnostics=(
                 Diagnostic(message="missing annotation", severity="error"),
             ),
+            rendered_diagnostics=(
+                "- L2:5 | function bar(arg) {}\n    error: missing annotation\n    hint: Add an explicit type annotation",
+            ),
         ),
     )
     result = _format_bailout_diagnostics(outputs)
     expected = (
         "BAILOUT! Oracle diagnostics:\n"
-        "- [tsc] severity=error code=E0308: mismatched types\n"
-        "- [eslint] severity=error: missing annotation"
+        "- L1:1 | let x: i32 = \"hi\";\n    error: mismatched types (E0308)\n"
+        "- L2:5 | function bar(arg) {}\n    error: missing annotation\n    hint: Add an explicit type annotation"
     )
     assert result == expected
 
@@ -703,6 +713,27 @@ def test_format_bailout_diagnostics_empty_when_no_errors() -> None:
             verdict=Verdict.PASS,
             diagnostics=(
                 Diagnostic(message="unused var", severity="warning"),
+            ),
+            rendered_diagnostics=(
+                "- L1:1 | let x = 1;\n    warning: unused var",
+            ),
+        ),
+    )
+    assert _format_bailout_diagnostics(outputs) == ""
+
+
+def test_format_bailout_diagnostics_empty_when_rendered_missing() -> None:
+    """OracleOutput without rendered_diagnostics produces no bailout postlude.
+
+    Defensive contract: zip over parallel tuples; missing rendered tuple
+    means nothing to surface even if Diagnostic objects exist.
+    """
+    outputs = (
+        OracleOutput(
+            oracle_name="tsc",
+            verdict=Verdict.FAIL,
+            diagnostics=(
+                Diagnostic(message="mismatched types", severity="error", error_code="E0308"),
             ),
         ),
     )
@@ -727,12 +758,17 @@ class _AlwaysFailOracle:
         self._diagnostics = diagnostics or (
             Diagnostic(message="type mismatch", severity="error", error_code="TS2322"),
         )
+        self._rendered = tuple(
+            f"- error: {d.message} ({d.error_code})" if d.error_code else f"- error: {d.message}"
+            for d in self._diagnostics
+        )
 
     def run(self, state, artifact, context) -> OracleOutput:
         return OracleOutput(
             oracle_name=self.name,
             verdict=Verdict.FAIL,
             diagnostics=self._diagnostics,
+            rendered_diagnostics=self._rendered,
             realized_cost=1,
         )
 

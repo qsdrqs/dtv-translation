@@ -2,6 +2,7 @@ from __future__ import annotations
 
 _FUNCTION_TYPES = frozenset({
     "function_declaration",
+    "function_expression",
     "method_definition",
     "arrow_function",
     "generator_function_declaration",

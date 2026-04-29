@@ -64,6 +64,7 @@ def test_render_feedback_prompt_includes_parser_error_context() -> None:
             diagnostics=(
                 Diagnostic(message="expected `i32`, found `&str`", severity="error"),
             ),
+            rendered_diagnostics=("- rendered: expected `i32`, found `&str`",),
             rollback_scope=Granularity.STMT,
         )
     ],
@@ -93,6 +94,7 @@ def test_render_feedback_prompt_stmt_scope_forbids_function_wrapper_for_normal_s
             diagnostics=(
                 Diagnostic(message="expected `i32`, found `&str`", severity="error"),
             ),
+            rendered_diagnostics=("- rendered: expected `i32`, found `&str`",),
             rollback_scope=Granularity.STMT,
         )
     ],
@@ -115,6 +117,7 @@ def test_build_feedback_plan_maps_mechanism_a_to_continuation() -> None:
             diagnostics=(
                 Diagnostic(message="expected `i32`, found `&str`", severity="error"),
             ),
+            rendered_diagnostics=("- rendered: expected `i32`, found `&str`",),
             rollback_scope=Granularity.STMT,
         )
     ],
@@ -141,6 +144,7 @@ def test_build_feedback_plan_maps_mechanism_b_to_patch_write_region() -> None:
             diagnostics=(
                 Diagnostic(message="expected `i32`, found `&str`", severity="error"),
             ),
+            rendered_diagnostics=("- rendered: expected `i32`, found `&str`",),
             rollback_scope=Granularity.STMT,
         )
     ],
@@ -161,6 +165,11 @@ def test_build_feedback_plan_maps_mechanism_b_to_patch_write_region() -> None:
 
 
 def test_render_feedback_prompt_includes_diagnostic_hints_for_mechanism_b() -> None:
+    rendered_block = (
+        "- L1:7 | const readline = require(\"readline\");\n"
+        "    error: Expected readline to have a type annotation. (@typescript-eslint/typedef)\n"
+        "    hint: Add an explicit type annotation, for example: `const readline: <add_type_annotation>`"
+    )
     state = FeedbackState()
     state.on_verify([
         OracleOutput(
@@ -174,6 +183,7 @@ def test_render_feedback_prompt_includes_diagnostic_hints_for_mechanism_b() -> N
                     hints=("Add an explicit type annotation, for example: `const readline: <add_type_annotation>`",),
                 ),
             ),
+            rendered_diagnostics=(rendered_block,),
             rollback_scope=Granularity.STMT,
         )
     ],
@@ -190,8 +200,7 @@ def test_render_feedback_prompt_includes_diagnostic_hints_for_mechanism_b() -> N
         lang_config=TS_FEEDBACK_LANG,
     )
 
-    assert "- [eslint] @typescript-eslint/typedef: Expected readline to have a type annotation." in plan.prompt
-    assert "  hint: Add an explicit type annotation, for example: `const readline: <add_type_annotation>`" in plan.prompt
+    assert rendered_block in plan.prompt
 
 
 def test_build_feedback_plan_puts_diff_in_post_region_injection() -> None:
@@ -203,6 +212,7 @@ def test_build_feedback_plan_puts_diff_in_post_region_injection() -> None:
             diagnostics=(
                 Diagnostic(message="Unexpected any", severity="error"),
             ),
+            rendered_diagnostics=("- rendered: Unexpected any",),
             rollback_scope=Granularity.STMT,
         )
     ],

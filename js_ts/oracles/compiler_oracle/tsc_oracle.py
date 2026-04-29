@@ -22,6 +22,7 @@ from js_ts.oracles.compiler_oracle.tsc_parser import (
     has_errors,
     parse_tsc_diagnostics,
 )
+from js_ts.oracles.diagnostic_render import render_diagnostic
 
 
 logger = get_logger(__name__)
@@ -68,6 +69,10 @@ class TscOracle(Oracle):
             diagnostics = filter_partial_noise(diagnostics)
         diagnostics = filter_type_correctness(diagnostics)
 
+        rendered_diagnostics = tuple(
+            render_diagnostic(d) for d in diagnostics
+        )
+
         verdict = _decide_verdict(result.exit_code, diagnostics, result.timed_out)
         first_diag = diagnostics[0].message if diagnostics else ""
         logger.info(
@@ -79,6 +84,7 @@ class TscOracle(Oracle):
             oracle_name=self.name,
             verdict=verdict,
             diagnostics=diagnostics,
+            rendered_diagnostics=rendered_diagnostics,
             realized_cost=1,
         )
 

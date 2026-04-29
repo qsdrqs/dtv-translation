@@ -177,6 +177,206 @@ def test_parser_skips_typedef_hint_for_multi_declarator_statement() -> None:
     assert diagnostics[0].hints == ()
 
 
+def test_parser_adds_typedef_hint_for_function_declaration_param() -> None:
+    diagnostics = parse_eslint_messages([
+        {
+            "ruleId": "@typescript-eslint/typedef",
+            "severity": 2,
+            "message": "Expected x to have a type annotation.",
+            "line": 1,
+            "column": 14,
+        }
+    ], source_code="function foo(x) { return x; }\n")
+    assert diagnostics[0].hints == (
+        "Add an explicit type annotation, for example: `function foo(x: <add_type_annotation>)`",
+    )
+
+
+def test_parser_adds_typedef_hint_for_named_function_expression_param() -> None:
+    # Regression for result/is-callable.log: param `value` shadowed by outer identifiers.
+    code = "var isES6ClassFn = function isES6ClassFunction(value) {\n\treturn true;\n};\n"
+    diagnostics = parse_eslint_messages([
+        {
+            "ruleId": "@typescript-eslint/typedef",
+            "severity": 2,
+            "message": "Expected value to have a type annotation.",
+            "line": 1,
+            "column": 48,
+        }
+    ], source_code=code)
+    assert diagnostics[0].hints == (
+        "Add an explicit type annotation, for example: `function isES6ClassFunction(value: <add_type_annotation>)`",
+    )
+
+
+def test_parser_adds_typedef_hint_for_anonymous_function_expression_param() -> None:
+    diagnostics = parse_eslint_messages([
+        {
+            "ruleId": "@typescript-eslint/typedef",
+            "severity": 2,
+            "message": "Expected value to have a type annotation.",
+            "line": 1,
+            "column": 18,
+        }
+    ], source_code="var f = function(value) { return value; };\n")
+    assert diagnostics[0].hints == (
+        "Add an explicit type annotation, for example: `function (value: <add_type_annotation>)`",
+    )
+
+
+def test_parser_adds_typedef_hint_for_arrow_function_param() -> None:
+    diagnostics = parse_eslint_messages([
+        {
+            "ruleId": "@typescript-eslint/typedef",
+            "severity": 2,
+            "message": "Expected b to have a type annotation.",
+            "line": 1,
+            "column": 15,
+        }
+    ], source_code="const g = (a, b) => a + b;\n")
+    assert diagnostics[0].hints == (
+        "Add an explicit type annotation, for example: `(a, b: <add_type_annotation>) => ...`",
+    )
+
+
+def test_parser_adds_typedef_hint_for_class_method_param() -> None:
+    diagnostics = parse_eslint_messages([
+        {
+            "ruleId": "@typescript-eslint/typedef",
+            "severity": 2,
+            "message": "Expected x to have a type annotation.",
+            "line": 1,
+            "column": 15,
+        }
+    ], source_code="class C { foo(x) { return x; } }\n")
+    assert diagnostics[0].hints == (
+        "Add an explicit type annotation, for example: `foo(x: <add_type_annotation>)`",
+    )
+
+
+def test_parser_skips_typedef_hint_when_param_already_annotated() -> None:
+    # Defensive: bail when AST says annotation present, even on stale diagnostics.
+    diagnostics = parse_eslint_messages([
+        {
+            "ruleId": "@typescript-eslint/typedef",
+            "severity": 2,
+            "message": "Expected x to have a type annotation.",
+            "line": 1,
+            "column": 14,
+        }
+    ], source_code="function foo(x: number) { return x; }\n")
+    assert diagnostics[0].hints == ()
+
+
+def test_parser_skips_typedef_hint_for_single_arg_arrow_without_parens() -> None:
+    # `a => a` has no formal_parameters node; bail rather than emit malformed hint.
+    diagnostics = parse_eslint_messages([
+        {
+            "ruleId": "@typescript-eslint/typedef",
+            "severity": 2,
+            "message": "Expected a to have a type annotation.",
+            "line": 1,
+            "column": 11,
+        }
+    ], source_code="const f = a => a;\n")
+    assert diagnostics[0].hints == ()
+
+
+def test_parser_adds_return_type_hint_for_function_declaration() -> None:
+    diagnostics = parse_eslint_messages([
+        {
+            "ruleId": "@typescript-eslint/explicit-function-return-type",
+            "severity": 2,
+            "message": "Missing return type on function.",
+            "line": 1,
+            "column": 1,
+        }
+    ], source_code="function foo(x: number) { return x; }\n")
+    assert diagnostics[0].hints == (
+        "Add an explicit return type annotation, for example: `function foo(x: number): <add_type_annotation>`",
+    )
+
+
+def test_parser_adds_return_type_hint_for_anonymous_function_expression() -> None:
+    diagnostics = parse_eslint_messages([
+        {
+            "ruleId": "@typescript-eslint/explicit-function-return-type",
+            "severity": 2,
+            "message": "Missing return type on function.",
+            "line": 1,
+            "column": 9,
+        }
+    ], source_code="var f = function(value: any) { return value; };\n")
+    assert diagnostics[0].hints == (
+        "Add an explicit return type annotation, for example: `function (value: any): <add_type_annotation>`",
+    )
+
+
+def test_parser_adds_return_type_hint_for_arrow_function() -> None:
+    diagnostics = parse_eslint_messages([
+        {
+            "ruleId": "@typescript-eslint/explicit-function-return-type",
+            "severity": 2,
+            "message": "Missing return type on function.",
+            "line": 1,
+            "column": 34,
+        }
+    ], source_code="const g = (a: number, b: number) => a + b;\n")
+    assert diagnostics[0].hints == (
+        "Add an explicit return type annotation, for example: `(a: number, b: number): <add_type_annotation> =>`",
+    )
+
+
+def test_parser_adds_return_type_hint_for_class_method() -> None:
+    diagnostics = parse_eslint_messages([
+        {
+            "ruleId": "@typescript-eslint/explicit-function-return-type",
+            "severity": 2,
+            "message": "Missing return type on function.",
+            "line": 1,
+            "column": 11,
+        }
+    ], source_code="class C { foo(x: number) { return x; } }\n")
+    assert diagnostics[0].hints == (
+        "Add an explicit return type annotation, for example: `foo(x: number): <add_type_annotation>`",
+    )
+
+
+def test_parser_skips_return_type_hint_when_already_annotated() -> None:
+    # Defensive: bail when AST already shows return_type, even on stale diagnostics.
+    diagnostics = parse_eslint_messages([
+        {
+            "ruleId": "@typescript-eslint/explicit-function-return-type",
+            "severity": 2,
+            "message": "Missing return type on function.",
+            "line": 1,
+            "column": 1,
+        }
+    ], source_code="function foo(x: number): number { return x; }\n")
+    assert diagnostics[0].hints == ()
+
+
+def test_parser_skips_hints_when_no_source_code() -> None:
+    diagnostics = parse_eslint_messages([
+        {
+            "ruleId": "@typescript-eslint/typedef",
+            "severity": 2,
+            "message": "Expected x to have a type annotation.",
+            "line": 1,
+            "column": 14,
+        },
+        {
+            "ruleId": "@typescript-eslint/explicit-function-return-type",
+            "severity": 2,
+            "message": "Missing return type on function.",
+            "line": 1,
+            "column": 1,
+        },
+    ])
+    assert diagnostics[0].hints == ()
+    assert diagnostics[1].hints == ()
+
+
 def test_filter_post_prefix_diagnostics_drops_renderer_only_diagnostic() -> None:
     diagnostics = parse_eslint_messages([
         {
