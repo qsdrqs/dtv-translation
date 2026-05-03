@@ -32,6 +32,7 @@ class DefaultPolicyConfig:
     close_granularity: Granularity = Granularity.FUNC
     enable_rollback: bool = True
     default_fail_scope: Granularity = Granularity.STMT
+    max_rollback_scope: Granularity = Granularity.FUNC  # NEW: cap on rollback scope (clamps oracle hints + stall escalation)
     stmt_stall_max_retries_before_escalation: int = 3
     enable_cdhr: bool = False
     enable_feedback: bool = True  # Controls both FEEDBACK and APPLY_PATCH.
@@ -326,9 +327,10 @@ class DefaultPolicy(Policy):
         max_stmt_retries = max(0, self.config.stmt_stall_max_retries_before_escalation)
         if self._stmt_stall_retries <= max_stmt_retries:
             return Granularity.STMT
+        cap = min(self.config.max_rollback_scope, Granularity.FUNC)
         if _has_active_block(ctx):
-            return Granularity.BLOCK
-        return Granularity.FUNC
+            return min(Granularity.BLOCK, cap)
+        return min(Granularity.FUNC, cap)
 
     def select_oracles(
         self,
@@ -407,16 +409,17 @@ def _all_pass(outputs: tuple[OracleOutput, ...]) -> bool:
 
 
 def _select_fail_scope(config: DefaultPolicyConfig, outputs: tuple[OracleOutput, ...]) -> Granularity:
+    cap = min(config.max_rollback_scope, Granularity.FUNC)  # always cap at FUNC; user override clamps further
     fail_outputs = [o for o in outputs if o.verdict == Verdict.FAIL]
     scopes = [o.rollback_scope for o in fail_outputs if o.rollback_scope is not None]
     if scopes:
-        return min(max(scopes), Granularity.FUNC)
+        return min(max(scopes), cap)
     if config.enable_cdhr:
         for output in outputs:
             for diag in output.diagnostics:
                 if diag.hint_scope is not None:
-                    return min(diag.hint_scope, Granularity.FUNC)
-    return min(config.default_fail_scope, Granularity.FUNC)
+                    return min(diag.hint_scope, cap)
+    return min(config.default_fail_scope, cap)
 
 
 def _func_id(group_stack) -> str:

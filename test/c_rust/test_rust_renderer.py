@@ -363,6 +363,62 @@ fn foo(a: i32) {
     assert compile.ok, compile.stderr
 
 
+def test_nested_let_initializer_inner_if_consequence_closed_compiles() -> None:
+    # Regression: result/repro_gemma_dtv_intersection.log
+    prefix = """\
+fn foo(a: i32) -> i32 {
+    let x = match a {
+        0 => {
+            let y = if a > 0 {
+                1
+            }"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    note_tokens = result.notes.split(",")
+    assert note_tokens.count("render_patch:semicolon_head") == 1
+    assert note_tokens.count("render_patch:semicolon") == 1
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_nested_let_initializer_both_values_unclosed_compiles() -> None:
+    prefix = """\
+fn foo(a: i32) -> i32 {
+    let x = match a {
+        0 => {
+            let y = match a {
+                1 => {"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    note_tokens = result.notes.split(",")
+    assert note_tokens.count("render_patch:semicolon_head") == 0
+    assert note_tokens.count("render_patch:semicolon") == 2
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
+def test_triple_nested_let_initializer_mixed_paths_compiles() -> None:
+    prefix = """\
+fn foo(a: i32) -> i32 {
+    let x = match a {
+        0 => {
+            let y = match a {
+                1 => {
+                    let z = if a > 0 {
+                        1
+                    }"""
+    result = _render(prefix)
+    assert result.status == RenderStatus.OK
+    assert result.artifact is not None
+    note_tokens = result.notes.split(",")
+    assert note_tokens.count("render_patch:semicolon_head") == 1
+    assert note_tokens.count("render_patch:semicolon") == 2
+    compile = compile_rust(result.artifact.code)
+    assert compile.ok, compile.stderr
+
+
 def test_type_witness_parse_ok_empty_arm_compiles() -> None:
     prefix = """\
 fn foo(input: &str) {

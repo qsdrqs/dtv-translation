@@ -69,6 +69,9 @@ class LetContextRule(ContextRule):
             )
 
     def apply_patch(self, plan: PatchPlan, analysis: Analysis) -> None:
+        # Patch every unclosed let_declaration ancestor; nested lets need
+        # independent insertion points.
+        head_semicolon_added = False
         for idx, ctx in enumerate(self.get_contexts(analysis)):
             if not isinstance(ctx, LetContext):
                 continue
@@ -76,12 +79,14 @@ class LetContextRule(ContextRule):
                 continue
             value_closed = ctx.value_end is not None and ctx.value_end <= analysis.end_byte
             if value_closed:
+                if head_semicolon_added:
+                    continue
                 plan.add_head_stmt(";", raw=True)
                 plan.notes.append("render_patch:semicolon_head")
-                break
+                head_semicolon_added = True
+                continue
             if ctx.value_block_start is None:
                 continue
             plan.insert_after(ctx.value_block_start, ";")
             plan.notes.append("render_patch:semicolon")
             plan.add_tail_marker(";")
-            break

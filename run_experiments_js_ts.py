@@ -26,13 +26,12 @@ Use --output to write results to a custom path.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
+import re
 import tempfile
 import time
 
-import torch
 from collections.abc import Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
@@ -92,7 +91,10 @@ OUTPUT_TOKEN_CAP = 6144
 TOKEN_BUDGET = OUTPUT_TOKEN_CAP
 MAX_NEW_LENGTH = 1024
 MAX_NEW_LENGTH_BON = 8192
-MAX_STEPS = 2000
+# INNER counts controller actions, OUTER counts SR retry rounds; different
+# units, do not conflate. Real termination for both is the token budget.
+INNER_MAX_STEPS = 2000
+OUTER_MAX_ROUNDS = 2000
 PROMPT_PREFIX = "Add TypeScript type annotations to the following JavaScript code. Explicitly annotate every variable, function parameter, and function return type. Only add type annotations, do not change the code structure or logic. If you are unsure about the type, use 'any'.\n\n"
 DATASET_DIR = Path(os.environ.get("DTV_JS_TS_DATASET_DIR", "dataset_js_ts"))
 RESULT_DIR = Path("result")
@@ -105,8 +107,18 @@ def resolve_backend_config(
 ) -> tuple[type[QwenGeneratorBackend] | type[GemmaGeneratorBackend], str]:
     if backend == "gemma":
         resolved_model_name = model_name or GEMMA_MODEL_NAME
+        if "gemma" not in resolved_model_name.lower():
+            raise SystemExit(
+                f"ERROR: --backend gemma but --model-name '{resolved_model_name}' "
+                f"does not look like a Gemma model. Did you mean --backend qwen?"
+            )
         return GemmaGeneratorBackend, resolved_model_name
     resolved_model_name = model_name or MODEL_NAME
+    if "qwen" not in resolved_model_name.lower():
+        raise SystemExit(
+            f"ERROR: --backend qwen (default) but --model-name '{resolved_model_name}' "
+            f"does not look like a Qwen model. Did you forget --backend gemma?"
+        )
     return QwenGeneratorBackend, resolved_model_name
 
 
@@ -145,8 +157,6 @@ class RunResult:
     rollback_count: int
     commit_count: int
     compiles: bool
-    test_passed: int
-    test_total: int
     saved_output_path: str | None = None
     trace_log: list[dict] | None = None
 
@@ -329,9 +339,15 @@ def _compile_ts_code(ts_code: str, sample: TranslationSample) -> tuple[bool, str
     """
     # Empty / whitespace-only TS trivially passes tsc + eslint (no code = no
     # errors), producing false-positive pass verdicts and empty saved output
-    # files. Reject such inputs so the outer repair loop and final eval agree
-    # that "no code was produced" is a failure.
-    if not ts_code.strip():
+    # files. Comment-only files (e.g. DTV outputs that captured repair
+    # feedback in /* ... */ blocks but no actual code) hit the same trap, so
+    # strip block + line comments before the empty check. The regex is
+    # approximate (does not honor TS string/template/regex literals) but stays
+    # safe: false negatives only make the gate stricter on already-trivial
+    # outputs.
+    _stripped_for_check = re.sub(r"/\*.*?\*/", "", ts_code, flags=re.DOTALL)
+    _stripped_for_check = re.sub(r"//[^\n]*", "", _stripped_for_check)
+    if not _stripped_for_check.strip():
         return (
             False,
             "- verifier received empty TS code (no code extracted from model output)",
@@ -420,14 +436,6 @@ def _build_missing_markers_prompt(markers: WriteRegionMarkers) -> str:
 def load_sample(case_dir: Path) -> TranslationSample:
     js_source = (case_dir / "source.js").read_text(encoding="utf-8").strip()
     return TranslationSample(source_code=js_source, source_lang="js", test_cases=[])
-
-
-def evaluate_final_ts_code(
-    ts_code: str,
-    sample: TranslationSample,
-) -> tuple[bool, int, int]:
-    compiles, _, _ = _compile_ts_code(ts_code, sample)
-    return compiles, 0, 0
 
 
 # -- Shared program-level eval + reprompt loop ---------------------------------
@@ -563,7 +571,7 @@ def program_eval_loop(
     sample: TranslationSample,
     regenerate_round: Callable[[list[GenerateMessage], Budget], RegenerationRoundResult],
     last_raw_output: str = "",
-    max_rounds: int | None = MAX_STEPS,
+    max_rounds: int | None = OUTER_MAX_ROUNDS,
 ) -> ProgramEvalLoopResult:
     code = initial_code
     last_raw = last_raw_output
@@ -732,23 +740,7 @@ def _run_bon_nsr(
     trace_log: list[dict] = []
     raw_outputs: list[str] = []
 
-    # Derive a deterministic seed base from the prompt so BoN samples for the
-    # same case are reproducible across runs. Python's hash() is seeded per
-    # process (PYTHONHASHSEED), so use hashlib for stability. Per-sample seed
-    # is seed_base + idx; without this, HF's internal RNG advancement between
-    # consecutive generate() calls yields limited variance (adjacent samples
-    # often collapse to identical outputs under narrow temp/top_p).
-    seed_base = int.from_bytes(
-        hashlib.sha256(prompt.encode("utf-8")).digest()[:4],
-        "big",
-    ) & 0x7FFFFFFF
-
     for idx in range(n):
-        sample_seed = (seed_base + idx) & 0x7FFFFFFF
-        torch.manual_seed(sample_seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(sample_seed)
-
         messages = [
             GenerateMessage(role="user", content=prompt, stop=True),
             GenerateMessage(role="assistant", content="", stop=False),
@@ -850,10 +842,14 @@ def run_single(
             n=bon_n,
         )
         elapsed = time.time() - t0
-        compiles, test_passed, test_total = evaluate_final_ts_code(
-            ts_code=selected_code,
-            sample=sample,
-        )
+        # Trust the in-loop verifier: each BoN candidate already ran
+        # _compile_ts_code and recorded compiles. Selecting the best record
+        # and re-running tsc post-hoc would only differ for non-deterministic
+        # tools, but it would also bypass the same gate (Gate A: empty/comment
+        # only after stripping) that the in-loop verifier applies. Use the
+        # selected record's compiles directly.
+        selected_record = next((r for r in bon_records if r.selected), None)
+        compiles = selected_record.compiles if selected_record is not None else False
         final_verdict = "pass" if compiles else "fail"
         saved_output_path = None
         if final_verdict == "pass":
@@ -875,8 +871,6 @@ def run_single(
             rollback_count=0,
             commit_count=0,
             compiles=compiles,
-            test_passed=test_passed,
-            test_total=test_total,
             saved_output_path=saved_output_path,
             trace_log=bon_trace,
         )
@@ -904,7 +898,7 @@ def run_single(
             oracle_factory=oracle_factory,
             config=config,
             markers=markers,
-            max_steps=MAX_STEPS,
+            max_steps=INNER_MAX_STEPS,
             max_new_length=MAX_NEW_LENGTH,
         )
         renderer = renderer_factory()
@@ -924,7 +918,7 @@ def run_single(
             policy=policy,
             feedback_lang_config=TS_FEEDBACK_LANG,
             repair_feedback_format_config=RepairFeedbackFormatConfig(include_failed_snippet=True),
-            max_steps=MAX_STEPS,
+            max_steps=INNER_MAX_STEPS,
             max_new_length=MAX_NEW_LENGTH,
             prompt_prefix=prompt,
             inject_write_region_contract=False,
@@ -952,10 +946,14 @@ def run_single(
 
     elapsed = time.time() - t0
 
-    compiles, test_passed, test_total = evaluate_final_ts_code(
-        ts_code=eval_result.final_code,
-        sample=sample,
-    )
+    # Trust the loop's in-budget verification: program_eval_loop only sets
+    # compiles=True when an outer VERIFY_PROGRAM round successfully observed
+    # a clean tsc + eslint result while budget remained. If the loop never
+    # got to validate (budget exhausted before any verify), we treat it as
+    # fail even when a post-hoc tsc check on final_code happens to pass
+    # (e.g. DTV's stmt-level legal prefix becomes a tiny but valid TS
+    # snippet at the budget cap).
+    compiles = eval_result.compiles
 
     combined_trace = gen_trace + eval_result.trace
 
@@ -985,8 +983,6 @@ def run_single(
         rollback_count=gen_rollback + eval_result.rollback_count,
         commit_count=gen_commit + eval_result.commit_count,
         compiles=compiles,
-        test_passed=test_passed,
-        test_total=test_total,
         saved_output_path=saved_output_path,
         trace_log=combined_trace,
     )
@@ -1045,13 +1041,13 @@ def print_summary(
 
     col = (
         f"{'Case':<15} | "
-        f"{'Verd':<7} {'Tok':>6} {'Stp':>5} {'V':>3} {'F':>3} {'R':>3} {'C':>2} {'Tests':>7} | "
-        f"{'Verd':<7} {'Tok':>6} {'Stp':>5} {'V':>3} {'F':>3} {'R':>3} {'C':>2} {'Tests':>7}"
+        f"{'Verd':<7} {'Tok':>6} {'Stp':>5} {'V':>3} {'F':>3} {'R':>3} {'C':>2} | "
+        f"{'Verd':<7} {'Tok':>6} {'Stp':>5} {'V':>3} {'F':>3} {'R':>3} {'C':>2}"
     )
     budget_desc = f"BudgetK={budget_k}" if budget_k is not None else f"TokenBudget={token_budget}"
     print(f"\n{'=' * 95}")
     print("A/B COMPARISON: JS->TS DTV vs Naive Feedback")
-    print(f"Model={model_name}  {budget_desc}  MaxSteps={MAX_STEPS}")
+    print(f"Model={model_name}  {budget_desc}  MaxSteps={INNER_MAX_STEPS}")
     print(f"{'=' * 95}")
     print(f"{'':15}   {'--- DTV (JS->TS) ---':^40}   {'--- Naive (JS->TS) ---':^40}")
     print(col)
@@ -1065,10 +1061,10 @@ def print_summary(
                 f"{cid:<15} | "
                 f"{d.final_verdict:<7} {d.total_tokens:>6} {d.total_steps:>5} "
                 f"{d.verify_count:>3} {d.feedback_count:>3} {d.rollback_count:>3} "
-                f"{'Y' if d.compiles else 'N':>2} {f'{d.test_passed}/{d.test_total}':>7} | "
+                f"{'Y' if d.compiles else 'N':>2} | "
                 f"{n.final_verdict:<7} {n.total_tokens:>6} {n.total_steps:>5} "
                 f"{n.verify_count:>3} {n.feedback_count:>3} {n.rollback_count:>3} "
-                f"{'Y' if n.compiles else 'N':>2} {f'{n.test_passed}/{n.test_total}':>7}"
+                f"{'Y' if n.compiles else 'N':>2}"
             )
 
     print("-" * 95)
@@ -1076,10 +1072,6 @@ def print_summary(
     naive_list = [naive[cid] for cid in case_ids if cid in naive]
     dtv_pass = sum(1 for r in dtv_list if r.final_verdict == "pass")
     naive_pass = sum(1 for r in naive_list if r.final_verdict == "pass")
-    dtv_test_pass = sum(r.test_passed for r in dtv_list)
-    naive_test_pass = sum(r.test_passed for r in naive_list)
-    dtv_test_total = sum(r.test_total for r in dtv_list)
-    naive_test_total = sum(r.test_total for r in naive_list)
     dtv_avg_tok = sum(r.total_tokens for r in dtv_list) / max(len(dtv_list), 1)
     naive_avg_tok = sum(r.total_tokens for r in naive_list) / max(len(naive_list), 1)
     dtv_avg_time = sum(r.elapsed_s for r in dtv_list) / max(len(dtv_list), 1)
@@ -1087,14 +1079,10 @@ def print_summary(
 
     legend = (
         "Legend: Verd=final verdict, Tok=tokens used, Stp=loop steps, "
-        "V=verify, F=feedback, R=rollback, C=final TS compiles, Tests=passed/total"
+        "V=verify, F=feedback, R=rollback, C=final TS compiles"
     )
     print(legend)
     print(f"\nPass rate:    DTV {dtv_pass}/{len(dtv_list)}    Naive {naive_pass}/{len(naive_list)}")
-    print(
-        f"Test pass:    DTV {dtv_test_pass}/{dtv_test_total}    "
-        f"Naive {naive_test_pass}/{naive_test_total}"
-    )
     print(f"Avg tokens:   DTV {dtv_avg_tok:.0f}      Naive {naive_avg_tok:.0f}")
     print(f"Avg time(s):  DTV {dtv_avg_time:.1f}      Naive {naive_avg_time:.1f}")
     print(f"{'=' * 95}")
@@ -1163,6 +1151,30 @@ def main() -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     pass_output_dir = output_path.parent / f"{output_path.stem}_pass_outputs"
 
+    # Resume from incremental save (see write at end of for-loop). Required
+    # for preempt-capable Slurm partitions where workers may be killed mid-run.
+    existing_results: list[RunResult] = []
+    if output_path.exists():
+        try:
+            existing_data = json.loads(output_path.read_text(encoding="utf-8"))
+            if isinstance(existing_data, list):
+                existing_results = [RunResult(**r) for r in existing_data]
+                done_case_ids = {r.case_id for r in existing_results}
+                original_count = len(case_ids)
+                case_ids = [cid for cid in case_ids if cid not in done_case_ids]
+                print(
+                    f"Resume: {len(done_case_ids)} done, "
+                    f"{len(case_ids)} remaining (was {original_count})",
+                    flush=True,
+                )
+        except Exception as exc:
+            print(
+                f"WARNING: failed to load existing output for resume "
+                f"({exc}); starting fresh",
+                flush=True,
+            )
+            existing_results = []
+
     backend_cls, model_name = resolve_backend_config(
         backend=args.backend,
         model_name=args.model_name,
@@ -1191,11 +1203,11 @@ def main() -> None:
     print(f"Model loaded: {model_name}")
     print(f"Backend: {args.backend}")
     print(f"Strategy: {strategy_desc}")
-    print(f"Cases: {len(case_ids)}, {budget_desc}, MaxSteps={MAX_STEPS}, Sampling={sampling_desc}")
+    print(f"Cases: {len(case_ids)}, {budget_desc}, MaxSteps={INNER_MAX_STEPS}, Sampling={sampling_desc}")
     print(f"Dataset: {dataset_dir}")
     print(f"Output: {output_path}")
 
-    results: list[RunResult] = []
+    results: list[RunResult] = list(existing_results)
     configs = [(args.strategy, DTV_CONFIG)]
 
     for i, case_id in enumerate(case_ids, 1):
@@ -1231,8 +1243,6 @@ def main() -> None:
                     rollback_count=0,
                     commit_count=0,
                     compiles=False,
-                    test_passed=0,
-                    test_total=0,
                 )
             results.append(result)
             print(
@@ -1240,13 +1250,14 @@ def main() -> None:
                 f"steps={result.total_steps}  verify={result.verify_count}  "
                 f"feedback={result.feedback_count}  rollback={result.rollback_count}  "
                 f"compiles={'Y' if result.compiles else 'N'}  "
-                f"tests={result.test_passed}/{result.test_total}  "
                 f"time={result.elapsed_s}s"
             )
 
-        output_path.write_text(
+        tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
+        tmp_path.write_text(
             json.dumps([asdict(r) for r in results], indent=2), encoding="utf-8"
         )
+        tmp_path.replace(output_path)
 
     print_summary(results, model_name=model_name, token_budget=token_budget, budget_k=budget_k)
     print(f"\nFull results: {output_path}")

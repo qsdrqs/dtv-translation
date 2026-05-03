@@ -23,16 +23,14 @@ If no case IDs given, uses the default 10-case smoke set.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
 import tempfile
 import time
 
-import torch
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Callable, Protocol, cast
 
@@ -83,7 +81,10 @@ OUTPUT_TOKEN_CAP = 6144
 TOKEN_BUDGET = OUTPUT_TOKEN_CAP
 MAX_NEW_LENGTH = 1024
 MAX_NEW_LENGTH_BON = 8192
-MAX_STEPS = 2000
+# INNER counts controller actions, OUTER counts SR retry rounds; different
+# units, do not conflate. Real termination for both is the token budget.
+INNER_MAX_STEPS = 2000
+OUTER_MAX_ROUNDS = 2000
 PROMPT_PREFIX = "Translate the following C code into Rust:"
 DATASET_DIR = Path(os.environ.get("DTV_DATASET_DIR", "/home/qsdrqs/projects/agent_fuzz/selected_data_output"))
 RESULT_DIR = Path("result")
@@ -106,6 +107,19 @@ DTV_CONFIG = DefaultPolicyConfig(
     repair_verify_granularity=Granularity.STMT,
 )
 
+DTV_NO_FEEDBACK_CONFIG = replace(DTV_CONFIG, enable_feedback=False)
+DTV_NO_ESCALATION_CONFIG = replace(DTV_CONFIG, max_rollback_scope=Granularity.STMT)
+DTV_DETECT_AND_ABORT_CONFIG = replace(DTV_CONFIG, bailout_visit_threshold=1)
+
+# Strategy name -> config mapping. naive and bon-nsr are handled separately
+# (they don't run DTV inner loop, so config is unused there).
+DTV_STRATEGY_CONFIGS: dict[str, DefaultPolicyConfig] = {
+    "dtv": DTV_CONFIG,
+    "dtv-no-feedback": DTV_NO_FEEDBACK_CONFIG,
+    "dtv-no-escalation": DTV_NO_ESCALATION_CONFIG,
+    "dtv-detect-and-abort": DTV_DETECT_AND_ABORT_CONFIG,
+}
+
 
 class _StopCriteriaBackend(Protocol):
     stop_criteria: StoppingCriteriaList
@@ -122,9 +136,19 @@ def resolve_backend_config(
 ) -> tuple[type[QwenGeneratorBackend] | type[GemmaGeneratorBackend], str]:
     if backend == "gemma":
         resolved_model_name = model_name or GEMMA_MODEL_NAME
+        if "gemma" not in resolved_model_name.lower():
+            raise SystemExit(
+                f"ERROR: --backend gemma but --model-name '{resolved_model_name}' "
+                f"does not look like a Gemma model. Did you mean --backend qwen?"
+            )
         return GemmaGeneratorBackend, resolved_model_name
 
     resolved_model_name = model_name or MODEL_NAME
+    if "qwen" not in resolved_model_name.lower():
+        raise SystemExit(
+            f"ERROR: --backend qwen (default) but --model-name '{resolved_model_name}' "
+            f"does not look like a Qwen model. Did you forget --backend gemma?"
+        )
     return QwenGeneratorBackend, resolved_model_name
 
 
@@ -598,7 +622,7 @@ def program_eval_loop(
     markers: WriteRegionMarkers,
     regenerate_round: Callable[[list[GenerateMessage], Budget], RegenerationRoundResult],
     last_raw_output: str = "",
-    max_rounds: int | None = MAX_STEPS,
+    max_rounds: int | None = OUTER_MAX_ROUNDS,
 ) -> ProgramEvalLoopResult:
     code = initial_code
     last_raw = last_raw_output
@@ -626,6 +650,8 @@ def program_eval_loop(
                 "missing_markers": True,
             })
             total_steps += 1
+            if max_rounds is not None and rounds >= max_rounds:
+                break
             feedback_count += 1
             rollback_count += 1
             if _remaining_tokens(budget) <= 0:
@@ -682,6 +708,9 @@ def program_eval_loop(
             )
 
         if _remaining_tokens(budget) <= 0:
+            break
+
+        if max_rounds is not None and rounds >= max_rounds:
             break
 
         feedback_count += 1
@@ -764,23 +793,7 @@ def _run_bon_nsr(
     trace_log: list[dict] = []
     raw_outputs: list[str] = []
 
-    # Derive a deterministic seed base from the prompt so BoN samples for the
-    # same case are reproducible across runs. Python's hash() is seeded per
-    # process (PYTHONHASHSEED), so use hashlib for stability. Per-sample seed
-    # is seed_base + idx; without this, HF's internal RNG advancement between
-    # consecutive generate() calls yields limited variance (adjacent samples
-    # often collapse to identical outputs under narrow temp/top_p).
-    seed_base = int.from_bytes(
-        hashlib.sha256(prompt.encode("utf-8")).digest()[:4],
-        "big",
-    ) & 0x7FFFFFFF
-
     for idx in range(n):
-        sample_seed = (seed_base + idx) & 0x7FFFFFFF
-        torch.manual_seed(sample_seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(sample_seed)
-
         messages = [
             GenerateMessage(role="user", content=prompt, stop=True),
             GenerateMessage(role="assistant", content="", stop=False),
@@ -937,7 +950,7 @@ def run_single(
             oracle_factory=oracle_factory,
             config=config,
             markers=markers,
-            max_steps=MAX_STEPS,
+            max_steps=INNER_MAX_STEPS,
             max_new_length=MAX_NEW_LENGTH,
         )
         renderer = renderer_factory()
@@ -957,7 +970,7 @@ def run_single(
             policy=policy,
             feedback_lang_config=RUST_FEEDBACK_LANG,
             repair_feedback_format_config=RepairFeedbackFormatConfig(include_failed_snippet=True),
-            max_steps=MAX_STEPS,
+            max_steps=INNER_MAX_STEPS,
             max_new_length=MAX_NEW_LENGTH,
             prompt_prefix=prompt,
             inject_write_region_contract=False,
@@ -973,6 +986,9 @@ def run_single(
         initial_code = _extract_write_region_code(raw_output, markers)
         last_raw_output = raw_output
 
+    # Outer SR cap is identical across all configs; ablation-specific feedback
+    # semantics live in trace_log phase markers, not in this knob.
+    outer_max_rounds = OUTER_MAX_ROUNDS
     eval_result = program_eval_loop(
         initial_code=initial_code,
         prompt=prompt,
@@ -980,6 +996,7 @@ def run_single(
         markers=markers,
         regenerate_round=regenerate_round,
         last_raw_output=last_raw_output,
+        max_rounds=outer_max_rounds,
     )
 
     elapsed = time.time() - t0
@@ -1074,7 +1091,7 @@ def print_summary(
     budget_desc = f"BudgetK={budget_k}" if budget_k is not None else f"TokenBudget={token_budget}"
     print(f"\n{'=' * 95}")
     print("A/B COMPARISON: DTV vs Naive Feedback")
-    print(f"Model={model_name}  {budget_desc}  MaxSteps={MAX_STEPS}")
+    print(f"Model={model_name}  {budget_desc}  MaxSteps={INNER_MAX_STEPS}")
     print(f"{'=' * 95}")
     print(f"{'':15}   {'--- DTV ---':^40}   {'--- Naive ---':^40}")
     print(col)
@@ -1131,9 +1148,15 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=OUTPUT_PATH, help="Output JSON path")
     parser.add_argument(
         "--strategy",
-        choices=("naive", "dtv", "bon-nsr"),
+        choices=("naive", "dtv", "bon-nsr",
+                 "dtv-no-feedback", "dtv-no-escalation", "dtv-detect-and-abort"),
         required=True,
-        help="Generation strategy: naive (one-shot), dtv (verified), or bon-nsr (Best-of-N, no per-sample self-repair)",
+        help=(
+            "Generation strategy: "
+            "naive (one-shot), dtv (verified, full DTV), "
+            "bon-nsr (Best-of-N, no per-sample self-repair), "
+            "dtv-no-feedback / dtv-no-escalation / dtv-detect-and-abort (RQ3 ablations)"
+        ),
     )
     parser.add_argument(
         "--bon-n",
@@ -1171,6 +1194,30 @@ def main() -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     pass_output_dir = output_path.parent / f"{output_path.stem}_pass_outputs"
 
+    # Resume from incremental save (see write at end of for-loop). Required
+    # for preempt-capable Slurm partitions where workers may be killed mid-run.
+    existing_results: list[RunResult] = []
+    if output_path.exists():
+        try:
+            existing_data = json.loads(output_path.read_text(encoding="utf-8"))
+            if isinstance(existing_data, list):
+                existing_results = [RunResult(**r) for r in existing_data]
+                done_case_ids = {r.case_id for r in existing_results}
+                original_count = len(case_ids)
+                case_ids = [cid for cid in case_ids if cid not in done_case_ids]
+                print(
+                    f"Resume: {len(done_case_ids)} done, "
+                    f"{len(case_ids)} remaining (was {original_count})",
+                    flush=True,
+                )
+        except Exception as exc:
+            print(
+                f"WARNING: failed to load existing output for resume "
+                f"({exc}); starting fresh",
+                flush=True,
+            )
+            existing_results = []
+
     backend_cls, model_name = resolve_backend_config(
         backend=args.backend,
         model_name=args.model_name,
@@ -1199,11 +1246,18 @@ def main() -> None:
     print(f"Model loaded: {model_name}")
     print(f"Backend: {args.backend}")
     print(f"Strategy: {strategy_desc}")
-    print(f"Cases: {len(case_ids)}, {budget_desc}, MaxSteps={MAX_STEPS}, Sampling={sampling_desc}")
+    print(f"Cases: {len(case_ids)}, {budget_desc}, MaxSteps={INNER_MAX_STEPS}, Sampling={sampling_desc}")
     print(f"Output: {output_path}")
 
-    results: list[RunResult] = []
-    configs = [(args.strategy, DTV_CONFIG)]
+    results: list[RunResult] = list(existing_results)
+    if args.strategy in DTV_STRATEGY_CONFIGS:
+        configs = [(args.strategy, DTV_STRATEGY_CONFIGS[args.strategy])]
+    elif args.strategy in ("naive", "bon-nsr"):
+        # These strategies don't use DTV config; pass DTV_CONFIG as placeholder
+        # that the naive/bon-nsr code paths will ignore.
+        configs = [(args.strategy, DTV_CONFIG)]
+    else:
+        raise ValueError(f"unhandled strategy: {args.strategy}")
 
     for i, case_id in enumerate(case_ids, 1):
         for config_name, config in configs:
@@ -1246,9 +1300,11 @@ def main() -> None:
                 f"time={result.elapsed_s}s"
             )
 
-        output_path.write_text(
+        tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
+        tmp_path.write_text(
             json.dumps([asdict(r) for r in results], indent=2), encoding="utf-8"
         )
+        tmp_path.replace(output_path)
 
     print_summary(results, model_name=model_name, token_budget=token_budget, budget_k=budget_k)
     print(f"\nFull results: {output_path}")
