@@ -9,9 +9,10 @@ translation tasks are supported:
 - **JS -> TS**: `tsc` compile oracle (strict: false) + ESLint
   (`@typescript-eslint/typedef`).
 
-This README covers reproducing the paper experiments. For the controller
-state machine, oracle interfaces, and other architectural details, see
-[`AGENTS.md`](AGENTS.md).
+This README focuses on running the two experiment drivers
+[`run_experiments_js_ts.py`](run_experiments_js_ts.py) and
+[`run_experiments_c_rust.py`](run_experiments_c_rust.py). For architecture
+details and invariants, see [`AGENTS.md`](AGENTS.md).
 
 ## 1. Environment
 
@@ -40,8 +41,8 @@ rustup toolchain install stable
 
 ### Option C: Container
 
-Reproducible Apptainer/Docker image: see [`Dockerfile`](Dockerfile) and
-[`dtv.def`](dtv.def).
+A reproducible Apptainer/Docker image is defined by
+[`Dockerfile`](Dockerfile) and [`dtv.def`](dtv.def).
 
 ### Sanity check
 
