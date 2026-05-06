@@ -799,6 +799,211 @@ def _run_bon_nsr(
     return records[best_idx].code, raw_outputs[best_idx], records, trace_log
 
 
+# -- S* (parallel sampling + iterative compile-based self-debug) --------------
+
+@dataclass
+class SStarSampleRoundRecord:
+    """One round (initial generation OR self-debug regeneration) of one sample.
+
+    For round_idx=0 this is the initial generation. For round_idx>=1 this is
+    a self-debug regeneration using tsc+eslint diagnostics from the previous
+    round as feedback.
+    """
+    sample_idx: int
+    round_idx: int
+    code: str
+    compiles: bool
+    error_count: int
+    tokens_used: int
+    # tsc+eslint diagnostics from this round, formatted by _compile_ts_code.
+    # Empty string when the round produced compiling code.
+    compiler_output: str
+
+
+@dataclass
+class SStarSampleRecord:
+    """Final state of one S* sample after up to R rounds."""
+    sample_idx: int
+    final_round_idx: int
+    rounds: list[SStarSampleRoundRecord]
+    final_code: str
+    final_compiles: bool
+    final_error_count: int
+    total_tokens: int
+    selected: bool = False
+
+
+def _s_star_select_best_idx(records: list[SStarSampleRecord]) -> int:
+    """Lexicographic argmin selection: prefer compiling, then min errors, then first idx.
+
+    Sort key per sample i: (not final_compiles, final_error_count, i).
+    Mirrors S* `selection=first` semantics for the no-behavioral-test setup.
+    """
+    if not records:
+        raise ValueError("cannot select from empty records")
+    return min(
+        range(len(records)),
+        key=lambda i: (not records[i].final_compiles, records[i].final_error_count, i),
+    )
+
+
+def _build_s_star_self_debug_prompt(
+    base_prompt: str,
+    rounds: list[SStarSampleRoundRecord],
+    markers: WriteRegionMarkers,
+) -> str:
+    """Build a self-debug prompt that accumulates prior code + tsc+eslint feedback.
+
+    Format mirrors S*'s `prompt_with_trace` accumulation. The trailing
+    instruction tells the model how to emit corrected code via write-region
+    markers (we do not rely on markdown fences).
+    """
+    parts = [base_prompt.rstrip()]
+    for prev in rounds:
+        parts.append(f"\n[Round {prev.round_idx} Generated code]:\n{prev.code}")
+        feedback_text = _format_compile_feedback(prev.compiler_output)
+        parts.append(f"\n[Round {prev.round_idx} Test Feedback]:\n{feedback_text}")
+    parts.append(
+        "\nThe previous TypeScript code failed verification (tsc and/or "
+        "eslint). Fix the verification errors and return a full corrected "
+        "TypeScript program.\n"
+        f"Output the corrected code inside {markers.begin_marker} ... "
+        f"{markers.end_marker} markers.\n"
+        "Do not use markdown fences inside the write region."
+    )
+    return "\n".join(parts)
+
+
+def _run_s_star(
+    generator: GeneratorAdapter,
+    prompt: str,
+    budget: Budget,
+    markers: WriteRegionMarkers,
+    sample: TranslationSample,
+    n: int,
+    num_rounds: int,
+) -> tuple[str, str, list[SStarSampleRecord], list[dict]]:
+    """Run S*-style baseline: N samples x up to R rounds of compile-based self-debug.
+
+    Stage 1 (Generation):
+        For each sample idx in 0..N-1:
+            round 0: generate fresh from `prompt` (same shape as BoN)
+            for r in 1..num_rounds-1:
+                if previous round compiled: break early (selfdebug_decision="exit")
+                else: regenerate with prior code + tsc+eslint diagnostics as feedback
+
+    Stage 2 (Selection):
+        Lexicographic argmin over (not final_compiles, final_error_count, idx).
+        Prefer compiling samples; among those prefer fewer tsc+eslint errors;
+        ties broken by first-appearing.
+
+    Token budget is posthoc accounting only (matches BoN). Unlike BoN, all N
+    samples are run regardless of whether earlier ones compile cleanly.
+    """
+    records: list[SStarSampleRecord] = []
+    trace_log: list[dict] = []
+    raw_outputs_final: list[str] = []
+
+    for idx in range(n):
+        rounds: list[SStarSampleRoundRecord] = []
+        last_raw_output = ""
+
+        for r in range(num_rounds):
+            if r == 0:
+                messages = [
+                    GenerateMessage(role="user", content=prompt, stop=True),
+                    GenerateMessage(role="assistant", content="", stop=False),
+                ]
+            else:
+                # Self-debug: feed prior rounds' code + tsc+eslint diagnostics.
+                self_debug_prompt = _build_s_star_self_debug_prompt(
+                    base_prompt=prompt,
+                    rounds=rounds,
+                    markers=markers,
+                )
+                messages = [
+                    GenerateMessage(role="user", content=self_debug_prompt, stop=True),
+                    GenerateMessage(role="assistant", content="", stop=False),
+                ]
+
+            with _temporary_no_stopping_criteria(generator):
+                raw_output, delta_tokens = _generate_bon_round(generator, messages)
+            budget.add_tokens(delta_tokens)
+            last_raw_output = raw_output
+
+            extracted = _extract_write_region_code(raw_output, markers)
+            if extracted is None or not extracted.strip():
+                compiles = False
+                error_count = _EMPTY_CODE_ERROR_SENTINEL
+                code_text = extracted or ""
+                verifier_output = "- verifier received empty TS code (no code extracted from model output)"
+            else:
+                code_text = extracted
+                compiles, verifier_output, error_count = _compile_ts_code(code_text, sample)
+
+            round_record = SStarSampleRoundRecord(
+                sample_idx=idx,
+                round_idx=r,
+                code=code_text,
+                compiles=compiles,
+                error_count=error_count,
+                tokens_used=delta_tokens,
+                compiler_output="" if compiles else verifier_output,
+            )
+            rounds.append(round_record)
+
+            trace_log.append({
+                "phase": "s_star",
+                "sample_idx": idx,
+                "round_idx": r,
+                "tokens": delta_tokens,
+                "verifier": "tsc+eslint",
+                "verdict": "pass" if compiles else "fail",
+                "compiles": compiles,
+                "errors": error_count,
+                "verifier_output": verifier_output,
+                "code_hash": hash(code_text) & 0xFFFFFFFF,
+                "selected": False,
+            })
+
+            # selfdebug_decision="exit": stop early once a sample compiles.
+            if compiles:
+                break
+
+        last_round = rounds[-1]
+        records.append(SStarSampleRecord(
+            sample_idx=idx,
+            final_round_idx=last_round.round_idx,
+            rounds=rounds,
+            final_code=last_round.code,
+            final_compiles=last_round.compiles,
+            final_error_count=last_round.error_count,
+            total_tokens=sum(rr.tokens_used for rr in rounds),
+        ))
+        raw_outputs_final.append(last_raw_output)
+
+    if not records:
+        return "", "", [], trace_log
+
+    best_idx = _s_star_select_best_idx(records)
+    records[best_idx].selected = True
+
+    # Mark the selected sample's FINAL round in the trace as selected. Since
+    # trace entries are appended (sample_idx, round_idx) in order, the chosen
+    # entry is the last one matching (best_idx, final_round_idx).
+    final_round_idx = records[best_idx].final_round_idx
+    for entry in trace_log:
+        if entry["sample_idx"] == best_idx and entry["round_idx"] == final_round_idx:
+            entry["selected"] = True
+
+    return (
+        records[best_idx].final_code,
+        raw_outputs_final[best_idx],
+        records,
+        trace_log,
+    )
+
+
 # -- Runner --------------------------------------------------------------------
 
 def run_single(
@@ -812,6 +1017,8 @@ def run_single(
     markers: WriteRegionMarkers = DEFAULT_WRITE_REGION_MARKERS,
     budget_k: float | None = None,
     bon_n: int | None = None,
+    s_star_n: int | None = None,
+    s_star_num_rounds: int | None = None,
 ) -> RunResult:
     sample = load_sample(case_dir)
     js_source = sample.source_code
@@ -829,6 +1036,55 @@ def run_single(
     oracle_factory = lambda: cast(list[Oracle], [TscOracle(), EslintOracle()])
 
     t0 = time.time()
+
+    if config_name == "s_star":
+        if s_star_n is None or s_star_n <= 0:
+            raise ValueError(
+                f"s_star_n must be a positive integer for strategy 's_star', got {s_star_n!r}"
+            )
+        if s_star_num_rounds is None or s_star_num_rounds <= 0:
+            raise ValueError(
+                f"s_star_num_rounds must be a positive integer for strategy 's_star', "
+                f"got {s_star_num_rounds!r}"
+            )
+        selected_code, _selected_raw, s_star_records, s_star_trace = _run_s_star(
+            generator=generator,
+            prompt=prompt,
+            budget=budget,
+            markers=markers,
+            sample=sample,
+            n=s_star_n,
+            num_rounds=s_star_num_rounds,
+        )
+        elapsed = time.time() - t0
+        selected_record = next((r for r in s_star_records if r.selected), None)
+        compiles = selected_record.final_compiles if selected_record is not None else False
+        final_verdict = "pass" if compiles else "fail"
+        saved_output_path = None
+        if final_verdict == "pass":
+            saved_output_path = _save_pass_output(
+                pass_output_dir=pass_output_dir,
+                case_id=case_id,
+                config_name=config_name,
+                final_code=selected_code,
+            )
+        total_rounds = sum(len(rec.rounds) for rec in s_star_records)
+        feedback_used = sum(1 for rec in s_star_records for _ in rec.rounds[1:])
+        return RunResult(
+            case_id=case_id,
+            config=config_name,
+            final_verdict=final_verdict,
+            total_tokens=budget.gen_tokens_used,
+            total_steps=total_rounds,
+            elapsed_s=round(elapsed, 1),
+            verify_count=total_rounds,
+            feedback_count=feedback_used,
+            rollback_count=0,
+            commit_count=0,
+            compiles=compiles,
+            saved_output_path=saved_output_path,
+            trace_log=s_star_trace,
+        )
 
     if config_name == "bon-nsr":
         if bon_n is None or bon_n <= 0:
@@ -1091,22 +1347,46 @@ def print_summary(
 # -- Main ----------------------------------------------------------------------
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="JS->TS translation experiment (naive, dtv, or bon-nsr)")
+    parser = argparse.ArgumentParser(description="JS->TS translation experiment (naive, dtv, bon-nsr, or s_star)")
     parser.add_argument("case_ids", nargs="*", help="Case IDs to run")
     parser.add_argument("--all", action="store_true", help="Run all cases in the dataset directory")
     parser.add_argument("--dataset-dir", type=Path, default=DATASET_DIR, help="Dataset directory")
     parser.add_argument("--output", type=Path, default=OUTPUT_PATH, help="Output JSON path")
     parser.add_argument(
         "--strategy",
-        choices=("naive", "dtv", "bon-nsr"),
+        choices=("naive", "dtv", "bon-nsr", "s_star"),
         required=True,
-        help="Generation strategy: naive (one-shot), dtv (verified), or bon-nsr (Best-of-N, no per-sample self-repair)",
+        help=(
+            "Generation strategy: "
+            "naive (one-shot), dtv (verified), "
+            "bon-nsr (Best-of-N, no per-sample self-repair), "
+            "s_star (S*-style: parallel sampling + iterative compile-based self-debug)"
+        ),
     )
     parser.add_argument(
         "--bon-n",
         type=int,
         default=None,
         help="Number of samples for --strategy bon-nsr (required when strategy=bon-nsr; no default)",
+    )
+    parser.add_argument(
+        "--s-star-n",
+        type=int,
+        default=None,
+        help=(
+            "Number of parallel samples for --strategy s_star "
+            "(default 8 when omitted). Only valid with --strategy=s_star."
+        ),
+    )
+    parser.add_argument(
+        "--s-star-num-rounds",
+        type=int,
+        default=None,
+        help=(
+            "Number of self-debug rounds per sample for --strategy s_star "
+            "(default 3 when omitted = 1 initial + 2 debug; matches S* paper R=2 debug rounds). "
+            "Only valid with --strategy=s_star."
+        ),
     )
     parser.add_argument(
         "--backend",
@@ -1136,6 +1416,29 @@ def main() -> None:
             parser.error(f"--bon-n must be a positive integer, got {args.bon_n}")
     elif args.bon_n is not None:
         parser.error(f"--bon-n is only valid with --strategy=bon-nsr (got --strategy={args.strategy})")
+
+    if args.strategy == "s_star":
+        if args.s_star_n is None:
+            args.s_star_n = 8
+        elif args.s_star_n <= 0:
+            parser.error(f"--s-star-n must be a positive integer, got {args.s_star_n}")
+        if args.s_star_num_rounds is None:
+            args.s_star_num_rounds = 3
+        elif args.s_star_num_rounds <= 0:
+            parser.error(
+                f"--s-star-num-rounds must be a positive integer, got {args.s_star_num_rounds}"
+            )
+    else:
+        if args.s_star_n is not None:
+            parser.error(
+                f"--s-star-n is only valid with --strategy=s_star "
+                f"(got --strategy={args.strategy})"
+            )
+        if args.s_star_num_rounds is not None:
+            parser.error(
+                f"--s-star-num-rounds is only valid with --strategy=s_star "
+                f"(got --strategy={args.strategy})"
+            )
 
     dataset_dir: Path = args.dataset_dir
     if args.all:
@@ -1200,6 +1503,8 @@ def main() -> None:
     strategy_desc = args.strategy
     if args.strategy == "bon-nsr":
         strategy_desc = f"bon-nsr (N={args.bon_n})"
+    elif args.strategy == "s_star":
+        strategy_desc = f"s_star (N={args.s_star_n}, R={args.s_star_num_rounds})"
     print(f"Model loaded: {model_name}")
     print(f"Backend: {args.backend}")
     print(f"Strategy: {strategy_desc}")
@@ -1226,6 +1531,8 @@ def main() -> None:
                     markers=markers,
                     budget_k=budget_k,
                     bon_n=args.bon_n,
+                    s_star_n=args.s_star_n,
+                    s_star_num_rounds=args.s_star_num_rounds,
                 )
             except Exception as exc:
                 import traceback
