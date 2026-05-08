@@ -86,7 +86,7 @@ MAX_NEW_LENGTH_BON = 8192
 INNER_MAX_STEPS = 2000
 OUTER_MAX_ROUNDS = 2000
 PROMPT_PREFIX = "Translate the following C code into Rust:"
-DATASET_DIR = Path(os.environ.get("DTV_DATASET_DIR", "/home/qsdrqs/projects/agent_fuzz/selected_data_output"))
+DATASET_DIR = Path(os.environ.get("DTV_DATASET_DIR", "dataset"))
 RESULT_DIR = Path("result")
 OUTPUT_PATH = RESULT_DIR / "ab_experiment_results.json"
 
