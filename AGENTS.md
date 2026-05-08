@@ -11,9 +11,6 @@
 7. In tests, prefer multi-line strings and assert the whole string directly whenever practical.
 8. Do not add future-proofing, speculative generalization, or branches for unrequested future scenarios. Implement only the current validated scope unless the user explicitly asks for broader behavior.
 
-### Canonical Working Directory
-The `js2ts` worktree (`/home/qsdrqs/projects/dtv-worktrees/js2ts`) is the latest active development directory and the source of truth for BOTH the JS->TS and the C->Rust task. Older worktrees (e.g. `c2rust-adaptiveness-eval`) are deprecated and must not be used. All experiments, scripts, and DeltaAI syncs run from this worktree.
-
 ### Goal
 Implement Decoding Time Verification (DTV): integrate deterministic program verifiers into the decoding loop
 (no training; a fixed pretrained code model used as a black-box generator).
