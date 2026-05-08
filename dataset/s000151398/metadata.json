@@ -1,0 +1,41 @@
+{
+  "tool_versions": {
+    "afl_fuzz": "afl-fuzz++4.35c",
+    "afl_cmin": "Hint: install python module \"tqdm\" to show progress bar",
+    "clang": "clang version 21.1.8",
+    "llvm_cov": "LLVM (http://llvm.org/):",
+    "llvm_profdata": "LLVM (http://llvm.org/):"
+  },
+  "parameters": {
+    "fuzz_seconds": 60,
+    "seed_candidates": 25,
+    "seed_timeout_ms": 5000,
+    "cov_timeout_ms": 5000,
+    "rng_seed": 42,
+    "skip_minimize": false,
+    "cmin_timeout": 300,
+    "valgrind_filter": true,
+    "rerun_with_seed": false,
+    "reused_existing_seeds": false
+  },
+  "counts": {
+    "llm_seed_count": 27,
+    "valid_seed_count": 22,
+    "afl_queue_count": 35,
+    "min_corpus_count": 19,
+    "final_testcase_count": 17,
+    "filtered_out_count": 2
+  },
+  "status": "success",
+  "error": null,
+  "coverage": {
+    "lines": {
+      "covered": 39,
+      "total": 39
+    },
+    "branches": {
+      "covered": 44,
+      "total": 46
+    }
+  }
+}

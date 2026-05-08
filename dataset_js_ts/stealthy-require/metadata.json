@@ -1,0 +1,9 @@
+{
+  "package_name": "stealthy-require",
+  "subset": "top1k-untyped-nodeps-es6",
+  "original_entry": "lib/index.js",
+  "original_files": 2,
+  "bundled_loc": 81,
+  "tsc_error_count": 20,
+  "source_dir": "/home/qsdrqs/Downloads/TypeWeaver_ecoop2023-artifact/data/full/original/top1k-untyped-nodeps-es6/stealthy-require"
+}

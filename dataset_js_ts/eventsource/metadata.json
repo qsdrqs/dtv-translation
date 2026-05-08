@@ -1,0 +1,9 @@
+{
+  "package_name": "eventsource",
+  "subset": "top1k-typed-nodeps-es6",
+  "original_entry": "lib/eventsource.js",
+  "original_files": 5,
+  "bundled_loc": 494,
+  "tsc_error_count": 76,
+  "source_dir": "/home/qsdrqs/Downloads/TypeWeaver_ecoop2023-artifact/data/full/original/top1k-typed-nodeps-es6/eventsource"
+}

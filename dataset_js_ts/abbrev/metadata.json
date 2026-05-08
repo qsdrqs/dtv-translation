@@ -1,0 +1,9 @@
+{
+  "package_name": "abbrev",
+  "subset": "top1k-typed-nodeps-es6",
+  "original_entry": "abbrev.js",
+  "original_files": 1,
+  "bundled_loc": 63,
+  "tsc_error_count": 6,
+  "source_dir": "/home/qsdrqs/Downloads/TypeWeaver_ecoop2023-artifact/data/full/original/top1k-typed-nodeps-es6/abbrev"
+}

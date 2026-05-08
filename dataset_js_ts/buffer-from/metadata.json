@@ -1,0 +1,9 @@
+{
+  "package_name": "buffer-from",
+  "subset": "top1k-typed-nodeps-es6",
+  "original_entry": "index.js",
+  "original_files": 1,
+  "bundled_loc": 72,
+  "tsc_error_count": 9,
+  "source_dir": "/home/qsdrqs/Downloads/TypeWeaver_ecoop2023-artifact/data/full/original/top1k-typed-nodeps-es6/buffer-from"
+}

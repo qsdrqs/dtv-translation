@@ -1,0 +1,9 @@
+{
+  "package_name": "postcss-modules-extract-imports",
+  "subset": "top1k-typed-nodeps-es6",
+  "original_entry": "src/index.js",
+  "original_files": 4,
+  "bundled_loc": 265,
+  "tsc_error_count": 46,
+  "source_dir": "/home/qsdrqs/Downloads/TypeWeaver_ecoop2023-artifact/data/full/original/top1k-typed-nodeps-es6/postcss-modules-extract-imports"
+}

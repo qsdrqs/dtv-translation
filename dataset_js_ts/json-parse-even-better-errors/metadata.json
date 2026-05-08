@@ -1,0 +1,9 @@
+{
+  "package_name": "json-parse-even-better-errors",
+  "subset": "top1k-untyped-nodeps-es6",
+  "original_entry": "index.js",
+  "original_files": 1,
+  "bundled_loc": 119,
+  "tsc_error_count": 16,
+  "source_dir": "/home/qsdrqs/Downloads/TypeWeaver_ecoop2023-artifact/data/full/original/top1k-untyped-nodeps-es6/json-parse-even-better-errors"
+}

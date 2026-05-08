@@ -1,0 +1,13 @@
+12
+insert 5
+insert 2
+insert 8
+find 2
+find 8
+find 7
+insert 7
+find 7
+print
+find 5
+find 9
+print

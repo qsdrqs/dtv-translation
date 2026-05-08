@@ -1,0 +1,9 @@
+{
+  "package_name": "@sellside/emitter",
+  "subset": "top1k-untyped-nodeps-es6",
+  "original_entry": "index.js",
+  "original_files": 2,
+  "bundled_loc": 268,
+  "tsc_error_count": 49,
+  "source_dir": "/home/qsdrqs/Downloads/TypeWeaver_ecoop2023-artifact/data/full/original/top1k-untyped-nodeps-es6/@sellside_emitter"
+}

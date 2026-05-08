@@ -1,0 +1,15 @@
+2
+10 10
+A 1
+0 0 9 9 B
+B 1
+0 0 9 9 A
+7
+click 1 1
+click 2 2
+click 3 3
+show
+back
+show
+forward
+0

@@ -1,0 +1,9 @@
+{
+  "package_name": "html-escaper",
+  "subset": "top1k-typed-nodeps-es6",
+  "original_entry": "cjs/index.js",
+  "original_files": 5,
+  "bundled_loc": 73,
+  "tsc_error_count": 8,
+  "source_dir": "/home/qsdrqs/Downloads/TypeWeaver_ecoop2023-artifact/data/full/original/top1k-typed-nodeps-es6/html-escaper"
+}

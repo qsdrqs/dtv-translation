@@ -1,0 +1,8 @@
+1
+push 1 A
+push 1 B
+push 1 C
+pop 1
+pop 1
+pop 1
+quit

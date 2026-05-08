@@ -1,0 +1,9 @@
+{
+  "package_name": "@gar/promisify",
+  "subset": "top1k-untyped-nodeps-es6",
+  "original_entry": "index.js",
+  "original_files": 1,
+  "bundled_loc": 36,
+  "tsc_error_count": 6,
+  "source_dir": "/home/qsdrqs/Downloads/TypeWeaver_ecoop2023-artifact/data/full/original/top1k-untyped-nodeps-es6/@gar_promisify"
+}

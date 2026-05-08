@@ -1,0 +1,9 @@
+{
+  "package_name": "postcss-value-parser",
+  "subset": "top1k-typed-nodeps-es6",
+  "original_entry": "lib/index.js",
+  "original_files": 5,
+  "bundled_loc": 416,
+  "tsc_error_count": 59,
+  "source_dir": "/home/qsdrqs/Downloads/TypeWeaver_ecoop2023-artifact/data/full/original/top1k-typed-nodeps-es6/postcss-value-parser"
+}

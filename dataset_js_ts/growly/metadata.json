@@ -1,0 +1,9 @@
+{
+  "package_name": "growly",
+  "subset": "top1k-untyped-nodeps-es6",
+  "original_entry": "lib/growly.js",
+  "original_files": 4,
+  "bundled_loc": 392,
+  "tsc_error_count": 57,
+  "source_dir": "/home/qsdrqs/Downloads/TypeWeaver_ecoop2023-artifact/data/full/original/top1k-untyped-nodeps-es6/growly"
+}

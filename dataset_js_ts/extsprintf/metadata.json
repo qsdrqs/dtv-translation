@@ -1,0 +1,9 @@
+{
+  "package_name": "extsprintf",
+  "subset": "top1k-typed-nodeps-es6",
+  "original_entry": "lib/extsprintf.js",
+  "original_files": 2,
+  "bundled_loc": 229,
+  "tsc_error_count": 20,
+  "source_dir": "/home/qsdrqs/Downloads/TypeWeaver_ecoop2023-artifact/data/full/original/top1k-typed-nodeps-es6/extsprintf"
+}

@@ -1,0 +1,7 @@
+2
+push 1 R
+push 2 G
+move 1 2
+pop 2
+pop 2
+quit

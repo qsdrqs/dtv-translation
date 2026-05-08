@@ -1,0 +1,9 @@
+{
+  "package_name": "promise-inflight",
+  "subset": "top1k-typed-nodeps-es6",
+  "original_entry": "inflight.js",
+  "original_files": 1,
+  "bundled_loc": 35,
+  "tsc_error_count": 16,
+  "source_dir": "/home/qsdrqs/Downloads/TypeWeaver_ecoop2023-artifact/data/full/original/top1k-typed-nodeps-es6/promise-inflight"
+}

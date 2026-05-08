@@ -1,0 +1,9 @@
+{
+  "package_name": "run-async",
+  "subset": "top1k-untyped-nodeps-es6",
+  "original_entry": "index.js",
+  "original_files": 1,
+  "bundled_loc": 98,
+  "tsc_error_count": 12,
+  "source_dir": "/home/qsdrqs/Downloads/TypeWeaver_ecoop2023-artifact/data/full/original/top1k-untyped-nodeps-es6/run-async"
+}

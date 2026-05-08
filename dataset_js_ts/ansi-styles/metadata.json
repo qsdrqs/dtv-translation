@@ -1,0 +1,9 @@
+{
+  "package_name": "ansi-styles",
+  "subset": "top1k-typed-nodeps-es6",
+  "original_entry": "index.js",
+  "original_files": 2,
+  "bundled_loc": 219,
+  "tsc_error_count": 36,
+  "source_dir": "/home/qsdrqs/Downloads/TypeWeaver_ecoop2023-artifact/data/full/original/top1k-typed-nodeps-es6/ansi-styles"
+}

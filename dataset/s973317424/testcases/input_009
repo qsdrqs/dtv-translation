@@ -1,0 +1,17 @@
+3
+100 100
+A 2
+0 0 49 99 B
+50 0 99 99 C
+B 0
+C 0
+8
+show
+click 0 0
+show
+back
+click 99 99
+show
+back
+show
+0

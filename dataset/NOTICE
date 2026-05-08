@@ -1,0 +1,51 @@
+DTV C-to-Rust Translation Dataset
+=================================
+
+This directory contains C source programs and differential-testing inputs used
+in the C-to-Rust evaluation of the DTV (Decoding Time Verification) framework.
+
+Per-case contents:
+  source.c       Original C program.
+  testcases/*    Differential-testing standard-input files.
+  metadata.json  Construction record (tool versions, parameters, counts).
+
+Source attribution
+------------------
+
+The C programs in `source.c` are derived from IBM Project CodeNet:
+
+  Project CodeNet: A Large-Scale AI for Code Dataset for Learning a
+  Diversity of Coding Tasks.
+  Ruchi Puri, David S. Kung, Geert Janssen, Wei Zhang, Giacomo Domeniconi,
+  Vladmir Zolotov, Julian Dolby, Jie Chen, Mihir Choudhury, Lindsey Decker,
+  Veronika Thost, Luca Buratti, Saurabh Pujar, Ulrich Finkler.
+  NeurIPS 2021 Datasets and Benchmarks Track.
+  https://github.com/IBM/Project_CodeNet
+  arXiv:2105.12655
+
+Project CodeNet is distributed under the Apache License, Version 2.0
+(see ./LICENSE).
+
+Selection and filtering applied to CodeNet for this dataset is documented in
+Appendix E of the DTV paper:
+
+  - Filter to C submissions with status `Accepted` that read standard input
+    (scanf, fgets, getchar, ...).
+  - Per problem retain the median-byte-size submission.
+  - Stratified-sample 400 candidates by source byte size, run the AFL++
+    pipeline (LLM seed generation, fuzzing, minimization, sanitizer filter),
+    and uniformly sample 300 from the 306 successful outputs.
+
+Generated content (this work)
+-----------------------------
+
+The following per-case content is produced by our pipeline rather than copied
+from CodeNet, and is released under the same Apache License 2.0 as the
+underlying source programs:
+
+  testcases/*    Differential-testing inputs generated via LLM-seeded AFL++
+                 fuzzing followed by sanitizer filtering.
+  metadata.json  Pipeline configuration, tool versions, and per-stage counts.
+
+The AFL++ pipeline that produces these files is maintained in a separate
+repository (`agent_fuzz`) and is not included here.

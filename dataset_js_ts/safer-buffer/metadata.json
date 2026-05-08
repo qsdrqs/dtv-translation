@@ -1,0 +1,9 @@
+{
+  "package_name": "safer-buffer",
+  "subset": "top1k-typed-nodeps-es6",
+  "original_entry": "safer.js",
+  "original_files": 2,
+  "bundled_loc": 76,
+  "tsc_error_count": 25,
+  "source_dir": "/home/qsdrqs/Downloads/TypeWeaver_ecoop2023-artifact/data/full/original/top1k-typed-nodeps-es6/safer-buffer"
+}

@@ -1,0 +1,9 @@
+{
+  "package_name": "create-require",
+  "subset": "top1k-typed-nodeps-es6",
+  "original_entry": "create-require.js",
+  "original_files": 2,
+  "bundled_loc": 49,
+  "tsc_error_count": 6,
+  "source_dir": "/home/qsdrqs/Downloads/TypeWeaver_ecoop2023-artifact/data/full/original/top1k-typed-nodeps-es6/create-require"
+}

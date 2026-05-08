@@ -1,0 +1,9 @@
+{
+  "package_name": "loader-runner",
+  "subset": "top1k-typed-nodeps-es6",
+  "original_entry": "lib/LoaderRunner.js",
+  "original_files": 3,
+  "bundled_loc": 480,
+  "tsc_error_count": 93,
+  "source_dir": "/home/qsdrqs/Downloads/TypeWeaver_ecoop2023-artifact/data/full/original/top1k-typed-nodeps-es6/loader-runner"
+}

@@ -1,0 +1,9 @@
+{
+  "package_name": "ansi-colors",
+  "subset": "top1k-typed-nodeps-es6",
+  "original_entry": "index.js",
+  "original_files": 21,
+  "bundled_loc": 182,
+  "tsc_error_count": 51,
+  "source_dir": "/home/qsdrqs/Downloads/TypeWeaver_ecoop2023-artifact/data/full/original/top1k-typed-nodeps-es6/ansi-colors"
+}

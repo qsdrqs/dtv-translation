@@ -1,0 +1,9 @@
+{
+  "package_name": "delayed-stream",
+  "subset": "top1k-untyped-nodeps-es6",
+  "original_entry": "lib/delayed_stream.js",
+  "original_files": 1,
+  "bundled_loc": 108,
+  "tsc_error_count": 16,
+  "source_dir": "/home/qsdrqs/Downloads/TypeWeaver_ecoop2023-artifact/data/full/original/top1k-untyped-nodeps-es6/delayed-stream"
+}

@@ -1,0 +1,9 @@
+{
+  "package_name": "jest-pnp-resolver",
+  "subset": "top1k-typed-nodeps-es6",
+  "original_entry": "index.js",
+  "original_files": 3,
+  "bundled_loc": 51,
+  "tsc_error_count": 5,
+  "source_dir": "/home/qsdrqs/Downloads/TypeWeaver_ecoop2023-artifact/data/full/original/top1k-typed-nodeps-es6/jest-pnp-resolver"
+}

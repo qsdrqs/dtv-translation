@@ -23,6 +23,7 @@ out_dtv_rollback_analysis/
 # Generated plots
 plots/
 plots_old/
+plots_js_ts/
 
 # Logs
 *.log
@@ -36,4 +37,13 @@ debug_crash_*.json
 # Local infrastructure/developing scripts
 develop/
 
-dataset_js_ts/
+# C->Rust dataset: keep source.c / testcases / metadata.json per case;
+# exclude AFL pipeline build artifacts (rebuildable from source.c via paper Appendix E).
+dataset/*/afl_corpus/
+dataset/*/afl_out/
+dataset/*/coverage/
+dataset/*/llm_seeds/
+dataset/*/min_corpus/
+dataset/*/prog_afl
+dataset/*/prog_cov
+dataset/*/prog_san

@@ -1,0 +1,9 @@
+{
+  "package_name": "icss-utils",
+  "subset": "top1k-typed-nodeps-es6",
+  "original_entry": "src/index.js",
+  "original_files": 7,
+  "bundled_loc": 185,
+  "tsc_error_count": 23,
+  "source_dir": "/home/qsdrqs/Downloads/TypeWeaver_ecoop2023-artifact/data/full/original/top1k-typed-nodeps-es6/icss-utils"
+}

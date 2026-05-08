@@ -1,0 +1,9 @@
+{
+  "package_name": "normalize-range",
+  "subset": "top1k-untyped-nodeps-es6",
+  "original_entry": "index.js",
+  "original_files": 1,
+  "bundled_loc": 55,
+  "tsc_error_count": 26,
+  "source_dir": "/home/qsdrqs/Downloads/TypeWeaver_ecoop2023-artifact/data/full/original/top1k-untyped-nodeps-es6/normalize-range"
+}

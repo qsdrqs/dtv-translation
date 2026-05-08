@@ -1,0 +1,9 @@
+{
+  "package_name": "webidl-conversions",
+  "subset": "top1k-typed-nodeps-es6",
+  "original_entry": "lib/index.js",
+  "original_files": 1,
+  "bundled_loc": 448,
+  "tsc_error_count": 61,
+  "source_dir": "/home/qsdrqs/Downloads/TypeWeaver_ecoop2023-artifact/data/full/original/top1k-typed-nodeps-es6/webidl-conversions"
+}
