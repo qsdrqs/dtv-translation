@@ -5,5 +5,5 @@
   "original_files": 5,
   "bundled_loc": 82,
   "tsc_error_count": 14,
-  "source_dir": "/home/qsdrqs/Downloads/TypeWeaver_ecoop2023-artifact/data/full/original/top1k-untyped-nodeps-es6/json-stable-stringify-without-jsonify"
+  "source_dir": "top1k-untyped-nodeps-es6/json-stable-stringify-without-jsonify"
 }

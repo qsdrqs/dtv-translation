@@ -5,5 +5,5 @@
   "original_files": 4,
   "bundled_loc": 956,
   "tsc_error_count": 100,
-  "source_dir": "/home/qsdrqs/Downloads/TypeWeaver_ecoop2023-artifact/data/full/original/top1k-typed-nodeps-es6/symbol-tree"
+  "source_dir": "top1k-typed-nodeps-es6/symbol-tree"
 }

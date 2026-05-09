@@ -382,7 +382,7 @@ def save_package(
         "original_files": count_original_files(package_spec.package_dir),
         "bundled_loc": bundled_loc,
         "tsc_error_count": tsc_error_count,
-        "source_dir": str(package_spec.package_dir.resolve()),
+        "source_dir": f"{package_spec.subset}/{package_spec.package_name}",
     }
     metadata_path = package_output_dir / "metadata.json"
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")

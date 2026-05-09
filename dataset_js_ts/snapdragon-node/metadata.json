@@ -5,5 +5,5 @@
   "original_files": 2,
   "bundled_loc": 706,
   "tsc_error_count": 107,
-  "source_dir": "/home/qsdrqs/Downloads/TypeWeaver_ecoop2023-artifact/data/full/original/top1k-untyped-nodeps-es6/snapdragon-node"
+  "source_dir": "top1k-untyped-nodeps-es6/snapdragon-node"
 }

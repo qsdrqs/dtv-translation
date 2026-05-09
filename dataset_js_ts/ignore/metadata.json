@@ -5,5 +5,5 @@
   "original_files": 2,
   "bundled_loc": 603,
   "tsc_error_count": 94,
-  "source_dir": "/home/qsdrqs/Downloads/TypeWeaver_ecoop2023-artifact/data/full/original/top1k-typed-nodeps-es6/ignore"
+  "source_dir": "top1k-typed-nodeps-es6/ignore"
 }

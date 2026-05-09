@@ -5,5 +5,5 @@
   "original_files": 1,
   "bundled_loc": 70,
   "tsc_error_count": 15,
-  "source_dir": "/home/qsdrqs/Downloads/TypeWeaver_ecoop2023-artifact/data/full/original/top1k-untyped-nodeps-es6/snapdragon-capture"
+  "source_dir": "top1k-untyped-nodeps-es6/snapdragon-capture"
 }

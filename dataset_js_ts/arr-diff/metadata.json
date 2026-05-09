@@ -5,5 +5,5 @@
   "original_files": 29,
   "bundled_loc": 47,
   "tsc_error_count": 3,
-  "source_dir": "/home/qsdrqs/Downloads/TypeWeaver_ecoop2023-artifact/data/full/original/top1k-typed-nodeps-es6/arr-diff"
+  "source_dir": "top1k-typed-nodeps-es6/arr-diff"
 }

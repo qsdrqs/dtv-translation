@@ -5,5 +5,5 @@
   "original_files": 7,
   "bundled_loc": 371,
   "tsc_error_count": 96,
-  "source_dir": "/home/qsdrqs/Downloads/TypeWeaver_ecoop2023-artifact/data/full/original/top1k-untyped-nodeps-es6/v8-compile-cache"
+  "source_dir": "top1k-untyped-nodeps-es6/v8-compile-cache"
 }
